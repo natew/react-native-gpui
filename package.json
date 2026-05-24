@@ -1,0 +1,11 @@
+{
+    "name": "react-native-gpui",
+    "version": "0.1.0",
+    "private": true,
+    "scripts": {
+        "demo": "cd rust && cargo run --release --bin rngpui-demo",
+        "demo:debug": "cd rust && cargo run --bin rngpui-demo",
+        "demo:ts": "cd ts && bun run src/demo.tsx",
+        "demo:ts:debug": "cd rust && cargo build --bin rngpui-service && cd ../ts && bun run src/demo.tsx"
+    }
+}

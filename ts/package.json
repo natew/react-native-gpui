@@ -1,0 +1,20 @@
+{
+    "name": "react-native-gpui-ts",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "demo": "bun run src/demo.tsx",
+        "demo:build": "bun build --outdir dist src/demo.tsx"
+    },
+    "dependencies": {
+        "react": "^19.0.0",
+        "react-reconciler": "^0.31.0"
+    },
+    "devDependencies": {
+        "@types/node": "25.9.1",
+        "@types/react": "^19.0.0",
+        "@types/react-reconciler": "^0.31.0",
+        "typescript": "^5.7.0"
+    }
+}

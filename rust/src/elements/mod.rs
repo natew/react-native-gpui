@@ -1,8 +1,16 @@
 mod div;
+mod image;
+pub mod input;
+mod svg;
 mod text;
+pub mod webview;
 
 pub use div::ReactDivElement;
+pub use image::ReactImageElement;
+pub use input::ReactInputElement;
+pub use svg::ReactSvgElement;
 pub use text::ReactTextElement;
+pub use webview::ReactWebViewElement;
 
 use gpui::{AnyElement, IntoElement};
 use std::sync::Arc;
@@ -15,23 +23,19 @@ pub struct ReactElement {
     pub global_id: u64,
     pub element_type: String,
     pub text: Option<String>,
+    /// image / webview source uri (for `<Image>` / `<WebView>`).
+    pub src: Option<String>,
+    /// event names this node listens to: "press", "changeText", "layout", …
+    pub events: Vec<String>,
     pub children: Vec<Arc<ReactElement>>,
     pub style: ElementStyle,
-    pub event_handlers: Option<serde_json::Value>,
     pub cached_gpui_style: Option<gpui::Style>,
 }
 
 impl ReactElement {
-    pub fn new(id: u64, element_type: &str, style: ElementStyle) -> Self {
-        Self {
-            global_id: id,
-            element_type: element_type.to_string(),
-            text: None,
-            children: Vec::new(),
-            style,
-            event_handlers: None,
-            cached_gpui_style: None,
-        }
+    /// True if this node listens for the given event name.
+    pub fn listens(&self, name: &str) -> bool {
+        self.events.iter().any(|e| e == name)
     }
 
     pub fn build_gpui_style(&self, default_bg: Option<u32>) -> gpui::Style {
@@ -50,6 +54,12 @@ pub fn create_element(
 ) -> AnyElement {
     match element.element_type.as_str() {
         "text" => ReactTextElement::new(element, window_id, parent_style).into_element(),
+        "svg" => ReactSvgElement::new(element, window_id, parent_style).into_element(),
+        "image" => ReactImageElement::new(element, window_id, parent_style).into_element(),
+        "webview" => ReactWebViewElement::new(element).into_any_element(),
+        "textinput" | "textarea" => {
+            ReactInputElement::new(element, window_id, parent_style).into_element()
+        }
         _ => ReactDivElement::new(element, window_id, parent_style).into_element(),
     }
 }

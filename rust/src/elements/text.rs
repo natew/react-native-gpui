@@ -7,7 +7,7 @@ use crate::style::ElementStyle;
 
 pub struct ReactTextElement {
     element: Arc<ReactElement>,
-    window_id: u64,
+    _window_id: u64,
     _parent_style: Option<ElementStyle>,
 }
 
@@ -19,7 +19,7 @@ impl ReactTextElement {
     ) -> Self {
         Self {
             element,
-            window_id,
+            _window_id: window_id,
             _parent_style: parent_style,
         }
     }
@@ -30,7 +30,14 @@ impl RenderOnce for ReactTextElement {
         let color = self.element.style.color.unwrap_or(0xffffff);
         let size = self.element.style.font_size.unwrap_or(14.0);
         let text = self.element.text.clone().unwrap_or_default();
-        div().text_color(rgb(color)).text_size(px(size)).child(text)
+        let mut el = div().text_color(rgb(color)).text_size(px(size));
+        if let Some(weight) = self.element.style.gpui_font_weight() {
+            el = el.font_weight(weight);
+        }
+        if let Some(lh) = self.element.style.line_height {
+            el = el.line_height(px(lh));
+        }
+        el.child(text)
     }
 }
 

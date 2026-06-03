@@ -1,0 +1,5 @@
+# build outputs (produced by `npm run build`; published to npm via package.json "files")
+dist/
+native/
+node_modules/
+*.tsbuildinfo

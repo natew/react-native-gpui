@@ -1,20 +1,52 @@
 {
-    "name": "react-native-gpui-ts",
+    "name": "react-native-gpui",
     "version": "0.1.0",
-    "private": true,
+    "description": "Write React Native components, render them natively with GPUI (Zed's GPU UI framework).",
     "type": "module",
+    "main": "dist/index.js",
+    "module": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        }
+    },
+    "files": [
+        "dist",
+        "native",
+        "README.md"
+    ],
     "scripts": {
-        "demo": "bun run src/demo.tsx",
-        "demo:build": "bun build --outdir dist src/demo.tsx"
+        "build": "npm run build:rust && npm run build:native && npm run build:ts",
+        "build:rust": "cd ../rust && cargo build --release --bin rngpui-service",
+        "build:native": "mkdir -p native && cp ../rust/target/release/rngpui-service native/rngpui-service",
+        "build:ts": "tsc",
+        "typecheck": "tsc --noEmit",
+        "kitchen": "bun run examples/kitchen-sink.tsx",
+        "superconductor": "bun run examples/superconductor.tsx"
+    },
+    "keywords": [
+        "react-native",
+        "gpui",
+        "zed",
+        "rust",
+        "desktop",
+        "macos",
+        "react-reconciler"
+    ],
+    "license": "MIT",
+    "peerDependencies": {
+        "react": ">=19.0.0"
     },
     "dependencies": {
-        "react": "^19.0.0",
         "react-reconciler": "^0.31.0"
     },
     "devDependencies": {
         "@types/node": "25.9.1",
         "@types/react": "^19.0.0",
         "@types/react-reconciler": "^0.31.0",
+        "react": "^19.0.0",
         "typescript": "^5.7.0"
     }
 }

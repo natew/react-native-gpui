@@ -1,107 +1,95 @@
+/**
+ * Runtime bridge: spawns the rngpui-service GPUI process, streams element trees to
+ * it as newline-delimited JSON over stdin, and parses events back over stdout.
+ */
 import { spawn, ChildProcess } from "child_process";
 import { existsSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
-// ── Element tree types ──────────────────────────────────────────────
-
-export type ElementNode = {
+export type SerializedNode = {
     globalId: number;
-    type: "div" | "text";
+    type: string;
     style?: Record<string, unknown>;
     text?: string;
-    children?: ElementNode[];
+    src?: string;
+    name?: string;
+    placeholder?: string;
+    events?: string[];
+    children?: SerializedNode[];
 };
 
-// ── Runtime bridge: spawns rngpui-service ───────────────────────────
+export type BridgeEvent =
+    | { type: "ready"; width: number; height: number }
+    | { type: "resize"; width: number; height: number }
+    | { type: "event"; id: number; event: string; value?: string; layout?: { x: number; y: number; width: number; height: number } };
 
-let serviceProcess: ChildProcess | null = null;
-
-/**
- * Locate the rngpui-service binary.
- */
-function findServiceBinary(): string {
-    const __dirname = dirname(fileURLToPath(import.meta.url));
-    const candidates = [
-        join(__dirname, "..", "..", "rust", "target", "release", "rngpui-service"),
-        join(__dirname, "..", "..", "rust", "target", "debug", "rngpui-service"),
-    ];
-    for (const p of candidates) {
-        if (existsSync(p)) return p;
-    }
-    return join(__dirname, "..", "..", "rust", "target", "release", "rngpui-service");
+export interface Bridge {
+    update(tree: SerializedNode): void;
+    onEvent(cb: (e: BridgeEvent) => void): void;
+    close(): void;
 }
 
-/**
- * Spawn the GPUI service process with the given element tree.
- * The tree is serialized as JSON and piped to the process's stdin.
- */
-export async function launchWindow(
-    tree: ElementNode | ElementNode[],
-    options?: { width?: number; height?: number }
-): Promise<{ close: () => void; onEvent: (cb: (event: unknown) => void) => void }> {
-    const binaryPath = findServiceBinary();
+function findServiceBinary(): string {
+    // explicit override wins
+    const env = process.env.RNGPUI_SERVICE;
+    if (env && existsSync(env)) return env;
 
-    if (!existsSync(binaryPath)) {
-        throw new Error(
-            `rngpui-service not found at ${binaryPath}. ` +
-                "Build it first: cd rust && cargo build --release --bin rngpui-service"
-        );
+    const here = dirname(fileURLToPath(import.meta.url));
+    const candidates = [
+        // packaged: the binary is copied next to the build output (dist/ or src/)
+        join(here, "native", "rngpui-service"),
+        join(here, "..", "native", "rngpui-service"),
+        // dev: built straight from the workspace's rust crate
+        join(here, "..", "..", "rust", "target", "release", "rngpui-service"),
+        join(here, "..", "..", "rust", "target", "debug", "rngpui-service"),
+    ];
+    for (const p of candidates) if (existsSync(p)) return p;
+    return candidates[0];
+}
+
+export function startBridge(initial: SerializedNode): Bridge {
+    const bin = findServiceBinary();
+    if (!existsSync(bin)) {
+        throw new Error(`rngpui-service not found at ${bin}. Build: cd rust && cargo build --release --bin rngpui-service`);
     }
 
-    const rootArray: ElementNode[] = Array.isArray(tree) ? tree : [tree];
-    const jsonPayload = JSON.stringify(rootArray.length === 1 ? rootArray[0] : {
-        type: "div",
-        globalId: 0,
-        style: { width: options?.width ?? 720, height: options?.height ?? 800, backgroundColor: "#1e1e2e" },
-        children: rootArray,
-    });
+    const proc: ChildProcess = spawn(bin, [], { stdio: ["pipe", "pipe", "pipe"] });
+    const listeners: Array<(e: BridgeEvent) => void> = [];
 
-    serviceProcess = spawn(binaryPath, [], {
-        stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    const eventCallbacks: Array<(event: unknown) => void> = [];
-    const onEvent = (cb: (event: unknown) => void) => {
-        eventCallbacks.push(cb);
-    };
-
-    if (serviceProcess.stdout) {
-        let buffer = "";
-        serviceProcess.stdout.on("data", (chunk: Buffer) => {
-            buffer += chunk.toString();
-            const lines = buffer.split("\n");
-            buffer = lines.pop() ?? "";
+    if (proc.stdout) {
+        let buf = "";
+        proc.stdout.on("data", (chunk: Buffer) => {
+            buf += chunk.toString();
+            const lines = buf.split("\n");
+            buf = lines.pop() ?? "";
             for (const line of lines) {
                 if (!line.trim()) continue;
                 try {
-                    const evt = JSON.parse(line);
-                    for (const cb of eventCallbacks) {
-                        cb(evt);
-                    }
-                } catch {}
+                    const evt = JSON.parse(line) as BridgeEvent;
+                    for (const cb of listeners) cb(evt);
+                } catch {
+                    /* ignore non-JSON log lines */
+                }
             }
         });
     }
-
-    if (serviceProcess.stderr) {
-        serviceProcess.stderr.on("data", (chunk: Buffer) => {
-            console.error("[rngpui]", chunk.toString().trimEnd());
-        });
+    if (proc.stderr) {
+        proc.stderr.on("data", (c: Buffer) => process.stderr.write(c));
     }
+    proc.on("exit", () => process.exit(0));
 
-    // Write initial tree to stdin and close it (single-render mode)
-    if (serviceProcess.stdin) {
-        serviceProcess.stdin.write(jsonPayload + "\n");
-        serviceProcess.stdin.end();
-    }
-
-    const close = () => {
-        if (serviceProcess) {
-            serviceProcess.kill();
-            serviceProcess = null;
-        }
+    const write = (node: SerializedNode) => {
+        if (proc.stdin && proc.stdin.writable) proc.stdin.write(JSON.stringify(node) + "\n");
     };
+    write(initial);
 
-    return { close, onEvent };
+    return {
+        update: write,
+        onEvent: (cb) => listeners.push(cb),
+        close: () => {
+            if (proc.stdin) proc.stdin.end();
+            proc.kill();
+        },
+    };
 }

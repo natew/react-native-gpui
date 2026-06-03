@@ -24,8 +24,15 @@
         "build:ts": "tsc",
         "typecheck": "tsc --noEmit",
         "kitchen": "bun run examples/kitchen-sink.tsx",
-        "superconductor": "bun run examples/superconductor.tsx"
+        "superconductor": "bun run examples/superconductor.tsx",
+        "prepublishOnly": "npm run build"
     },
+    "os": [
+        "darwin"
+    ],
+    "cpu": [
+        "arm64"
+    ],
     "keywords": [
         "react-native",
         "gpui",

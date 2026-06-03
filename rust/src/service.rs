@@ -1,5 +1,5 @@
 use std::io::{self, BufRead};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -10,7 +10,6 @@ use gpui::{
     WindowBounds, WindowOptions,
 };
 use gpui_component::input::{InputEvent, InputState};
-use once_cell::sync::Lazy;
 
 actions!(rngpui, [Quit]);
 
@@ -24,10 +23,6 @@ use style::{Dim, ElementStyle};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-// Latest tree pushed from JS via stdin (after the initial one). The render loop
-// drains this so the window re-renders when React re-renders.
-static PENDING_ROOT: Lazy<Mutex<Option<Arc<ReactElement>>>> = Lazy::new(|| Mutex::new(None));
 
 fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::SeqCst)
@@ -151,10 +146,9 @@ fn collect_layout_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
 
 impl Render for ServiceApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
-        // Apply any newer tree React pushed over stdin.
-        if let Some(new_root) = PENDING_ROOT.lock().ok().and_then(|mut g| g.take()) {
-            self.root = fill_root(new_root);
-        }
+        // The tree is applied (and a re-render scheduled) by the stdin pump task in
+        // `main`, not polled here — rendering is fully on-demand: this runs only on a
+        // new tree, input, scroll, or resize, so the app idles at ~0fps.
 
         // Emit a `resize` event whenever the content size changes, so the JS side
         // can update Dimensions and re-render. Bridges RN's Dimensions API.
@@ -167,11 +161,9 @@ impl Render for ServiceApp {
             bridge::resize(w as f32, h as f32);
         }
 
-        // Keep a frame scheduled so stdin-pushed trees get picked up promptly.
-        window.request_animation_frame();
-
         // Ensure a persistent InputState entity exists for every text-input node,
-        // subscribing once so edits stream back to JS as `changeText`.
+        // subscribing once so edits stream back to JS as `changeText`, and observing
+        // it so this view re-renders (and the edit shows) when the input changes.
         let mut specs = Vec::new();
         collect_inputs(&self.root, &mut specs);
         let present: HashSet<u64> = specs.iter().map(|(id, _, _)| *id).collect();
@@ -192,6 +184,8 @@ impl Render for ServiceApp {
                     InputEvent::Blur => bridge::event(id, "blur"),
                 })
                 .detach();
+                // re-render this view when the input's contents/cursor change
+                cx.observe(&state, |_this, _input, cx| cx.notify()).detach();
                 self.inputs.insert(id, state);
             }
         }
@@ -259,12 +253,12 @@ fn fallback_root() -> Arc<ReactElement> {
 }
 
 fn main() {
-    // Background thread continuously reads JSON trees from stdin (one per line).
-    // The first one bootstraps the window; later ones are re-renders from React.
-    let (first_tx, first_rx) = std::sync::mpsc::channel::<Arc<ReactElement>>();
+    // Background thread continuously reads JSON trees from stdin (one per line) and
+    // hands each to a flume channel. The first tree bootstraps the window size; the
+    // rest are applied by a foreground task that calls cx.notify() — no polling.
+    let (tree_tx, tree_rx) = flume::unbounded::<Arc<ReactElement>>();
     std::thread::spawn(move || {
         let stdin = io::stdin();
-        let mut first_sent = false;
         for line in stdin.lock().lines() {
             let line = match line {
                 Ok(l) => l,
@@ -278,17 +272,14 @@ fn main() {
                 Err(_) => continue,
             };
             if let Some(root) = parse_json_tree(&v) {
-                if !first_sent {
-                    first_sent = true;
-                    let _ = first_tx.send(root);
-                } else if let Ok(mut g) = PENDING_ROOT.lock() {
-                    *g = Some(root);
+                if tree_tx.send(root).is_err() {
+                    break; // window closed
                 }
             }
         }
     });
 
-    let initial = first_rx.recv().unwrap_or_else(|_| fallback_root());
+    let initial = tree_rx.recv().unwrap_or_else(|_| fallback_root());
 
     // Window opens at the root's declared width/height; after that it fills.
     let win_w = initial.style.width.and_then(Dim::as_px).unwrap_or(720.0);
@@ -321,6 +312,17 @@ fn main() {
         })
         .detach();
 
+        // The view that renders the tree. Created up front so the stdin pump below
+        // can update it directly.
+        let content = cx.new(|_| ServiceApp {
+            root: app_root,
+            last_w: 0.0,
+            last_h: 0.0,
+            inputs: HashMap::new(),
+            webviews: HashMap::new(),
+            webview_content: HashMap::new(),
+        });
+
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin: point(px(120.0), px(120.0)),
@@ -345,15 +347,8 @@ fn main() {
             tabbing_identifier: None,
         };
 
-        cx.open_window(options, |window, cx| {
-            let content = cx.new(|_| ServiceApp {
-                root: app_root,
-                last_w: 0.0,
-                last_h: 0.0,
-                inputs: HashMap::new(),
-                webviews: HashMap::new(),
-                webview_content: HashMap::new(),
-            });
+        let pump = content.clone();
+        cx.open_window(options, move |window, cx| {
             // gpui-component needs the window root to be a `Root` (owns the
             // focused-input / dialog / notification layers the Input uses).
             cx.new(|cx| gpui_component::Root::new(content, window, cx))
@@ -364,5 +359,20 @@ fn main() {
         if !background {
             cx.activate(true);
         }
+
+        // Foreground pump: apply each newer tree on the main thread and notify, so
+        // the window re-renders exactly when React re-renders — and never otherwise.
+        cx.spawn(async move |cx| {
+            while let Ok(tree) = tree_rx.recv_async().await {
+                let applied = pump.update(cx, |this, cx| {
+                    this.root = fill_root(tree);
+                    cx.notify();
+                });
+                if applied.is_err() {
+                    break; // view dropped
+                }
+            }
+        })
+        .detach();
     });
 }

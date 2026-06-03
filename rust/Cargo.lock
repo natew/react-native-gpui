@@ -5369,6 +5369,7 @@ name = "react-native-gpui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "flume",
  "gpui",
  "gpui-component",
  "lb-wry",

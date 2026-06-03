@@ -161,15 +161,18 @@ impl Element for ReactDivElement {
         let style = self.element.build_gpui_style(None);
         let (clip, scroll) = overflow_mode(&self.element.style);
 
-        // Wheel handling: a hitbox over this region + a scroll listener that nudges
-        // the persisted offset. The render loop re-prepaints with the new value.
+        // Wheel handling: a listener that nudges the persisted offset and asks for a
+        // repaint. Gated by `bounds.contains` (not `should_handle_scroll`, whose
+        // hit-test set only stays fresh under continuous rendering — we render
+        // on-demand). Bubble runs inner→outer; the inner scroller consumes and stops
+        // propagation so an ancestor doesn't also move.
         if scroll {
             let id = self.element.global_id;
             let content_h = Self::content_height(request_layout, window, bounds.top());
             let max_scroll: f32 = (content_h - bounds.size.height).max(px(0.0)).into();
-            let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+            let b = bounds;
             window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, window, cx| {
-                if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
+                if phase == DispatchPhase::Bubble && b.contains(&ev.position) {
                     let dy: f32 = match ev.delta {
                         ScrollDelta::Lines(p) => p.y * 32.0,
                         ScrollDelta::Pixels(p) => p.y.into(),
@@ -178,8 +181,7 @@ impl Element for ReactDivElement {
                     let next = (cur - dy).clamp(0.0, max_scroll);
                     if (next - cur).abs() > 0.01 {
                         set_scroll(id, next);
-                        // we consumed this scroll; bubble phase runs inner→outer, so
-                        // stopping here keeps an ancestor scroller from also moving.
+                        window.refresh(); // on-demand: repaint to reflect the new offset
                         cx.stop_propagation();
                     }
                 }

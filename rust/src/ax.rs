@@ -560,13 +560,13 @@ fn dispatch_press_action(this: &Object) -> bool {
         (id, events, is_text_node, disabled)
     };
 
-    if events.iter().any(|event| event == "press") {
-        crate::bridge::event(id, "press");
+    if disabled {
+        return false;
+    }
+    if events_have_press_action(&events) {
+        dispatch_press_sequence(id, &events);
         true
-    } else if events.iter().any(|event| event == "click") {
-        crate::bridge::event(id, "click");
-        true
-    } else if is_text_node && !disabled {
+    } else if is_text_node {
         crate::bridge::event(id, "focus");
         true
     } else {
@@ -574,20 +574,47 @@ fn dispatch_press_action(this: &Object) -> bool {
     }
 }
 
+fn events_have_press_action(events: &[String]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event.as_str(),
+            "press" | "click" | "responderRelease" | "touchEnd" | "mouseUp" | "pointerUp"
+        )
+    })
+}
+
+fn dispatch_press_sequence(id: u64, events: &[String]) {
+    for name in [
+        "mouseDown",
+        "pointerDown",
+        "touchStart",
+        "startShouldSetResponderCapture",
+        "startShouldSetResponder",
+        "responderStart",
+        "responderGrant",
+        "pressIn",
+        "mouseUp",
+        "pointerUp",
+        "touchEnd",
+        "responderRelease",
+        "responderEnd",
+        "pressOut",
+        "press",
+        "click",
+    ] {
+        if events.iter().any(|event| event == name) {
+            crate::bridge::event(id, name);
+        }
+    }
+}
+
 extern "C" fn accessibility_action_names(this: &Object, _: Sel) -> id {
     let events = with_node(this, |node| node.events.clone(), Vec::new());
     unsafe {
         let array: id = msg_send![class!(NSMutableArray), array];
-        if events
-            .iter()
-            .any(|event| event == "press" || event == "click")
-        {
-            let press = ns_string("AXPress");
-            let _: () = msg_send![array, addObject: press];
-        }
         let is_text = with_node(this, is_text_node, false);
         let enabled = with_node(this, |node| !node.disabled, false);
-        if is_text && enabled {
+        if enabled && (events_have_press_action(&events) || is_text) {
             let press = ns_string("AXPress");
             let _: () = msg_send![array, addObject: press];
         }
@@ -680,6 +707,32 @@ extern "C" fn accessibility_set_value_for_attribute(
             set_accessibility_focused(this, sel!(setAccessibilityFocused:), focused);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::events_have_press_action;
+
+    fn events(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    #[test]
+    fn exposes_press_for_native_and_responder_events() {
+        assert!(events_have_press_action(&events(&["press"])));
+        assert!(events_have_press_action(&events(&["click"])));
+        assert!(events_have_press_action(&events(&["responderRelease"])));
+        assert!(events_have_press_action(&events(&["touchEnd"])));
+        assert!(events_have_press_action(&events(&["mouseUp"])));
+        assert!(events_have_press_action(&events(&["pointerUp"])));
+    }
+
+    #[test]
+    fn ignores_non_activation_events() {
+        assert!(!events_have_press_action(&events(&["mouseEnter"])));
+        assert!(!events_have_press_action(&events(&["pressIn", "pressOut"])));
+        assert!(!events_have_press_action(&events(&["responderGrant"])));
     }
 }
 

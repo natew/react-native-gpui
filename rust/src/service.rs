@@ -62,6 +62,11 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         .or_else(|| obj.get("name"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let number_of_lines = obj
+        .get("numberOfLines")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| usize::try_from(n).ok())
+        .filter(|n| *n > 0);
     let src = obj
         .get("src")
         .and_then(|v| v.as_str())
@@ -128,6 +133,7 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         global_id,
         element_type: element_type.to_string(),
         text,
+        number_of_lines,
         runs,
         src,
         value,
@@ -407,6 +413,7 @@ fn fallback_root() -> Arc<ReactElement> {
         global_id: 1,
         element_type: "div".to_string(),
         text: None,
+        number_of_lines: None,
         runs: Vec::new(),
         src: None,
         value: None,

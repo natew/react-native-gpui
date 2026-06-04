@@ -13,6 +13,7 @@ export type SerializedNode = {
     style?: Record<string, unknown>;
     accessibility?: SerializedAccessibility;
     text?: string;
+    numberOfLines?: number;
     value?: string;
     editable?: boolean;
     src?: string;

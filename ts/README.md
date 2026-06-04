@@ -55,6 +55,7 @@ The TypeScript side reconciles your components into a flat node tree and streams
 APIs: `StyleSheet`, `Dimensions`, `useWindowDimensions`, `Platform`, `PixelRatio`, `useColorScheme`, `AppRegistry`, `createRoot` / `render`.
 
 - **Real text input** (`TextInput`) is backed by [gpui-component](https://github.com/longbridge/gpui-component)'s editor: selection, IME, copy/paste, word motion, multiline.
+- **Text truncation** follows React Native's `numberOfLines`: one-line labels truncate with ellipsis, and multi-line labels are line-clamped.
 - **Styling** matches RN: flexbox (Yoga semantics — `flex:1`, `%`, `auto`), `backgroundColor`, gradients via `backgroundImage`, `boxShadow` / iOS `shadow*` / `elevation`, `borderRadius`, `overflow: scroll`, `opacity`.
 - **`Svg`** renders a monochrome icon tinted by `style.color`.
 
@@ -113,7 +114,14 @@ Point the runtime at a specific binary with `RNGPUI_SERVICE=/path/to/rngpui-serv
 
 ```sh
 bun run examples/kitchen-sink.tsx     # the full component surface + self-validating layout
+bun run conformance:text-lines        # visual fixture for Text numberOfLines
 bun run examples/superconductor.tsx   # native shell + WebView content hybrid
+```
+
+Visual regressions can use the built-in PNG comparator:
+
+```sh
+bun run pixel-diff before.png after.png --crop 0,0,540,300 --diff-out /tmp/rngpui-diff.png
 ```
 
 ## Status & platform

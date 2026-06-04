@@ -52,6 +52,7 @@ impl ReactTextElement {
         if let Some(lh) = style.line_height {
             el = el.line_height(px(lh));
         }
+        el = apply_line_limit(el, self.element.number_of_lines);
 
         // No inline runs → plain text.
         if self.element.runs.is_empty() {
@@ -102,6 +103,14 @@ impl ReactTextElement {
         }
         el.child(StyledText::new(flat).with_default_highlights(&base, highlights))
             .into_any_element()
+    }
+}
+
+fn apply_line_limit(el: gpui::Div, number_of_lines: Option<usize>) -> gpui::Div {
+    match number_of_lines {
+        Some(1) => el.truncate(),
+        Some(lines) => el.overflow_hidden().line_clamp(lines).text_ellipsis(),
+        None => el,
     }
 }
 

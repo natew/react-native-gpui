@@ -48,6 +48,8 @@ pub struct ReactElement {
     pub global_id: u64,
     pub element_type: String,
     pub text: Option<String>,
+    /// RN Text `numberOfLines`; clamps text and ellipsizes overflow.
+    pub number_of_lines: Option<usize>,
     /// inline styled runs, when a `<Text>` has nested `<Text>` children.
     pub runs: Vec<TextRun>,
     /// image / webview source uri (for `<Image>` / `<WebView>`).

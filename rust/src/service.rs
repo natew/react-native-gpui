@@ -10,6 +10,7 @@ use gpui::{
     point, px, rgb, size,
 };
 use gpui_component::input::{InputEvent, InputState};
+use gpui_component::theme::{Theme, ThemeMode};
 
 actions!(rngpui, [Quit]);
 
@@ -134,6 +135,17 @@ fn fill_root(root: Arc<ReactElement>) -> Arc<ReactElement> {
     Arc::new(r)
 }
 
+fn root_theme_mode(root: &ReactElement) -> ThemeMode {
+    let default_background = crate::style::u32_to_hsla(0xe9e9ec);
+    let background = root.style.background_color.unwrap_or(default_background);
+    let lightness = background.l * background.a + default_background.l * (1.0 - background.a);
+    if lightness >= 0.5 {
+        ThemeMode::Light
+    } else {
+        ThemeMode::Dark
+    }
+}
+
 struct ServiceApp {
     root: Arc<ReactElement>,
     last_w: f64,
@@ -191,6 +203,10 @@ impl Render for ServiceApp {
         // The tree is applied (and a re-render scheduled) by the stdin pump task in
         // `main`, not polled here — rendering is fully on-demand: this runs only on a
         // new tree, input, scroll, or resize, so the app idles at ~0fps.
+        let theme_mode = root_theme_mode(&self.root);
+        if Theme::global(cx).mode != theme_mode {
+            Theme::change(theme_mode, Some(window), cx);
+        }
 
         // Emit a `resize` event whenever the content size changes, so the JS side
         // can update Dimensions and re-render. Bridges RN's Dimensions API.

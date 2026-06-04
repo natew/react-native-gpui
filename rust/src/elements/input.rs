@@ -2,7 +2,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gpui::{AnyElement, App, Entity, IntoElement, RenderOnce, Window, div};
+use gpui::{
+    AnyElement, App, Entity, InteractiveElement as _, IntoElement, KeyDownEvent,
+    ParentElement as _, RenderOnce, Styled, Window, div,
+};
 use gpui_component::input::{Input, InputState};
 
 use crate::elements::ReactElement;
@@ -53,7 +56,32 @@ impl RenderOnce for ReactInputElement {
                 if self.element.element_type == "textarea" {
                     input = input.h_full();
                 }
-                input.into_any_element()
+                div()
+                    .size_full()
+                    .on_key_down({
+                        let state = state.clone();
+                        move |event: &KeyDownEvent, window: &mut Window, cx: &mut App| {
+                            let keystroke = &event.keystroke;
+                            let Some(text) = keystroke.key_char.as_deref() else {
+                                return;
+                            };
+                            if text == "\n"
+                                || text == "\t"
+                                || keystroke.modifiers.control
+                                || keystroke.modifiers.platform
+                                || keystroke.modifiers.function
+                            {
+                                return;
+                            }
+                            let text = text.to_string();
+                            state.update(cx, |input, cx| {
+                                input.insert(text, window, cx);
+                            });
+                            cx.stop_propagation();
+                        }
+                    })
+                    .child(input)
+                    .into_any_element()
             }
             None => div().into_any_element(),
         }

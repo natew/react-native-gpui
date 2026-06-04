@@ -25,8 +25,41 @@ export interface Container {
     children: Array<Instance | TextInstance>;
 }
 
+let commit: ((tree: SerializedNode) => void) | null = null;
+let currentContainer: Container | null = null;
+const hoveredIds = new Set<number>();
+const pressedIds = new Set<number>();
+
 // ── event registry (id → { event: handler }) ────────────────────────
 const PROP_TO_EVENT: Record<string, string> = {
+    onClick: "click",
+    onMouseDown: "mouseDown",
+    onMouseUp: "mouseUp",
+    onMouseEnter: "mouseEnter",
+    onMouseLeave: "mouseLeave",
+    onMouseOver: "mouseOver",
+    onMouseOut: "mouseOut",
+    onMouseMove: "mouseMove",
+    onPointerDown: "pointerDown",
+    onPointerUp: "pointerUp",
+    onPointerEnter: "pointerEnter",
+    onPointerLeave: "pointerLeave",
+    onPointerMove: "pointerMove",
+    onTouchStart: "touchStart",
+    onTouchMove: "touchMove",
+    onTouchEnd: "touchEnd",
+    onTouchCancel: "touchCancel",
+    onStartShouldSetResponder: "startShouldSetResponder",
+    onStartShouldSetResponderCapture: "startShouldSetResponderCapture",
+    onResponderGrant: "responderGrant",
+    onResponderMove: "responderMove",
+    onResponderRelease: "responderRelease",
+    onResponderStart: "responderStart",
+    onResponderEnd: "responderEnd",
+    onResponderTerminate: "responderTerminate",
+    onResponderTerminationRequest: "responderTerminationRequest",
+    onHoverIn: "mouseEnter",
+    onHoverOut: "mouseLeave",
     onPress: "press",
     onPressIn: "pressIn",
     onPressOut: "pressOut",
@@ -43,10 +76,48 @@ const PROP_TO_EVENT: Record<string, string> = {
 };
 const handlers = new Map<number, Record<string, Function>>();
 
+function chainHandler(first: Function | undefined, next: Function) {
+    return first
+        ? (...args: unknown[]) => {
+              first(...args);
+              next(...args);
+          }
+        : next;
+}
+
+function setPseudoState(set: Set<number>, id: number, active: boolean) {
+    const changed = active ? !set.has(id) : set.has(id);
+    if (!changed) return;
+    if (active) set.add(id);
+    else set.delete(id);
+    requestPseudoCommit();
+}
+
+function requestPseudoCommit() {
+    if (commit && currentContainer) commit(serializeContainer(currentContainer));
+}
+
 function registerHandlers(id: number, props: Record<string, unknown>) {
     const map: Record<string, Function> = {};
     for (const [prop, event] of Object.entries(PROP_TO_EVENT)) {
-        if (typeof props[prop] === "function") map[event] = props[prop] as Function;
+        const next = props[prop];
+        if (typeof next === "function") {
+            map[event] = chainHandler(map[event], next);
+        }
+    }
+    if (props.hoverStyle) {
+        map.mouseEnter = chainHandler(map.mouseEnter, () => setPseudoState(hoveredIds, id, true));
+        map.mouseLeave = chainHandler(map.mouseLeave, () => setPseudoState(hoveredIds, id, false));
+    } else {
+        hoveredIds.delete(id);
+    }
+    if (props.pressStyle) {
+        map.pressIn = chainHandler(map.pressIn, () => setPseudoState(pressedIds, id, true));
+        map.pressOut = chainHandler(map.pressOut, () => setPseudoState(pressedIds, id, false));
+        map.responderTerminate = chainHandler(map.responderTerminate, () => setPseudoState(pressedIds, id, false));
+        map.mouseLeave = chainHandler(map.mouseLeave, () => setPseudoState(pressedIds, id, false));
+    } else {
+        pressedIds.delete(id);
     }
     if (Object.keys(map).length) handlers.set(id, map);
     else handlers.delete(id);
@@ -57,9 +128,61 @@ export function dispatchEvent(id: number, event: string, payload: { value?: stri
     const fn = handlers.get(id)?.[event];
     if (!fn) return;
     if (event === "changeText") fn(payload.value ?? "");
+    else if (event === "change") fn(createValueEvent(event, payload.value ?? ""));
     else if (event === "message") fn({ nativeEvent: { data: payload.value ?? "" } });
     else if (event === "layout") fn({ nativeEvent: { layout: payload.layout } });
-    else fn({ nativeEvent: {} });
+    else fn(createEvent(event, payload));
+}
+
+function createValueEvent(type: string, value: string) {
+    return {
+        ...createEvent(type, { value }),
+        target: { value },
+        currentTarget: { value },
+        nativeEvent: { text: value, value },
+    };
+}
+
+function createEvent(type: string, payload: { value?: string; layout?: unknown }) {
+    let defaultPrevented = false;
+    let propagationStopped = false;
+    const eventObject: any = {
+        type,
+        altKey: false,
+        button: 0,
+        buttons: 0,
+        cancelable: true,
+        ctrlKey: false,
+        currentTarget: {},
+        defaultPrevented,
+        metaKey: false,
+        nativeEvent: {
+            type,
+            value: payload.value,
+            layout: payload.layout,
+            locationX: 0,
+            locationY: 0,
+            pageX: 0,
+            pageY: 0,
+        },
+        shiftKey: false,
+        target: {},
+        timeStamp: Date.now(),
+        preventDefault() {
+            defaultPrevented = true;
+            eventObject.defaultPrevented = true;
+        },
+        stopPropagation() {
+            propagationStopped = true;
+        },
+        isDefaultPrevented() {
+            return defaultPrevented;
+        },
+        isPropagationStopped() {
+            return propagationStopped;
+        },
+    };
+    return eventObject;
 }
 
 // ── host type → bridge node ─────────────────────────────────────────
@@ -108,7 +231,16 @@ function serialize(inst: Instance | TextInstance): SerializedNode {
     if (isTextLike(inst)) return { globalId: inst.id, type: "text", text: inst.text };
 
     const props = inst.props;
-    const style = normalizeStyle(props.style as never) ?? {};
+    const baseStyle = (normalizeStyle(props.style as never) ?? {}) as Record<string, unknown>;
+    const hoverStyle =
+        props.hoverStyle && hoveredIds.has(inst.id)
+            ? ((normalizeStyle(props.hoverStyle as never) ?? {}) as Record<string, unknown>)
+            : undefined;
+    const pressStyle =
+        props.pressStyle && pressedIds.has(inst.id)
+            ? ((normalizeStyle(props.pressStyle as never) ?? {}) as Record<string, unknown>)
+            : undefined;
+    const style = { ...baseStyle, ...hoverStyle, ...pressStyle };
     const node: SerializedNode = { globalId: inst.id, type: "div" };
 
     switch (inst.type) {
@@ -127,6 +259,8 @@ function serialize(inst: Instance | TextInstance): SerializedNode {
         case "TextInput":
             node.type = props.multiline ? "textarea" : "textinput";
             node.placeholder = (props.placeholder as string) ?? "";
+            if (props.value != null) node.value = String(props.value);
+            else if (props.defaultValue != null) node.value = String(props.defaultValue);
             break;
         case "Image":
             node.type = "image";
@@ -170,6 +304,7 @@ function imageSource(source: unknown): string | undefined {
 }
 
 export function serializeContainer(c: Container): SerializedNode {
+    currentContainer = c;
     // id 0 is reserved for the window root, so it never collides with element ids
     // (genId starts at 1) — keeps scroll/input/webview maps keyed cleanly.
     return {
@@ -180,8 +315,6 @@ export function serializeContainer(c: Container): SerializedNode {
     };
 }
 
-// ── commit sink (set by render layer) ───────────────────────────────
-let commit: ((tree: SerializedNode) => void) | null = null;
 export function setCommitSink(fn: (tree: SerializedNode) => void) {
     commit = fn;
 }

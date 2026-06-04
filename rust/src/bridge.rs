@@ -47,6 +47,10 @@ pub fn change_text(id: u64, value: &str) {
     emit_value(json!({ "type": "event", "id": id, "event": "changeText", "value": value }));
 }
 
+pub fn change(id: u64, value: &str) {
+    emit_value(json!({ "type": "event", "id": id, "event": "change", "value": value }));
+}
+
 /// A `<WebView>` posted a message from its page (`window.ReactNativeWebView.postMessage`
 /// / `window.ipc.postMessage`). Routed to the node's `onMessage` handler.
 pub fn webview_message(id: u64, data: &str) {

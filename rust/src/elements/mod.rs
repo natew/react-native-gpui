@@ -37,6 +37,8 @@ pub struct ReactElement {
     pub runs: Vec<TextRun>,
     /// image / webview source uri (for `<Image>` / `<WebView>`).
     pub src: Option<String>,
+    /// text input value from react props.
+    pub value: Option<String>,
     /// event names this node listens to: "press", "changeText", "layout", …
     pub events: Vec<String>,
     pub children: Vec<Arc<ReactElement>>,

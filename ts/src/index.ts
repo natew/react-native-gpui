@@ -65,6 +65,7 @@ export type {
     LayoutRectangle,
     LayoutChangeEvent,
     GestureResponderEvent,
+    MouseResponderEvent,
 } from "./types";
 
 // dimensions + platform APIs

@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use gpui::{
     AnyElement, App, Bounds, ContentMask, DispatchPhase, Element, ElementId, GlobalElementId,
-    HitboxBehavior, Hsla, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
-    ScrollDelta, ScrollWheelEvent, Window, div, point, prelude::*, px,
+    Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta, ScrollWheelEvent, Window,
+    div, point, prelude::*, px,
 };
 use once_cell::sync::Lazy;
 
@@ -14,12 +15,19 @@ use crate::style::ElementStyle;
 // Scroll offset (in px from the top) per scroll-container id, persisted across the
 // continuous re-render loop so wheel scrolling sticks.
 static SCROLL: Lazy<Mutex<HashMap<u64, f32>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
 fn get_scroll(id: u64) -> f32 {
     SCROLL.lock().unwrap().get(&id).copied().unwrap_or(0.0)
 }
 fn set_scroll(id: u64, v: f32) {
     SCROLL.lock().unwrap().insert(id, v);
+}
+
+fn emit_if(id: u64, enabled: bool, name: &str) {
+    if enabled {
+        crate::bridge::event(id, name);
+    }
 }
 
 /// (clip, scroll) for an overflow value.
@@ -67,7 +75,7 @@ impl ReactDivElement {
 }
 
 impl Element for ReactDivElement {
-    type PrepaintState = ();
+    type PrepaintState = Option<Hitbox>;
     type RequestLayoutState = Vec<LayoutId>;
 
     fn id(&self) -> Option<ElementId> {
@@ -139,19 +147,52 @@ impl Element for ReactDivElement {
         request_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
-    ) {
-        // claim a hitbox for any View with a press handler. insert_hitbox must run in
-        // prepaint (gpui asserts the phase); the actual mouse listeners are wired in
-        // paint. `bounds` here is the div's final on-screen rect, same as in paint.
-        if self.element.listens("press")
-            || self.element.listens("longPress")
-            || self.element.listens("pressIn")
-            || self.element.listens("pressOut")
-        {
-            window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        }
-
+    ) -> Self::PrepaintState {
         let (_, scroll) = overflow_mode(&self.element.style);
+
+        // claim a hitbox for any view that handles pointer or scroll input.
+        // insert_hitbox must run in prepaint (gpui asserts the phase); mouse
+        // listeners are wired in paint and query the hitbox's current hover state.
+        let interactive = [
+            "click",
+            "mouseDown",
+            "mouseUp",
+            "mouseEnter",
+            "mouseLeave",
+            "mouseOver",
+            "mouseOut",
+            "mouseMove",
+            "pointerDown",
+            "pointerUp",
+            "pointerEnter",
+            "pointerLeave",
+            "pointerMove",
+            "touchStart",
+            "touchMove",
+            "touchEnd",
+            "touchCancel",
+            "startShouldSetResponder",
+            "startShouldSetResponderCapture",
+            "responderGrant",
+            "responderMove",
+            "responderRelease",
+            "responderStart",
+            "responderEnd",
+            "responderTerminate",
+            "responderTerminationRequest",
+            "press",
+            "longPress",
+            "pressIn",
+            "pressOut",
+        ]
+        .iter()
+        .any(|name| self.element.listens(name));
+        let hitbox = if interactive || scroll {
+            Some(window.insert_hitbox(bounds, HitboxBehavior::Normal))
+        } else {
+            None
+        };
+
         if scroll {
             // clamp the stored offset to the scrollable range, then shift children up
             // by it (in prepaint, so hit-testing matches what's painted).
@@ -169,6 +210,8 @@ impl Element for ReactDivElement {
                 child.prepaint(window, cx);
             }
         }
+
+        hitbox
     }
 
     fn paint(
@@ -177,7 +220,7 @@ impl Element for ReactDivElement {
         _inspector_id: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
         request_layout: &mut Self::RequestLayoutState,
-        _prepaint: &mut Self::PrepaintState,
+        prepaint: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -193,9 +236,13 @@ impl Element for ReactDivElement {
             let id = self.element.global_id;
             let content_h = Self::content_height(request_layout, window, bounds.top());
             let max_scroll: f32 = (content_h - bounds.size.height).max(px(0.0)).into();
-            let b = bounds;
+            let hitbox = prepaint.clone();
             window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, window, cx| {
-                if phase == DispatchPhase::Bubble && b.contains(&ev.position) {
+                if phase == DispatchPhase::Bubble
+                    && hitbox
+                        .as_ref()
+                        .is_some_and(|hitbox| hitbox.should_handle_scroll(window))
+                {
                     let dy: f32 = match ev.delta {
                         ScrollDelta::Lines(p) => p.y * 32.0,
                         ScrollDelta::Pixels(p) => p.y.into(),
@@ -211,40 +258,185 @@ impl Element for ReactDivElement {
             });
         }
 
-        // Pointer events: emit press / pressIn / pressOut to JS for any View whose
-        // React node registered an onPress*-family handler. Bounds-gated; bubbling.
+        // pointer events: emit react native press and desktop mouse events to js. bounds-gated; bubbling.
         let id = self.element.global_id;
+        let click = self.element.listens("click");
+        let mouse_down = self.element.listens("mouseDown");
+        let mouse_up = self.element.listens("mouseUp");
+        let mouse_enter = self.element.listens("mouseEnter");
+        let mouse_leave = self.element.listens("mouseLeave");
+        let mouse_over = self.element.listens("mouseOver");
+        let mouse_out = self.element.listens("mouseOut");
+        let mouse_move = self.element.listens("mouseMove");
+        let pointer_down = self.element.listens("pointerDown");
+        let pointer_up = self.element.listens("pointerUp");
+        let pointer_enter = self.element.listens("pointerEnter");
+        let pointer_leave = self.element.listens("pointerLeave");
+        let pointer_move = self.element.listens("pointerMove");
+        let touch_start = self.element.listens("touchStart");
+        let touch_move = self.element.listens("touchMove");
+        let touch_end = self.element.listens("touchEnd");
+        let touch_cancel = self.element.listens("touchCancel");
+        let start_responder = self.element.listens("startShouldSetResponder");
+        let start_responder_capture = self.element.listens("startShouldSetResponderCapture");
+        let responder_grant = self.element.listens("responderGrant");
+        let responder_move = self.element.listens("responderMove");
+        let responder_release = self.element.listens("responderRelease");
+        let responder_start = self.element.listens("responderStart");
+        let responder_end = self.element.listens("responderEnd");
+        let responder_terminate = self.element.listens("responderTerminate");
+        let responder_termination_request = self.element.listens("responderTerminationRequest");
         let press = self.element.listens("press") || self.element.listens("longPress");
         let press_in = self.element.listens("pressIn");
         let press_out = self.element.listens("pressOut");
-        if press || press_in || press_out {
-            let b = bounds;
-            // hitbox is inserted in prepaint (gpui requires that phase); here we only
-            // wire the mouse listeners.
-            if press_in {
-                window.on_mouse_event(move |ev: &MouseDownEvent, phase, _w, _cx| {
-                    if phase == DispatchPhase::Bubble
-                        && ev.button == MouseButton::Left
-                        && b.contains(&ev.position)
-                    {
-                        crate::bridge::event(id, "pressIn");
-                    }
-                });
-            }
-            if press || press_out {
-                window.on_mouse_event(move |ev: &MouseUpEvent, phase, _w, _cx| {
-                    if phase == DispatchPhase::Bubble
-                        && ev.button == MouseButton::Left
-                        && b.contains(&ev.position)
-                    {
-                        if press_out {
-                            crate::bridge::event(id, "pressOut");
+        let tracks_pointer = click
+            || mouse_down
+            || mouse_up
+            || mouse_enter
+            || mouse_leave
+            || mouse_over
+            || mouse_out
+            || mouse_move
+            || pointer_down
+            || pointer_up
+            || pointer_enter
+            || pointer_leave
+            || pointer_move
+            || touch_start
+            || touch_move
+            || touch_end
+            || touch_cancel
+            || start_responder
+            || start_responder_capture
+            || responder_grant
+            || responder_move
+            || responder_release
+            || responder_start
+            || responder_end
+            || responder_terminate
+            || responder_termination_request
+            || press
+            || press_in
+            || press_out;
+        if tracks_pointer {
+            if let Some(hitbox) = prepaint.clone() {
+                if mouse_down
+                    || pointer_down
+                    || touch_start
+                    || start_responder
+                    || start_responder_capture
+                    || responder_grant
+                    || responder_start
+                    || press_in
+                {
+                    let hitbox = hitbox.clone();
+                    window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, _cx| {
+                        if phase == DispatchPhase::Bubble
+                            && ev.button == MouseButton::Left
+                            && hitbox.is_hovered(window)
+                        {
+                            emit_if(id, mouse_down, "mouseDown");
+                            emit_if(id, pointer_down, "pointerDown");
+                            emit_if(id, touch_start, "touchStart");
+                            emit_if(
+                                id,
+                                start_responder_capture,
+                                "startShouldSetResponderCapture",
+                            );
+                            emit_if(id, start_responder, "startShouldSetResponder");
+                            emit_if(id, responder_start, "responderStart");
+                            emit_if(id, responder_grant, "responderGrant");
+                            emit_if(id, press_in, "pressIn");
                         }
-                        if press {
-                            crate::bridge::event(id, "press");
+                    });
+                }
+                if click
+                    || mouse_up
+                    || pointer_up
+                    || touch_end
+                    || responder_release
+                    || responder_end
+                    || press
+                    || press_out
+                {
+                    let hitbox = hitbox.clone();
+                    window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, _cx| {
+                        if phase == DispatchPhase::Bubble
+                            && ev.button == MouseButton::Left
+                            && hitbox.is_hovered(window)
+                        {
+                            emit_if(id, mouse_up, "mouseUp");
+                            emit_if(id, pointer_up, "pointerUp");
+                            emit_if(id, touch_end, "touchEnd");
+                            emit_if(id, responder_release, "responderRelease");
+                            emit_if(id, responder_end, "responderEnd");
+                            emit_if(id, press_out, "pressOut");
+                            emit_if(id, press, "press");
+                            emit_if(id, click, "click");
                         }
-                    }
-                });
+                    });
+                }
+                if mouse_enter
+                    || mouse_leave
+                    || mouse_over
+                    || mouse_out
+                    || mouse_move
+                    || pointer_enter
+                    || pointer_leave
+                    || pointer_move
+                    || touch_move
+                    || responder_move
+                {
+                    let hitbox_for_move = hitbox.clone();
+                    window.on_mouse_event(move |_ev: &MouseMoveEvent, phase, window, _cx| {
+                        if phase != DispatchPhase::Bubble {
+                            return;
+                        }
+                        let inside = hitbox_for_move.is_hovered(window);
+                        let mut hover = HOVER.lock().unwrap();
+                        let was_inside = hover.contains(&id);
+                        if inside && !was_inside {
+                            hover.insert(id);
+                            drop(hover);
+                            emit_if(id, mouse_enter, "mouseEnter");
+                            emit_if(id, mouse_over, "mouseOver");
+                            emit_if(id, pointer_enter, "pointerEnter");
+                        } else if !inside && was_inside {
+                            hover.remove(&id);
+                            drop(hover);
+                            emit_if(id, mouse_leave, "mouseLeave");
+                            emit_if(id, mouse_out, "mouseOut");
+                            emit_if(id, pointer_leave, "pointerLeave");
+                        } else {
+                            drop(hover);
+                        }
+                        if inside {
+                            emit_if(id, mouse_move, "mouseMove");
+                            emit_if(id, pointer_move, "pointerMove");
+                            emit_if(id, touch_move, "touchMove");
+                            emit_if(id, responder_move, "responderMove");
+                        }
+                    });
+                    window.on_mouse_event(move |_ev: &MouseExitEvent, phase, _w, _cx| {
+                        if phase != DispatchPhase::Bubble {
+                            return;
+                        }
+                        let mut hover = HOVER.lock().unwrap();
+                        if hover.remove(&id) {
+                            drop(hover);
+                            emit_if(id, mouse_leave, "mouseLeave");
+                            emit_if(id, mouse_out, "mouseOut");
+                            emit_if(id, pointer_leave, "pointerLeave");
+                            emit_if(id, touch_cancel, "touchCancel");
+                            emit_if(
+                                id,
+                                responder_termination_request,
+                                "responderTerminationRequest",
+                            );
+                            emit_if(id, responder_terminate, "responderTerminate");
+                        }
+                    });
+                }
             }
         }
 

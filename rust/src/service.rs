@@ -54,6 +54,10 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         .get("src")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let value = obj
+        .get("value")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let events = obj
         .get("events")
         .and_then(|v| v.as_array())
@@ -106,6 +110,7 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         text,
         runs,
         src,
+        value,
         events,
         children,
         style,
@@ -135,17 +140,19 @@ struct ServiceApp {
     last_h: f64,
     // persistent gpui-component input state, one per <TextInput>/<TextArea> id.
     inputs: HashMap<u64, Entity<InputState>>,
+    input_values: HashMap<u64, Option<String>>,
     // persistent native WebView, one per <WebView> id, + its last-loaded content.
     webviews: HashMap<u64, Rc<wry::WebView>>,
     webview_content: HashMap<u64, String>,
 }
 
-/// Collect (id, placeholder, multiline) for every text-input node in the tree.
-fn collect_inputs(el: &Arc<ReactElement>, out: &mut Vec<(u64, String, bool)>) {
+/// collect (id, placeholder, value, multiline) for every text-input node in the tree.
+fn collect_inputs(el: &Arc<ReactElement>, out: &mut Vec<(u64, String, Option<String>, bool)>) {
     if el.element_type == "textinput" || el.element_type == "textarea" {
         out.push((
             el.global_id,
             el.text.clone().unwrap_or_default(),
+            el.value.clone(),
             el.element_type == "textarea",
         ));
     }
@@ -201,19 +208,28 @@ impl Render for ServiceApp {
         // it so this view re-renders (and the edit shows) when the input changes.
         let mut specs = Vec::new();
         collect_inputs(&self.root, &mut specs);
-        let present: HashSet<u64> = specs.iter().map(|(id, _, _)| *id).collect();
+        let present: HashSet<u64> = specs.iter().map(|(id, _, _, _)| *id).collect();
         self.inputs.retain(|id, _| present.contains(id));
-        for (id, placeholder, multiline) in specs {
+        self.input_values.retain(|id, _| present.contains(id));
+        for (id, placeholder, value, multiline) in specs {
             if !self.inputs.contains_key(&id) {
+                let initial_value = value.clone();
                 let state = cx.new(|cx| {
                     let mut s = InputState::new(window, cx).placeholder(placeholder.clone());
                     if multiline {
                         s = s.multi_line(true);
                     }
+                    if let Some(value) = initial_value {
+                        s = s.default_value(value);
+                    }
                     s
                 });
                 cx.subscribe(&state, move |_this, input, ev: &InputEvent, cx| match ev {
-                    InputEvent::Change => bridge::change_text(id, input.read(cx).value().as_ref()),
+                    InputEvent::Change => {
+                        let value = input.read(cx).value();
+                        bridge::change_text(id, value.as_ref());
+                        bridge::change(id, value.as_ref());
+                    }
                     InputEvent::PressEnter { .. } => bridge::event(id, "submit"),
                     InputEvent::Focus => bridge::event(id, "focus"),
                     InputEvent::Blur => bridge::event(id, "blur"),
@@ -222,6 +238,18 @@ impl Render for ServiceApp {
                 // re-render this view when the input's contents/cursor change
                 cx.observe(&state, |_this, _input, cx| cx.notify()).detach();
                 self.inputs.insert(id, state);
+                self.input_values.insert(id, value);
+            } else if self.input_values.get(&id) != Some(&value) {
+                if let Some(next_value) = value.clone() {
+                    if let Some(state) = self.inputs.get(&id) {
+                        state.update(cx, |input, cx| {
+                            if input.value().as_ref() != next_value.as_str() {
+                                input.set_value(next_value, window, cx);
+                            }
+                        });
+                    }
+                }
+                self.input_values.insert(id, value);
             }
         }
         elements::input::set_entities(self.inputs.clone());
@@ -307,6 +335,7 @@ fn fallback_root() -> Arc<ReactElement> {
         text: None,
         runs: Vec::new(),
         src: None,
+        value: None,
         events: Vec::new(),
         children: vec![],
         style: ElementStyle {
@@ -422,6 +451,7 @@ fn main() {
             last_w: 0.0,
             last_h: 0.0,
             inputs: HashMap::new(),
+            input_values: HashMap::new(),
             webviews: HashMap::new(),
             webview_content: HashMap::new(),
         });

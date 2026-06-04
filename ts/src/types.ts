@@ -139,11 +139,52 @@ export interface LayoutChangeEvent {
 export interface GestureResponderEvent {
     nativeEvent: { locationX: number; locationY: number; pageX: number; pageY: number };
 }
+export interface MouseResponderEvent extends GestureResponderEvent {
+    type?: string;
+    altKey?: boolean;
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+    shiftKey?: boolean;
+    preventDefault?: () => void;
+    stopPropagation?: () => void;
+    isDefaultPrevented?: () => boolean;
+    isPropagationStopped?: () => boolean;
+}
 
 // ── common view props ───────────────────────────────────────────────
 export interface ViewProps {
     children?: ReactNode;
     style?: StyleProp<ViewStyle>;
+    hoverStyle?: StyleProp<ViewStyle>;
+    pressStyle?: StyleProp<ViewStyle>;
+    onClick?: (event: MouseResponderEvent) => void;
+    onMouseDown?: (event: MouseResponderEvent) => void;
+    onMouseUp?: (event: MouseResponderEvent) => void;
+    onMouseEnter?: (event: MouseResponderEvent) => void;
+    onMouseLeave?: (event: MouseResponderEvent) => void;
+    onMouseOver?: (event: MouseResponderEvent) => void;
+    onMouseOut?: (event: MouseResponderEvent) => void;
+    onMouseMove?: (event: MouseResponderEvent) => void;
+    onPointerDown?: (event: MouseResponderEvent) => void;
+    onPointerUp?: (event: MouseResponderEvent) => void;
+    onPointerEnter?: (event: MouseResponderEvent) => void;
+    onPointerLeave?: (event: MouseResponderEvent) => void;
+    onPointerMove?: (event: MouseResponderEvent) => void;
+    onTouchStart?: (event: MouseResponderEvent) => void;
+    onTouchMove?: (event: MouseResponderEvent) => void;
+    onTouchEnd?: (event: MouseResponderEvent) => void;
+    onTouchCancel?: (event: MouseResponderEvent) => void;
+    onStartShouldSetResponder?: (event: MouseResponderEvent) => boolean;
+    onStartShouldSetResponderCapture?: (event: MouseResponderEvent) => boolean;
+    onResponderGrant?: (event: MouseResponderEvent) => void;
+    onResponderMove?: (event: MouseResponderEvent) => void;
+    onResponderRelease?: (event: MouseResponderEvent) => void;
+    onResponderStart?: (event: MouseResponderEvent) => void;
+    onResponderEnd?: (event: MouseResponderEvent) => void;
+    onResponderTerminate?: (event: MouseResponderEvent) => void;
+    onResponderTerminationRequest?: (event: MouseResponderEvent) => boolean;
+    onHoverIn?: (event: MouseResponderEvent) => void;
+    onHoverOut?: (event: MouseResponderEvent) => void;
     onLayout?: (event: LayoutChangeEvent) => void;
     pointerEvents?: "auto" | "none" | "box-none" | "box-only";
     testID?: string;

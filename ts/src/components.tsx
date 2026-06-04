@@ -23,6 +23,7 @@ import type {
     ColorValue,
     GestureResponderEvent,
     LayoutChangeEvent,
+    MouseResponderEvent,
 } from "./types";
 
 // ── host primitives ─────────────────────────────────────────────────
@@ -47,6 +48,20 @@ export interface TextInputProps {
     placeholderTextColor?: ColorValue;
     onChangeText?: (text: string) => void;
     onChange?: (event: { nativeEvent: { text: string } }) => void;
+    onClick?: (event: MouseResponderEvent) => void;
+    onMouseDown?: (event: MouseResponderEvent) => void;
+    onMouseUp?: (event: MouseResponderEvent) => void;
+    onMouseEnter?: (event: MouseResponderEvent) => void;
+    onMouseLeave?: (event: MouseResponderEvent) => void;
+    onTouchStart?: (event: MouseResponderEvent) => void;
+    onTouchMove?: (event: MouseResponderEvent) => void;
+    onTouchEnd?: (event: MouseResponderEvent) => void;
+    onTouchCancel?: (event: MouseResponderEvent) => void;
+    onStartShouldSetResponder?: (event: MouseResponderEvent) => boolean;
+    onResponderGrant?: (event: MouseResponderEvent) => void;
+    onResponderMove?: (event: MouseResponderEvent) => void;
+    onResponderRelease?: (event: MouseResponderEvent) => void;
+    onResponderTerminate?: (event: MouseResponderEvent) => void;
     onSubmitEditing?: (event: unknown) => void;
     onFocus?: (event: unknown) => void;
     onBlur?: (event: unknown) => void;
@@ -59,6 +74,8 @@ export interface TextInputProps {
     returnKeyType?: string;
     maxLength?: number;
     style?: StyleProp<TextStyle>;
+    hoverStyle?: StyleProp<TextStyle>;
+    pressStyle?: StyleProp<TextStyle>;
     testID?: string;
 }
 export const TextInput = "TextInput" as unknown as FC<TextInputProps>;

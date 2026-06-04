@@ -12,6 +12,7 @@ export type SerializedNode = {
     type: string;
     style?: Record<string, unknown>;
     text?: string;
+    value?: string;
     src?: string;
     name?: string;
     placeholder?: string;

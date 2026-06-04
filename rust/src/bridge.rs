@@ -38,6 +38,10 @@ pub fn resize(width: f32, height: f32) {
     emit_value(json!({ "type": "resize", "width": width, "height": height }));
 }
 
+pub fn command(id: &str) {
+    emit_value(json!({ "type": "command", "id": id }));
+}
+
 /// A gesture event with no payload (press / pressIn / pressOut / longPress / focus / blur / submit).
 pub fn event(id: u64, name: &str) {
     emit_value(json!({ "type": "event", "id": id, "event": name }));

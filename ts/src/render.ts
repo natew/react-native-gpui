@@ -6,7 +6,7 @@
 import { createElement, type ReactElement, type ComponentType } from "react";
 import Reconciler, { setCommitSink, serializeContainer, dispatchEvent, type Container } from "./reconciler";
 import { startBridge, type Bridge, type BridgeEvent, type SerializedNode } from "./runtime";
-import { setCommandSink } from "./commands";
+import { AppCommands, setCommandSink } from "./commands";
 import { Dimensions } from "./Dimensions";
 
 export interface RootOptions {
@@ -44,6 +44,10 @@ export function createRoot(options: RootOptions = {}): Root {
             // re-emit even if a hook already re-rendered: the root's own width/height
             // must track the window for components that don't subscribe to dimensions.
             if (changed && bridge) bridge.update(serializeContainer(container));
+            return;
+        }
+        if (e.type === "command") {
+            AppCommands._emit(e.id);
             return;
         }
         // a native UI event → route to the React handler; its setState (if any)

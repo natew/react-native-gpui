@@ -41,6 +41,7 @@ export type SerializedAccessibility = {
 export type BridgeEvent =
     | { type: "ready"; width: number; height: number }
     | { type: "resize"; width: number; height: number }
+    | { type: "command"; id: string }
     | {
           type: "event";
           id: number;

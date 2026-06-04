@@ -34,6 +34,7 @@ export {
 export type {
     TextProps,
     TextInputProps,
+    TextInputHandle,
     ImageProps,
     SvgProps,
     WebViewProps,
@@ -96,6 +97,13 @@ export {
     AccessibilityInfo,
 } from "./apis";
 export { Animated, AnimatedValue, Easing } from "./Animated";
+export {
+    AppCommands,
+    type AppCommandBinding,
+    type AppCommandConfig,
+    type AppCommandMenu,
+    type AppCommandMenuItem,
+} from "./commands";
 
 // low-level bridge (escape hatch)
 export { startBridge, type Bridge, type BridgeEvent, type SerializedNode } from "./runtime";

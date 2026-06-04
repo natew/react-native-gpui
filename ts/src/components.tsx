@@ -78,7 +78,26 @@ export interface TextInputProps extends AccessibilityProps {
     hoverStyle?: StyleProp<TextStyle>;
     pressStyle?: StyleProp<TextStyle>;
 }
-export const TextInput = "TextInput" as unknown as FC<TextInputProps>;
+export interface TextInputHandle {
+    focus: () => void;
+    blur: () => void;
+}
+export const TextInput = forwardRef<TextInputHandle, TextInputProps>(function TextInput(props, ref) {
+    const host = useRef<{ id: number } | null>(null);
+    useImperativeHandle(
+        ref,
+        () => ({
+            focus() {
+                if (host.current) sendCommand({ $cmd: "focusInput", id: host.current.id });
+            },
+            blur() {
+                if (host.current) sendCommand({ $cmd: "blurInput", id: host.current.id });
+            },
+        }),
+        [],
+    );
+    return createElement("TextInput" as any, { ...props, ref: host });
+});
 
 export interface ImageProps extends AccessibilityProps {
     source: { uri: string } | string | number;

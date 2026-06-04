@@ -7,14 +7,21 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui::{
-    App, AppContext, Bounds, Context, Entity, IntoElement, KeyBinding, Menu, MenuItem,
-    ParentElement, Render, Styled, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
-    point, px, rgb, size,
+    App, AppContext, Bounds, Context, Entity, InteractiveElement as _, IntoElement, KeyBinding,
+    Menu, MenuItem, ParentElement, Render, Styled, TitlebarOptions, Window, WindowBounds,
+    WindowOptions, actions, point, px, rgb, size,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::theme::{Theme, ThemeMode};
+use serde::Deserialize;
 
 actions!(rngpui, [Quit]);
+
+#[derive(Clone, PartialEq, Eq, Deserialize, gpui::Action)]
+#[action(namespace = rngpui, no_json)]
+struct InvokeCommand {
+    id: String,
+}
 
 #[cfg(target_os = "macos")]
 mod ax;
@@ -387,6 +394,9 @@ impl Render for ServiceApp {
             .flex()
             .flex_col()
             .bg(rgb(0xe9e9ec))
+            .on_action(|action: &InvokeCommand, _window, _cx| {
+                bridge::command(&action.id);
+            })
             .child(root)
             .into_any_element()
     }
@@ -415,6 +425,43 @@ fn fallback_root() -> Arc<ReactElement> {
     })
 }
 
+#[derive(Clone, Deserialize)]
+struct AppCommandConfig {
+    #[serde(default)]
+    bindings: Vec<AppCommandBinding>,
+    #[serde(default)]
+    menus: Vec<AppCommandMenu>,
+}
+
+#[derive(Clone, Deserialize)]
+struct AppCommandBinding {
+    id: String,
+    key: String,
+    context: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+struct AppCommandMenu {
+    label: String,
+    #[serde(default)]
+    items: Vec<AppCommandMenuItem>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(tag = "kind")]
+enum AppCommandMenuItem {
+    #[serde(rename = "action")]
+    Action { id: String, label: String },
+    #[serde(rename = "separator")]
+    Separator,
+    #[serde(rename = "submenu")]
+    Submenu {
+        label: String,
+        #[serde(default)]
+        items: Vec<AppCommandMenuItem>,
+    },
+}
+
 /// A message from the JS side over stdin: either a new element tree to render, or a
 /// command targeting a live `<WebView>` (host → frame: ref.injectJavaScript / reload).
 enum Incoming {
@@ -423,6 +470,9 @@ enum Incoming {
     Reload { id: u64 },
     ScrollTo { id: u64, y: f32 },
     ScrollToEnd { id: u64 },
+    FocusInput { id: u64 },
+    BlurInput,
+    AppCommands(AppCommandConfig),
 }
 
 /// Parse one stdin line into an `Incoming`. A `$cmd` object is a webview command;
@@ -444,10 +494,54 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
                 y: v.get("y").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32,
             }),
             "scrollToEnd" => id.map(|id| Incoming::ScrollToEnd { id }),
+            "focusInput" => id.map(|id| Incoming::FocusInput { id }),
+            "blurInput" => Some(Incoming::BlurInput),
+            "appCommands" => serde_json::from_value(v.clone())
+                .ok()
+                .map(Incoming::AppCommands),
             _ => None,
         };
     }
     parse_json_tree(v).map(Incoming::Tree)
+}
+
+fn install_app_commands(config: AppCommandConfig, cx: &mut App) {
+    let bindings = config.bindings.into_iter().filter_map(|binding| {
+        if binding.id.is_empty() || binding.key.is_empty() {
+            return None;
+        }
+        Some(KeyBinding::new(
+            &binding.key,
+            InvokeCommand { id: binding.id },
+            binding.context.as_deref(),
+        ))
+    });
+    cx.bind_keys(bindings);
+
+    let mut menus = vec![Menu {
+        name: "react-native-gpui".into(),
+        items: vec![MenuItem::action("Quit", Quit)],
+    }];
+    menus.extend(config.menus.into_iter().map(build_app_menu));
+    cx.set_menus(menus);
+}
+
+fn build_app_menu(menu: AppCommandMenu) -> Menu {
+    Menu {
+        name: menu.label.into(),
+        items: menu.items.into_iter().map(build_app_menu_item).collect(),
+    }
+}
+
+fn build_app_menu_item(item: AppCommandMenuItem) -> MenuItem {
+    match item {
+        AppCommandMenuItem::Action { id, label } => MenuItem::action(label, InvokeCommand { id }),
+        AppCommandMenuItem::Separator => MenuItem::separator(),
+        AppCommandMenuItem::Submenu { label, items } => MenuItem::submenu(Menu {
+            name: label.into(),
+            items: items.into_iter().map(build_app_menu_item).collect(),
+        }),
+    }
 }
 
 fn main() {
@@ -505,6 +599,9 @@ fn main() {
 
         // quit on ⌘Q and when the last window closes (X button).
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+        cx.on_action(|action: &InvokeCommand, _cx: &mut App| {
+            bridge::command(&action.id);
+        });
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.set_menus(vec![Menu {
             name: "react-native-gpui".into(),
@@ -554,12 +651,13 @@ fn main() {
         };
 
         let pump = content.clone();
-        cx.open_window(options, move |window, cx| {
-            // gpui-component needs the window root to be a `Root` (owns the
-            // focused-input / dialog / notification layers the Input uses).
-            cx.new(|cx| gpui_component::Root::new(content, window, cx))
-        })
-        .expect("open window");
+        let window_handle = cx
+            .open_window(options, move |window, cx| {
+                // gpui-component needs the window root to be a `Root` (owns the
+                // focused-input / dialog / notification layers the Input uses).
+                cx.new(|cx| gpui_component::Root::new(content, window, cx))
+            })
+            .expect("open window");
         // bring the app to the front so keystrokes reach the focused input
         // (skipped in background mode so it doesn't pop over your work).
         if !background {
@@ -571,32 +669,64 @@ fn main() {
         // must be driven from the main thread). Both arrive on the same ordered channel.
         cx.spawn(async move |cx| {
             while let Ok(msg) = tree_rx.recv_async().await {
-                let applied = pump.update(cx, |this, cx| match msg {
-                    Incoming::Tree(t) => {
-                        this.root = fill_root(t);
-                        cx.notify();
-                    }
-                    Incoming::Eval { id, js } => {
-                        if let Some(view) = this.webviews.get(&id) {
-                            let _ = view.evaluate_script(&js);
+                match msg {
+                    Incoming::FocusInput { id } => {
+                        let applied = window_handle.update(cx, |_root, window, cx| {
+                            pump.update(cx, |this, cx| {
+                                if let Some(state) = this.inputs.get(&id) {
+                                    state.update(cx, |input, cx| input.focus(window, cx));
+                                }
+                            })
+                        });
+                        if applied.is_err() {
+                            break;
                         }
                     }
-                    Incoming::Reload { id } => {
-                        if let Some(view) = this.webviews.get(&id) {
-                            let _ = view.reload();
+                    Incoming::BlurInput => {
+                        if window_handle
+                            .update(cx, |_root, window, _cx| window.blur())
+                            .is_err()
+                        {
+                            break;
                         }
                     }
-                    Incoming::ScrollTo { id, y } => {
-                        elements::scroll_to(id, y);
-                        cx.notify();
+                    Incoming::AppCommands(config) => {
+                        if cx.update(|cx| install_app_commands(config, cx)).is_err() {
+                            break;
+                        }
                     }
-                    Incoming::ScrollToEnd { id } => {
-                        elements::scroll_to_end(id);
-                        cx.notify();
+                    msg => {
+                        let applied = pump.update(cx, |this, cx| match msg {
+                            Incoming::Tree(t) => {
+                                this.root = fill_root(t);
+                                cx.notify();
+                            }
+                            Incoming::Eval { id, js } => {
+                                if let Some(view) = this.webviews.get(&id) {
+                                    let _ = view.evaluate_script(&js);
+                                }
+                            }
+                            Incoming::Reload { id } => {
+                                if let Some(view) = this.webviews.get(&id) {
+                                    let _ = view.reload();
+                                }
+                            }
+                            Incoming::ScrollTo { id, y } => {
+                                elements::scroll_to(id, y);
+                                cx.notify();
+                            }
+                            Incoming::ScrollToEnd { id } => {
+                                elements::scroll_to_end(id);
+                                cx.notify();
+                            }
+                            Incoming::FocusInput { .. }
+                            | Incoming::BlurInput
+                            | Incoming::AppCommands(_) => unreachable!(),
+                        });
+                        if applied.is_err() {
+                            break; // view dropped
+                        }
                     }
-                });
-                if applied.is_err() {
-                    break; // view dropped
                 }
             }
         })

@@ -47,6 +47,12 @@ pub fn change_text(id: u64, value: &str) {
     emit_value(json!({ "type": "event", "id": id, "event": "changeText", "value": value }));
 }
 
+/// A `<WebView>` posted a message from its page (`window.ReactNativeWebView.postMessage`
+/// / `window.ipc.postMessage`). Routed to the node's `onMessage` handler.
+pub fn webview_message(id: u64, data: &str) {
+    emit_value(json!({ "type": "event", "id": id, "event": "message", "value": data }));
+}
+
 /// Emit `layout` only if this node's rounded rect changed since last frame.
 pub fn layout_if_changed(id: u64, x: f32, y: f32, width: f32, height: f32) {
     let key = (
@@ -70,5 +76,8 @@ pub fn layout_if_changed(id: u64, x: f32, y: f32, width: f32, height: f32) {
 
 /// Forget layout state for nodes no longer in the tree, so a re-mounted id re-emits.
 pub fn retain_layout(present: &std::collections::HashSet<u64>) {
-    LAST_LAYOUT.lock().unwrap().retain(|id, _| present.contains(id));
+    LAST_LAYOUT
+        .lock()
+        .unwrap()
+        .retain(|id, _| present.contains(id));
 }

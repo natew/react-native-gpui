@@ -28,6 +28,13 @@ fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::SeqCst)
 }
 
+// Injected into every <WebView> before its content loads: the React Native bridge
+// global, so existing RN web content (and our own pages) can post to the host with
+// `window.ReactNativeWebView.postMessage(data)`. It tunnels through wry's IPC, which
+// the service forwards to the node's onMessage handler.
+const RN_WEBVIEW_SHIM: &str = "window.ReactNativeWebView={postMessage:function(d){\
+    window.ipc.postMessage(typeof d==='string'?d:JSON.stringify(d))}};";
+
 fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
     let obj = value.as_object()?;
     let element_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("div");
@@ -228,17 +235,49 @@ impl Render for ServiceApp {
         self.webview_content.retain(|id, _| present_wv.contains(id));
         for (id, content, is_html) in wv_specs {
             let view = self.webviews.entry(id).or_insert_with(|| {
+                let dbg = std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok();
                 let wv = wry::WebViewBuilder::new()
+                    // RN-compatible bridge so page code can talk to the host:
+                    // window.ReactNativeWebView.postMessage(d) → the node's onMessage.
+                    .with_initialization_script(RN_WEBVIEW_SHIM)
+                    // page → host: forward every posted message to the JS side, where
+                    // it's dispatched to the node's onMessage handler by id.
+                    .with_ipc_handler(move |req| {
+                        let body = req.body();
+                        if dbg {
+                            eprintln!("[webview {id}] message: {body}");
+                        }
+                        bridge::webview_message(id, body);
+                    })
+                    // page finished loading → fire the node's onLoad. (also a handy
+                    // screenshot-independent "did it render" signal under DEBUG, since a
+                    // WKWebView's content surface isn't visible to window/screen capture.)
+                    .with_on_page_load_handler(move |event, _url| {
+                        if matches!(event, wry::PageLoadEvent::Finished) {
+                            if dbg {
+                                eprintln!("[webview {id}] page-load finished");
+                            }
+                            bridge::event(id, "load");
+                        }
+                    })
                     .build_as_child(&*window)
                     .expect("failed to create webview");
                 let _ = wv.set_visible(true);
                 Rc::new(wv)
             });
+            let dbg = std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok();
             if self.webview_content.get(&id) != Some(&content) {
-                if is_html {
-                    let _ = view.load_html(&content);
+                let r = if is_html {
+                    view.load_html(&content)
                 } else {
-                    let _ = view.load_url(&content);
+                    view.load_url(&content)
+                };
+                if dbg {
+                    eprintln!(
+                        "[webview {id}] load is_html={is_html} len={} -> {:?}",
+                        content.len(),
+                        r.map(|_| "ok")
+                    );
                 }
                 self.webview_content.insert(id, content);
             }
@@ -281,11 +320,39 @@ fn fallback_root() -> Arc<ReactElement> {
     })
 }
 
+/// A message from the JS side over stdin: either a new element tree to render, or a
+/// command targeting a live `<WebView>` (host → frame: ref.injectJavaScript / reload).
+enum Incoming {
+    Tree(Arc<ReactElement>),
+    Eval { id: u64, js: String },
+    Reload { id: u64 },
+}
+
+/// Parse one stdin line into an `Incoming`. A `$cmd` object is a webview command;
+/// anything else is parsed as an element tree.
+fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
+    if let Some(cmd) = v.get("$cmd").and_then(|c| c.as_str()) {
+        let id = v.get("id").and_then(|x| x.as_u64());
+        return match cmd {
+            "eval" => match (id, v.get("js").and_then(|x| x.as_str())) {
+                (Some(id), Some(js)) => Some(Incoming::Eval {
+                    id,
+                    js: js.to_string(),
+                }),
+                _ => None,
+            },
+            "reload" => id.map(|id| Incoming::Reload { id }),
+            _ => None,
+        };
+    }
+    parse_json_tree(v).map(Incoming::Tree)
+}
+
 fn main() {
-    // Background thread continuously reads JSON trees from stdin (one per line) and
+    // Background thread continuously reads JSON from stdin (one message per line) and
     // hands each to a flume channel. The first tree bootstraps the window size; the
     // rest are applied by a foreground task that calls cx.notify() — no polling.
-    let (tree_tx, tree_rx) = flume::unbounded::<Arc<ReactElement>>();
+    let (tree_tx, tree_rx) = flume::unbounded::<Incoming>();
     std::thread::spawn(move || {
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
@@ -300,15 +367,22 @@ fn main() {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            if let Some(root) = parse_json_tree(&v) {
-                if tree_tx.send(root).is_err() {
+            if let Some(msg) = parse_incoming(&v) {
+                if tree_tx.send(msg).is_err() {
                     break; // window closed
                 }
             }
         }
     });
 
-    let initial = tree_rx.recv().unwrap_or_else(|_| fallback_root());
+    // first tree bootstraps the window; ignore any commands that arrive before it.
+    let initial = loop {
+        match tree_rx.recv() {
+            Ok(Incoming::Tree(t)) => break t,
+            Ok(_) => continue,
+            Err(_) => break fallback_root(),
+        }
+    };
 
     // Window opens at the root's declared width/height; after that it fills.
     let win_w = initial.style.width.and_then(Dim::as_px).unwrap_or(720.0);
@@ -389,13 +463,26 @@ fn main() {
             cx.activate(true);
         }
 
-        // Foreground pump: apply each newer tree on the main thread and notify, so
-        // the window re-renders exactly when React re-renders — and never otherwise.
+        // Foreground pump: apply each message on the main thread. A new tree re-renders
+        // (cx.notify); a webview command runs straight against the live wry view (which
+        // must be driven from the main thread). Both arrive on the same ordered channel.
         cx.spawn(async move |cx| {
-            while let Ok(tree) = tree_rx.recv_async().await {
-                let applied = pump.update(cx, |this, cx| {
-                    this.root = fill_root(tree);
-                    cx.notify();
+            while let Ok(msg) = tree_rx.recv_async().await {
+                let applied = pump.update(cx, |this, cx| match msg {
+                    Incoming::Tree(t) => {
+                        this.root = fill_root(t);
+                        cx.notify();
+                    }
+                    Incoming::Eval { id, js } => {
+                        if let Some(view) = this.webviews.get(&id) {
+                            let _ = view.evaluate_script(&js);
+                        }
+                    }
+                    Incoming::Reload { id } => {
+                        if let Some(view) = this.webviews.get(&id) {
+                            let _ = view.reload();
+                        }
+                    }
                 });
                 if applied.is_err() {
                     break; // view dropped

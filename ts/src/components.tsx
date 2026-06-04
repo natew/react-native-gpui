@@ -3,7 +3,17 @@
  * WebView / ScrollView) are string tags the reconciler maps to GPUI elements;
  * everything else composes them, matching React Native's public components.
  */
-import { createElement, Fragment, useState, type ReactNode, type FC } from "react";
+import {
+    createElement,
+    Fragment,
+    forwardRef,
+    useImperativeHandle,
+    useRef,
+    useState,
+    type ReactNode,
+    type FC,
+} from "react";
+import { sendCommand } from "./commands";
 import type {
     ViewProps,
     TextStyle,
@@ -70,15 +80,60 @@ export interface SvgProps {
 /** `<Svg name="branch.svg" />` — a monochrome icon tinted by `style.color`. */
 export const Svg = "Svg" as unknown as FC<SvgProps>;
 
+export interface WebViewMessageEvent {
+    nativeEvent: { data: string };
+}
 export interface WebViewProps {
     source: { uri: string } | { html: string };
     style?: StyleProp<ViewStyle>;
+    /** the page finished loading */
     onLoad?: () => void;
+    /** the page posted a message via `window.ReactNativeWebView.postMessage(data)` */
+    onMessage?: (event: WebViewMessageEvent) => void;
     onLayout?: (event: LayoutChangeEvent) => void;
     testID?: string;
 }
-/** `<WebView source={{ uri }} />` — a native WebView child (native web scroll). */
-export const WebView = "WebView" as unknown as FC<WebViewProps>;
+/** imperative handle (host → frame) obtained via a `ref` on `<WebView>`. */
+export interface WebViewHandle {
+    /** run arbitrary JS inside the page */
+    injectJavaScript: (js: string) => void;
+    /** deliver a message to the page; arrives as a `message` event on window & document */
+    postMessage: (data: string) => void;
+    /** reload the current document */
+    reload: () => void;
+}
+/**
+ * `<WebView source={{ uri | html }} />` — a native WebView child (native web scroll +
+ * selection). Two-way messaging: the page calls
+ * `window.ReactNativeWebView.postMessage(d)` → `onMessage`; the host calls
+ * `ref.injectJavaScript(js)` / `ref.postMessage(d)` / `ref.reload()` → the page.
+ */
+export const WebView = forwardRef<WebViewHandle, WebViewProps>(function WebView(props, ref) {
+    // a ref on the host node resolves to the reconciler Instance (it carries the
+    // node id), which is how a host → frame command targets this exact webview.
+    const host = useRef<{ id: number } | null>(null);
+    useImperativeHandle(
+        ref,
+        () => ({
+            injectJavaScript(js) {
+                if (host.current) sendCommand({ $cmd: "eval", id: host.current.id, js });
+            },
+            postMessage(data) {
+                if (host.current) {
+                    const js = `(function(){var e=new MessageEvent('message',{data:${JSON.stringify(
+                        data,
+                    )}});window.dispatchEvent(e);document.dispatchEvent(e);})();`;
+                    sendCommand({ $cmd: "eval", id: host.current.id, js });
+                }
+            },
+            reload() {
+                if (host.current) sendCommand({ $cmd: "reload", id: host.current.id });
+            },
+        }),
+        [],
+    );
+    return createElement("WebView" as any, { ...props, ref: host });
+});
 
 // ── ScrollView ──────────────────────────────────────────────────────
 export interface ScrollViewProps extends ViewProps {

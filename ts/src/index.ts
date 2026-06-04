@@ -37,6 +37,8 @@ export type {
     ImageProps,
     SvgProps,
     WebViewProps,
+    WebViewHandle,
+    WebViewMessageEvent,
     ScrollViewProps,
     PressableProps,
     TouchableProps,

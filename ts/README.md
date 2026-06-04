@@ -70,6 +70,33 @@ APIs: `StyleSheet`, `Dimensions`, `useWindowDimensions`, `Platform`, `PixelRatio
 
 The `WebView` is a real native web view composited inside the GPUI window — you get web-grade rendering and **native scroll momentum + selection** for the content area while the shell stays native. Re-render it from React state like any other component.
 
+### Messaging (two-way)
+
+`source` re-renders the whole document, so for live content drive it with messages instead:
+
+```tsx
+const ref = useRef<WebViewHandle>(null)
+
+<WebView
+  ref={ref}
+  source={{ html }}
+  onLoad={() => ref.current?.injectJavaScript("startStreaming()")}
+  onMessage={(e) => handle(e.nativeEvent.data)}  // page → host
+/>
+
+// host → frame:
+ref.current?.injectJavaScript("appendToken('…')")  // run JS in the page (no reload)
+ref.current?.postMessage("payload")                // → a 'message' event in the page
+ref.current?.reload()
+```
+
+Inside the page, talk back to the host with the React-Native bridge global (injected automatically):
+
+```js
+window.ReactNativeWebView.postMessage("hello from the page")   // → onMessage
+window.addEventListener("message", (e) => { /* host postMessage */ })
+```
+
 ## Building from source
 
 This package ships a prebuilt `rngpui-service` binary in `native/`. To build it yourself you need a Rust toolchain:

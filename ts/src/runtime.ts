@@ -28,6 +28,8 @@ export type BridgeEvent =
 
 export interface Bridge {
     update(tree: SerializedNode): void;
+    /** send an imperative command (host → frame), e.g. a WebView eval/reload */
+    command(cmd: object): void;
     onEvent(cb: (e: BridgeEvent) => void): void;
     close(): void;
 }
@@ -81,13 +83,14 @@ export function startBridge(initial: SerializedNode): Bridge {
     }
     proc.on("exit", () => process.exit(0));
 
-    const write = (node: SerializedNode) => {
-        if (proc.stdin && proc.stdin.writable) proc.stdin.write(JSON.stringify(node) + "\n");
+    const writeLine = (obj: object) => {
+        if (proc.stdin && proc.stdin.writable) proc.stdin.write(JSON.stringify(obj) + "\n");
     };
-    write(initial);
+    writeLine(initial);
 
     return {
-        update: write,
+        update: writeLine,
+        command: writeLine,
         onEvent: (cb) => listeners.push(cb),
         close: () => {
             if (proc.stdin) proc.stdin.end();

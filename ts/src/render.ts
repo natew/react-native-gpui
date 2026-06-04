@@ -6,6 +6,7 @@
 import { createElement, type ReactElement, type ComponentType } from "react";
 import Reconciler, { setCommitSink, serializeContainer, dispatchEvent, type Container } from "./reconciler";
 import { startBridge, type Bridge, type BridgeEvent, type SerializedNode } from "./runtime";
+import { setCommandSink } from "./commands";
 import { Dimensions } from "./Dimensions";
 
 export interface RootOptions {
@@ -59,6 +60,10 @@ export function createRoot(options: RootOptions = {}): Root {
             bridge.update(tree);
         }
     });
+
+    // Imperative host → frame commands (WebView.injectJavaScript / reload). Commands
+    // only fire after mount, by which point the bridge exists.
+    setCommandSink((cmd) => bridge?.command(cmd));
 
     // tag 0 = LegacyRoot → synchronous commits, so each render flushes straight
     // through resetAfterCommit into the bridge.

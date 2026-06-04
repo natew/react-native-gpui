@@ -38,6 +38,8 @@ const PROP_TO_EVENT: Record<string, string> = {
     onBlur: "blur",
     onLayout: "layout",
     onScroll: "scroll",
+    onMessage: "message",
+    onLoad: "load",
 };
 const handlers = new Map<number, Record<string, Function>>();
 
@@ -55,6 +57,7 @@ export function dispatchEvent(id: number, event: string, payload: { value?: stri
     const fn = handlers.get(id)?.[event];
     if (!fn) return;
     if (event === "changeText") fn(payload.value ?? "");
+    else if (event === "message") fn({ nativeEvent: { data: payload.value ?? "" } });
     else if (event === "layout") fn({ nativeEvent: { layout: payload.layout } });
     else fn({ nativeEvent: {} });
 }

@@ -2,7 +2,7 @@ import { createContext } from "react";
 import ReactReconciler from "react-reconciler";
 import { DefaultEventPriority, NoEventPriority } from "react-reconciler/constants";
 import { normalizeStyle } from "./StyleSheet";
-import type { SerializedNode } from "./runtime";
+import type { SerializedAccessibility, SerializedNode } from "./runtime";
 
 // ── ids + instances ─────────────────────────────────────────────────
 let nextId = 1;
@@ -67,6 +67,7 @@ const PROP_TO_EVENT: Record<string, string> = {
     onChangeText: "changeText",
     onChange: "change",
     onSubmitEditing: "submit",
+    onKeyPress: "keyPress",
     onFocus: "focus",
     onBlur: "blur",
     onLayout: "layout",
@@ -124,13 +125,26 @@ function registerHandlers(id: number, props: Record<string, unknown>) {
 }
 
 /** Called by the render layer when the bridge reports a native event. */
-export function dispatchEvent(id: number, event: string, payload: { value?: string; layout?: unknown }) {
+export function dispatchEvent(
+    id: number,
+    event: string,
+    payload: {
+        value?: string;
+        key?: string;
+        shiftKey?: boolean;
+        ctrlKey?: boolean;
+        altKey?: boolean;
+        metaKey?: boolean;
+        layout?: unknown;
+    },
+) {
     const fn = handlers.get(id)?.[event];
     if (!fn) return;
     if (event === "changeText") fn(payload.value ?? "");
     else if (event === "change") fn(createValueEvent(event, payload.value ?? ""));
     else if (event === "message") fn({ nativeEvent: { data: payload.value ?? "" } });
     else if (event === "layout") fn({ nativeEvent: { layout: payload.layout } });
+    else if (event === "keyPress") fn(createKeyPressEvent(payload));
     else fn(createEvent(event, payload));
 }
 
@@ -143,29 +157,66 @@ function createValueEvent(type: string, value: string) {
     };
 }
 
-function createEvent(type: string, payload: { value?: string; layout?: unknown }) {
+function createKeyPressEvent(payload: {
+    key?: string;
+    shiftKey?: boolean;
+    ctrlKey?: boolean;
+    altKey?: boolean;
+    metaKey?: boolean;
+}) {
+    const event = createEvent("keyPress", payload);
+    event.key = payload.key;
+    event.shiftKey = !!payload.shiftKey;
+    event.ctrlKey = !!payload.ctrlKey;
+    event.altKey = !!payload.altKey;
+    event.metaKey = !!payload.metaKey;
+    event.nativeEvent.key = payload.key;
+    event.nativeEvent.shiftKey = !!payload.shiftKey;
+    event.nativeEvent.ctrlKey = !!payload.ctrlKey;
+    event.nativeEvent.altKey = !!payload.altKey;
+    event.nativeEvent.metaKey = !!payload.metaKey;
+    return event;
+}
+
+function createEvent(
+    type: string,
+    payload: {
+        value?: string;
+        key?: string;
+        shiftKey?: boolean;
+        ctrlKey?: boolean;
+        altKey?: boolean;
+        metaKey?: boolean;
+        layout?: unknown;
+    },
+) {
     let defaultPrevented = false;
     let propagationStopped = false;
     const eventObject: any = {
         type,
-        altKey: false,
+        altKey: !!payload.altKey,
         button: 0,
         buttons: 0,
         cancelable: true,
-        ctrlKey: false,
+        ctrlKey: !!payload.ctrlKey,
         currentTarget: {},
         defaultPrevented,
-        metaKey: false,
+        metaKey: !!payload.metaKey,
         nativeEvent: {
             type,
             value: payload.value,
+            key: payload.key,
+            shiftKey: !!payload.shiftKey,
+            ctrlKey: !!payload.ctrlKey,
+            altKey: !!payload.altKey,
+            metaKey: !!payload.metaKey,
             layout: payload.layout,
             locationX: 0,
             locationY: 0,
             pageX: 0,
             pageY: 0,
         },
-        shiftKey: false,
+        shiftKey: !!payload.shiftKey,
         target: {},
         timeStamp: Date.now(),
         preventDefault() {
@@ -199,6 +250,72 @@ function gatherText(inst: Instance): string {
     if (out === "" && typeof inst.props.children === "string") out = inst.props.children as string;
     if (out === "" && typeof inst.props.children === "number") out = String(inst.props.children);
     return out;
+}
+
+function stringProp(props: Record<string, unknown>, ...names: string[]): string | undefined {
+    for (const name of names) {
+        const value = props[name];
+        if (typeof value === "string" && value.length > 0) return value;
+        if (typeof value === "number") return String(value);
+    }
+    return undefined;
+}
+
+function boolProp(props: Record<string, unknown>, ...names: string[]): boolean | undefined {
+    for (const name of names) {
+        const value = props[name];
+        if (typeof value === "boolean") return value;
+    }
+    return undefined;
+}
+
+function accessibilityValueText(value: unknown): string | undefined {
+    if (typeof value === "string" || typeof value === "number") return String(value);
+    if (!value || typeof value !== "object") return undefined;
+    const text = (value as { text?: unknown }).text;
+    if (typeof text === "string" || typeof text === "number") return String(text);
+    const now = (value as { now?: unknown }).now;
+    if (typeof now === "string" || typeof now === "number") return String(now);
+    return undefined;
+}
+
+function serializeAccessibility(inst: Instance, node: SerializedNode): SerializedAccessibility | undefined {
+    const props = inst.props;
+    const state = (props.accessibilityState && typeof props.accessibilityState === "object"
+        ? props.accessibilityState
+        : {}) as Record<string, unknown>;
+    const important = props.importantForAccessibility;
+    const hidden =
+        boolProp(props, "accessibilityElementsHidden", "aria-hidden") ??
+        (important === "no-hide-descendants" ? true : undefined);
+
+    const info: SerializedAccessibility = {
+        accessible:
+            boolProp(props, "accessible") ??
+            (important === "no" ? false : important === "yes" ? true : undefined),
+        hidden,
+        label: stringProp(props, "accessibilityLabel", "aria-label"),
+        role: stringProp(props, "accessibilityRole", "role"),
+        hint: stringProp(props, "accessibilityHint", "aria-description"),
+        value: accessibilityValueText(props.accessibilityValue),
+        identifier: stringProp(props, "nativeID", "testID", "id"),
+        disabled: boolProp(state, "disabled"),
+        selected: boolProp(state, "selected"),
+        checked: typeof state.checked === "boolean" || state.checked === "mixed" ? state.checked : undefined,
+        expanded: boolProp(state, "expanded"),
+    };
+
+    if (!info.label && node.type === "text" && node.text) info.label = node.text;
+    if (!info.value && (node.type === "textinput" || node.type === "textarea") && node.value) info.value = node.value;
+    if (!info.label && (node.type === "textinput" || node.type === "textarea") && node.placeholder) {
+        info.label = node.placeholder;
+    }
+    if (!info.label && (info.accessible || info.role || info.identifier || handlers.has(inst.id))) {
+        const text = gatherText(inst).trim();
+        if (text) info.label = text;
+    }
+
+    return Object.values(info).some((value) => value !== undefined) ? info : undefined;
 }
 
 type SerRun = { text: string; fontWeight?: string; color?: string; fontStyle?: string };
@@ -259,6 +376,7 @@ function serialize(inst: Instance | TextInstance): SerializedNode {
         case "TextInput":
             node.type = props.multiline ? "textarea" : "textinput";
             node.placeholder = (props.placeholder as string) ?? "";
+            if (props.editable === false) node.editable = false;
             if (props.value != null) node.value = String(props.value);
             else if (props.defaultValue != null) node.value = String(props.defaultValue);
             break;
@@ -288,6 +406,8 @@ function serialize(inst: Instance | TextInstance): SerializedNode {
     if (Object.keys(style).length) node.style = style;
     const evts = handlers.get(inst.id);
     if (evts) node.events = Object.keys(evts);
+    const accessibility = serializeAccessibility(inst, node);
+    if (accessibility) node.accessibility = accessibility;
 
     if (node.type === "div" || node.type === "svg" /* svg has no children but harmless */) {
         const kids: SerializedNode[] = [];

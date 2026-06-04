@@ -15,13 +15,32 @@ use crate::style::ElementStyle;
 // Scroll offset (in px from the top) per scroll-container id, persisted across the
 // continuous re-render loop so wheel scrolling sticks.
 static SCROLL: Lazy<Mutex<HashMap<u64, f32>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static SCROLL_TO_END: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+#[derive(Clone, Default)]
+pub struct DivPrepaintState {
+    hitbox: Option<Hitbox>,
+    max_scroll: f32,
+}
 
 fn get_scroll(id: u64) -> f32 {
     SCROLL.lock().unwrap().get(&id).copied().unwrap_or(0.0)
 }
 fn set_scroll(id: u64, v: f32) {
     SCROLL.lock().unwrap().insert(id, v);
+}
+
+pub fn scroll_to(id: u64, y: f32) {
+    set_scroll(id, y.max(0.0));
+}
+
+pub fn scroll_to_end(id: u64) {
+    SCROLL_TO_END.lock().unwrap().insert(id);
+}
+
+fn take_scroll_to_end(id: u64) -> bool {
+    SCROLL_TO_END.lock().unwrap().remove(&id)
 }
 
 fn emit_if(id: u64, enabled: bool, name: &str) {
@@ -75,7 +94,7 @@ impl ReactDivElement {
 }
 
 impl Element for ReactDivElement {
-    type PrepaintState = Option<Hitbox>;
+    type PrepaintState = DivPrepaintState;
     type RequestLayoutState = Vec<LayoutId>;
 
     fn id(&self) -> Option<ElementId> {
@@ -148,6 +167,9 @@ impl Element for ReactDivElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        #[cfg(target_os = "macos")]
+        crate::ax::update_frame(window, &self.element, bounds);
+
         let (_, scroll) = overflow_mode(&self.element.style);
 
         // claim a hitbox for any view that handles pointer or scroll input.
@@ -193,12 +215,17 @@ impl Element for ReactDivElement {
             None
         };
 
+        let mut max_scroll = 0.0;
         if scroll {
             // clamp the stored offset to the scrollable range, then shift children up
             // by it (in prepaint, so hit-testing matches what's painted).
             let content_h = Self::content_height(request_layout, window, bounds.top());
-            let max_scroll: f32 = (content_h - bounds.size.height).max(px(0.0)).into();
-            let off = get_scroll(self.element.global_id).clamp(0.0, max_scroll);
+            max_scroll = (content_h - bounds.size.height).max(px(0.0)).into();
+            let off = if take_scroll_to_end(self.element.global_id) {
+                max_scroll
+            } else {
+                get_scroll(self.element.global_id).clamp(0.0, max_scroll)
+            };
             set_scroll(self.element.global_id, off);
             window.with_element_offset(point(px(0.0), px(-off)), |window| {
                 for child in &mut self.children {
@@ -211,7 +238,7 @@ impl Element for ReactDivElement {
             }
         }
 
-        hitbox
+        DivPrepaintState { hitbox, max_scroll }
     }
 
     fn paint(
@@ -219,7 +246,7 @@ impl Element for ReactDivElement {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
-        request_layout: &mut Self::RequestLayoutState,
+        _request_layout: &mut Self::RequestLayoutState,
         prepaint: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
@@ -234,9 +261,8 @@ impl Element for ReactDivElement {
         // propagation so an ancestor doesn't also move.
         if scroll {
             let id = self.element.global_id;
-            let content_h = Self::content_height(request_layout, window, bounds.top());
-            let max_scroll: f32 = (content_h - bounds.size.height).max(px(0.0)).into();
-            let hitbox = prepaint.clone();
+            let max_scroll = prepaint.max_scroll;
+            let hitbox = prepaint.hitbox.clone();
             window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble
                     && hitbox
@@ -319,7 +345,7 @@ impl Element for ReactDivElement {
             || press_in
             || press_out;
         if tracks_pointer {
-            if let Some(hitbox) = prepaint.clone() {
+            if let Some(hitbox) = prepaint.hitbox.clone() {
                 if mouse_down
                     || pointer_down
                     || touch_start

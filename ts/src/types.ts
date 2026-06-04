@@ -152,7 +152,68 @@ export interface MouseResponderEvent extends GestureResponderEvent {
 }
 
 // ── common view props ───────────────────────────────────────────────
-export interface ViewProps {
+export type AccessibilityRole =
+    | "none"
+    | "button"
+    | "link"
+    | "search"
+    | "image"
+    | "keyboardkey"
+    | "text"
+    | "adjustable"
+    | "imagebutton"
+    | "header"
+    | "summary"
+    | "alert"
+    | "checkbox"
+    | "combobox"
+    | "menu"
+    | "menubar"
+    | "menuitem"
+    | "progressbar"
+    | "radio"
+    | "radiogroup"
+    | "scrollbar"
+    | "spinbutton"
+    | "switch"
+    | "tab"
+    | "tablist"
+    | "timer"
+    | "toolbar";
+
+export interface AccessibilityState {
+    disabled?: boolean;
+    selected?: boolean;
+    checked?: boolean | "mixed";
+    busy?: boolean;
+    expanded?: boolean;
+}
+
+export interface AccessibilityValue {
+    min?: number;
+    max?: number;
+    now?: number;
+    text?: string;
+}
+
+export interface AccessibilityProps {
+    accessible?: boolean;
+    accessibilityElementsHidden?: boolean;
+    accessibilityLabel?: string;
+    accessibilityRole?: AccessibilityRole;
+    accessibilityHint?: string;
+    accessibilityState?: AccessibilityState;
+    accessibilityValue?: AccessibilityValue | string | number;
+    importantForAccessibility?: "auto" | "yes" | "no" | "no-hide-descendants";
+    "aria-label"?: string;
+    "aria-description"?: string;
+    "aria-hidden"?: boolean;
+    role?: AccessibilityRole;
+    testID?: string;
+    nativeID?: string;
+}
+
+export interface ViewProps extends AccessibilityProps {
     children?: ReactNode;
     style?: StyleProp<ViewStyle>;
     hoverStyle?: StyleProp<ViewStyle>;
@@ -187,8 +248,4 @@ export interface ViewProps {
     onHoverOut?: (event: MouseResponderEvent) => void;
     onLayout?: (event: LayoutChangeEvent) => void;
     pointerEvents?: "auto" | "none" | "box-none" | "box-only";
-    testID?: string;
-    accessible?: boolean;
-    accessibilityLabel?: string;
-    nativeID?: string;
 }

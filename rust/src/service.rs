@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 use std::io::{self, BufRead};
 use std::sync::Arc;
 
@@ -14,12 +16,14 @@ use gpui_component::theme::{Theme, ThemeMode};
 
 actions!(rngpui, [Quit]);
 
+#[cfg(target_os = "macos")]
+mod ax;
 mod bridge;
 mod elements;
 mod icons;
 mod style;
 
-use elements::{ReactElement, create_element};
+use elements::{AccessibilityInfo, ReactElement, create_element};
 use style::{Dim, ElementStyle};
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,6 +63,10 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         .get("value")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let editable = obj
+        .get("editable")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let events = obj
         .get("events")
         .and_then(|v| v.as_array())
@@ -67,6 +75,10 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
                 .filter_map(|x| x.as_str().map(String::from))
                 .collect()
         })
+        .unwrap_or_default();
+    let accessibility = obj
+        .get("accessibility")
+        .and_then(parse_accessibility)
         .unwrap_or_default();
     let style = obj
         .get("style")
@@ -112,11 +124,44 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         runs,
         src,
         value,
+        editable,
         events,
+        accessibility,
         children,
         style,
         cached_gpui_style: None,
     }))
+}
+
+fn parse_accessibility(value: &serde_json::Value) -> Option<AccessibilityInfo> {
+    let obj = value.as_object()?;
+    let checked = match obj.get("checked") {
+        Some(v) if v.is_boolean() => Some(v.as_bool().unwrap().to_string()),
+        Some(v) => v.as_str().map(String::from),
+        None => None,
+    };
+    Some(AccessibilityInfo {
+        accessible: obj.get("accessible").and_then(|v| v.as_bool()),
+        hidden: obj.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false),
+        label: obj.get("label").and_then(|v| v.as_str()).map(String::from),
+        role: obj.get("role").and_then(|v| v.as_str()).map(String::from),
+        hint: obj.get("hint").and_then(|v| v.as_str()).map(String::from),
+        value: obj.get("value").and_then(|v| v.as_str()).map(String::from),
+        identifier: obj
+            .get("identifier")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        disabled: obj
+            .get("disabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        selected: obj
+            .get("selected")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        checked,
+        expanded: obj.get("expanded").and_then(|v| v.as_bool()),
+    })
 }
 
 /// Make the root element fill the window so the layout reflows on resize. We keep
@@ -333,6 +378,9 @@ impl Render for ServiceApp {
         collect_layout_ids(&self.root, &mut layout_ids);
         bridge::retain_layout(&layout_ids);
 
+        #[cfg(target_os = "macos")]
+        ax::sync_tree(window, &self.root);
+
         let root = create_element(self.root.clone(), 0, None);
         gpui::div()
             .size_full()
@@ -352,7 +400,9 @@ fn fallback_root() -> Arc<ReactElement> {
         runs: Vec::new(),
         src: None,
         value: None,
+        editable: true,
         events: Vec::new(),
+        accessibility: AccessibilityInfo::default(),
         children: vec![],
         style: ElementStyle {
             width: Some(Dim::Px(720.0)),
@@ -371,6 +421,8 @@ enum Incoming {
     Tree(Arc<ReactElement>),
     Eval { id: u64, js: String },
     Reload { id: u64 },
+    ScrollTo { id: u64, y: f32 },
+    ScrollToEnd { id: u64 },
 }
 
 /// Parse one stdin line into an `Incoming`. A `$cmd` object is a webview command;
@@ -387,6 +439,11 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
                 _ => None,
             },
             "reload" => id.map(|id| Incoming::Reload { id }),
+            "scrollTo" => id.map(|id| Incoming::ScrollTo {
+                id,
+                y: v.get("y").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32,
+            }),
+            "scrollToEnd" => id.map(|id| Incoming::ScrollToEnd { id }),
             _ => None,
         };
     }
@@ -528,6 +585,14 @@ fn main() {
                         if let Some(view) = this.webviews.get(&id) {
                             let _ = view.reload();
                         }
+                    }
+                    Incoming::ScrollTo { id, y } => {
+                        elements::scroll_to(id, y);
+                        cx.notify();
+                    }
+                    Incoming::ScrollToEnd { id } => {
+                        elements::scroll_to_end(id);
+                        cx.notify();
                     }
                 });
                 if applied.is_err() {

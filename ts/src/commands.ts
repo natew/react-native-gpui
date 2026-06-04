@@ -4,7 +4,9 @@
 // the bridge; components call `sendCommand`.
 export type Command =
     | { $cmd: "eval"; id: number; js: string }
-    | { $cmd: "reload"; id: number };
+    | { $cmd: "reload"; id: number }
+    | { $cmd: "scrollTo"; id: number; x?: number; y?: number }
+    | { $cmd: "scrollToEnd"; id: number };
 
 let sink: ((cmd: Command) => void) | null = null;
 

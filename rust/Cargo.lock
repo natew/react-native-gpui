@@ -5369,11 +5369,14 @@ name = "react-native-gpui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cocoa 0.26.0",
  "flume",
  "gpui",
  "gpui-component",
  "lb-wry",
+ "objc",
  "once_cell",
+ "raw-window-handle",
  "serde",
  "serde_json",
 ]

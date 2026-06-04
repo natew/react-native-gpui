@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, FontStyle, HighlightStyle, Hsla, IntoElement, ParentElement, RenderOnce,
-    Styled, StyledText, Window, div, px,
+    AnyElement, App, Bounds, Element, ElementId, FontStyle, GlobalElementId, HighlightStyle, Hsla,
+    IntoElement, LayoutId, ParentElement, Pixels, Styled, StyledText, Window, div, px,
 };
 
 use crate::elements::ReactElement;
@@ -12,6 +12,7 @@ pub struct ReactTextElement {
     element: Arc<ReactElement>,
     _window_id: u64,
     _parent_style: Option<ElementStyle>,
+    child: Option<AnyElement>,
 }
 
 impl ReactTextElement {
@@ -24,12 +25,11 @@ impl ReactTextElement {
             element,
             _window_id: window_id,
             _parent_style: parent_style,
+            child: None,
         }
     }
-}
 
-impl RenderOnce for ReactTextElement {
-    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn build_child(&self, window: &mut Window) -> AnyElement {
         let style = &self.element.style;
         let color = style.color.unwrap_or(Hsla {
             h: 0.0,
@@ -55,7 +55,7 @@ impl RenderOnce for ReactTextElement {
 
         // No inline runs → plain text.
         if self.element.runs.is_empty() {
-            return el.child(text);
+            return el.child(text).into_any_element();
         }
 
         // Nested `<Text>` → flowing styled runs. StyledText doesn't inherit the
@@ -101,12 +101,71 @@ impl RenderOnce for ReactTextElement {
             ix += len;
         }
         el.child(StyledText::new(flat).with_default_highlights(&base, highlights))
+            .into_any_element()
+    }
+}
+
+impl Element for ReactTextElement {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some(ElementId::Integer(self.element.global_id))
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let mut child = self.build_child(window);
+        let layout_id = child.request_layout(window, cx);
+        self.child = Some(child);
+        (layout_id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        #[cfg(target_os = "macos")]
+        crate::ax::update_frame(window, &self.element, bounds);
+
+        if let Some(child) = self.child.as_mut() {
+            child.prepaint(window, cx);
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(child) = self.child.as_mut() {
+            child.paint(window, cx);
+        }
     }
 }
 
 impl IntoElement for ReactTextElement {
-    type Element = AnyElement;
+    type Element = Self;
     fn into_element(self) -> Self::Element {
-        gpui::Component::new(self).into_any_element()
+        self
     }
 }

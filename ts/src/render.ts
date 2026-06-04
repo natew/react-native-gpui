@@ -48,7 +48,15 @@ export function createRoot(options: RootOptions = {}): Root {
         }
         // a native UI event → route to the React handler; its setState (if any)
         // schedules a re-render, which commits a fresh tree back to the bridge.
-        dispatchEvent(e.id, e.event, { value: e.value, layout: e.layout });
+        dispatchEvent(e.id, e.event, {
+            value: e.value,
+            key: e.key,
+            shiftKey: e.shiftKey,
+            ctrlKey: e.ctrlKey,
+            altKey: e.altKey,
+            metaKey: e.metaKey,
+            layout: e.layout,
+        });
     };
 
     // The reconciler calls this after every commit with the serialized tree.

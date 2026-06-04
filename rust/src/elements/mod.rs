@@ -5,7 +5,7 @@ mod svg;
 mod text;
 pub mod webview;
 
-pub use div::ReactDivElement;
+pub use div::{ReactDivElement, scroll_to, scroll_to_end};
 pub use image::ReactImageElement;
 pub use input::ReactInputElement;
 pub use svg::ReactSvgElement;
@@ -16,6 +16,21 @@ use gpui::{AnyElement, Hsla, IntoElement};
 use std::sync::Arc;
 
 use crate::style::ElementStyle;
+
+#[derive(Clone, Debug, Default)]
+pub struct AccessibilityInfo {
+    pub accessible: Option<bool>,
+    pub hidden: bool,
+    pub label: Option<String>,
+    pub role: Option<String>,
+    pub hint: Option<String>,
+    pub value: Option<String>,
+    pub identifier: Option<String>,
+    pub disabled: bool,
+    pub selected: bool,
+    pub checked: Option<String>,
+    pub expanded: Option<bool>,
+}
 
 /// An inline styled run within a `<Text>` — preserves nested `<Text>` styling
 /// (bold lead-ins etc.) that would otherwise be flattened away.
@@ -39,8 +54,11 @@ pub struct ReactElement {
     pub src: Option<String>,
     /// text input value from react props.
     pub value: Option<String>,
+    /// whether text input nodes accept editing. RN TextInput defaults to editable.
+    pub editable: bool,
     /// event names this node listens to: "press", "changeText", "layout", …
     pub events: Vec<String>,
+    pub accessibility: AccessibilityInfo,
     pub children: Vec<Arc<ReactElement>>,
     pub style: ElementStyle,
     pub cached_gpui_style: Option<gpui::Style>,
@@ -67,12 +85,12 @@ pub fn create_element(
     parent_style: Option<ElementStyle>,
 ) -> AnyElement {
     match element.element_type.as_str() {
-        "text" => ReactTextElement::new(element, window_id, parent_style).into_element(),
-        "svg" => ReactSvgElement::new(element, window_id, parent_style).into_element(),
-        "image" => ReactImageElement::new(element, window_id, parent_style).into_element(),
+        "text" => ReactTextElement::new(element, window_id, parent_style).into_any_element(),
+        "svg" => ReactSvgElement::new(element, window_id, parent_style).into_any_element(),
+        "image" => ReactImageElement::new(element, window_id, parent_style).into_any_element(),
         "webview" => ReactWebViewElement::new(element).into_any_element(),
         "textinput" | "textarea" => {
-            ReactInputElement::new(element, window_id, parent_style).into_element()
+            ReactInputElement::new(element, window_id, parent_style).into_any_element()
         }
         _ => ReactDivElement::new(element, window_id, parent_style).into_element(),
     }

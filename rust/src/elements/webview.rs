@@ -76,6 +76,9 @@ impl Element for ReactWebViewElement {
         window: &mut Window,
         _cx: &mut App,
     ) {
+        #[cfg(target_os = "macos")]
+        crate::ax::update_frame(window, &self.element, bounds);
+
         // reserve the webview's rect for gpui hit-testing. insert_hitbox must run in
         // prepaint (gpui asserts the phase — in release the assert is compiled out,
         // which is why this only crashed debug builds). the native WKWebView

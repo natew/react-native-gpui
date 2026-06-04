@@ -11,8 +11,10 @@ export type SerializedNode = {
     globalId: number;
     type: string;
     style?: Record<string, unknown>;
+    accessibility?: SerializedAccessibility;
     text?: string;
     value?: string;
+    editable?: boolean;
     src?: string;
     name?: string;
     placeholder?: string;
@@ -22,10 +24,35 @@ export type SerializedNode = {
     runs?: Array<{ text: string; fontWeight?: string; color?: string; fontStyle?: string }>;
 };
 
+export type SerializedAccessibility = {
+    accessible?: boolean;
+    hidden?: boolean;
+    label?: string;
+    role?: string;
+    hint?: string;
+    value?: string;
+    identifier?: string;
+    disabled?: boolean;
+    selected?: boolean;
+    checked?: boolean | "mixed";
+    expanded?: boolean;
+};
+
 export type BridgeEvent =
     | { type: "ready"; width: number; height: number }
     | { type: "resize"; width: number; height: number }
-    | { type: "event"; id: number; event: string; value?: string; layout?: { x: number; y: number; width: number; height: number } };
+    | {
+          type: "event";
+          id: number;
+          event: string;
+          value?: string;
+          key?: string;
+          shiftKey?: boolean;
+          ctrlKey?: boolean;
+          altKey?: boolean;
+          metaKey?: boolean;
+          layout?: { x: number; y: number; width: number; height: number };
+      };
 
 export interface Bridge {
     update(tree: SerializedNode): void;

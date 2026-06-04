@@ -39,6 +39,7 @@ export type {
     WebViewProps,
     WebViewHandle,
     WebViewMessageEvent,
+    ScrollViewHandle,
     ScrollViewProps,
     PressableProps,
     TouchableProps,

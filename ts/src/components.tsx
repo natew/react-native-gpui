@@ -24,24 +24,24 @@ import type {
     GestureResponderEvent,
     LayoutChangeEvent,
     MouseResponderEvent,
+    AccessibilityProps,
 } from "./types";
 
 // ── host primitives ─────────────────────────────────────────────────
 // At runtime these are tag strings; the FC cast is purely for JSX typing.
 
-export interface TextProps {
+export interface TextProps extends AccessibilityProps {
     children?: ReactNode;
     style?: StyleProp<TextStyle>;
     numberOfLines?: number;
     onPress?: (event: GestureResponderEvent) => void;
     onLayout?: (event: LayoutChangeEvent) => void;
     selectable?: boolean;
-    testID?: string;
 }
 export const View = "View" as unknown as FC<ViewProps>;
 export const Text = "Text" as unknown as FC<TextProps>;
 
-export interface TextInputProps {
+export interface TextInputProps extends AccessibilityProps {
     value?: string;
     defaultValue?: string;
     placeholder?: string;
@@ -63,6 +63,7 @@ export interface TextInputProps {
     onResponderRelease?: (event: MouseResponderEvent) => void;
     onResponderTerminate?: (event: MouseResponderEvent) => void;
     onSubmitEditing?: (event: unknown) => void;
+    onKeyPress?: (event: unknown) => void;
     onFocus?: (event: unknown) => void;
     onBlur?: (event: unknown) => void;
     onLayout?: (event: LayoutChangeEvent) => void;
@@ -76,21 +77,19 @@ export interface TextInputProps {
     style?: StyleProp<TextStyle>;
     hoverStyle?: StyleProp<TextStyle>;
     pressStyle?: StyleProp<TextStyle>;
-    testID?: string;
 }
 export const TextInput = "TextInput" as unknown as FC<TextInputProps>;
 
-export interface ImageProps {
+export interface ImageProps extends AccessibilityProps {
     source: { uri: string } | string | number;
     style?: StyleProp<ImageStyle>;
     resizeMode?: "cover" | "contain" | "stretch" | "repeat" | "center";
     onLoad?: () => void;
     onLayout?: (event: LayoutChangeEvent) => void;
-    testID?: string;
 }
 export const Image = "Image" as unknown as FC<ImageProps>;
 
-export interface SvgProps {
+export interface SvgProps extends AccessibilityProps {
     name: string;
     style?: StyleProp<ViewStyle & { color?: ColorValue }>;
 }
@@ -100,7 +99,7 @@ export const Svg = "Svg" as unknown as FC<SvgProps>;
 export interface WebViewMessageEvent {
     nativeEvent: { data: string };
 }
-export interface WebViewProps {
+export interface WebViewProps extends AccessibilityProps {
     source: { uri: string } | { html: string };
     style?: StyleProp<ViewStyle>;
     /** the page finished loading */
@@ -108,7 +107,6 @@ export interface WebViewProps {
     /** the page posted a message via `window.ReactNativeWebView.postMessage(data)` */
     onMessage?: (event: WebViewMessageEvent) => void;
     onLayout?: (event: LayoutChangeEvent) => void;
-    testID?: string;
 }
 /** imperative handle (host → frame) obtained via a `ref` on `<WebView>`. */
 export interface WebViewHandle {
@@ -160,28 +158,48 @@ export interface ScrollViewProps extends ViewProps {
     showsHorizontalScrollIndicator?: boolean;
     onScroll?: (event: unknown) => void;
 }
-export const ScrollView: FC<ScrollViewProps> = ({
+export interface ScrollViewHandle {
+    scrollTo: (options?: { x?: number; y?: number; animated?: boolean } | number) => void;
+    scrollToEnd: (options?: { animated?: boolean }) => void;
+}
+export const ScrollView = forwardRef<ScrollViewHandle, ScrollViewProps>(function ScrollView({
     style,
     contentContainerStyle,
     horizontal,
     children,
     ...rest
-}) => {
+}, ref) {
+    const host = useRef<{ id: number } | null>(null);
+    useImperativeHandle(
+        ref,
+        () => ({
+            scrollTo(options) {
+                if (!host.current) return;
+                const y = typeof options === "number" ? options : options?.y;
+                const x = typeof options === "object" ? options.x : undefined;
+                sendCommand({ $cmd: "scrollTo", id: host.current.id, x, y });
+            },
+            scrollToEnd() {
+                if (host.current) sendCommand({ $cmd: "scrollToEnd", id: host.current.id });
+            },
+        }),
+        [],
+    );
     // a scrolling container holding a content view (RN's contentContainer model).
     return createElement(
         "ScrollView" as any,
-        { style, ...rest },
+        { style, ...rest, ref: host },
         createElement(
             "View" as any,
             { style: [{ flexDirection: horizontal ? "row" : "column" } as ViewStyle, contentContainerStyle] },
             children,
         ),
     );
-};
+});
 
 // ── Pressable / Touchables / Button ─────────────────────────────────
 type PressableStyle = StyleProp<ViewStyle> | ((state: { pressed: boolean }) => StyleProp<ViewStyle>);
-export interface PressableProps {
+export interface PressableProps extends AccessibilityProps {
     children?: ReactNode | ((state: { pressed: boolean }) => ReactNode);
     style?: PressableStyle;
     onPress?: (event: GestureResponderEvent) => void;
@@ -191,7 +209,6 @@ export interface PressableProps {
     onLayout?: (event: LayoutChangeEvent) => void;
     disabled?: boolean;
     hitSlop?: number;
-    testID?: string;
 }
 export const Pressable: FC<PressableProps> = ({
     children,
@@ -220,7 +237,11 @@ export const Pressable: FC<PressableProps> = ({
           };
     const resolvedStyle = typeof style === "function" ? style({ pressed }) : style;
     const content = typeof children === "function" ? children({ pressed }) : children;
-    return createElement("View" as any, { style: resolvedStyle, ...handlers, ...rest }, content);
+    const accessibilityState =
+        disabled !== undefined || rest.accessibilityState
+            ? { ...rest.accessibilityState, disabled: disabled ?? rest.accessibilityState?.disabled }
+            : undefined;
+    return createElement("View" as any, { style: resolvedStyle, ...handlers, ...rest, accessibilityState }, content);
 };
 
 export interface TouchableProps extends PressableProps {
@@ -244,19 +265,21 @@ export const TouchableHighlight: FC<TouchableProps & { underlayColor?: ColorValu
 };
 export const TouchableWithoutFeedback: FC<PressableProps> = (props) => createElement(Pressable, props);
 
-export interface ButtonProps {
+export interface ButtonProps extends AccessibilityProps {
     title: string;
     onPress?: (event: GestureResponderEvent) => void;
     color?: ColorValue;
     disabled?: boolean;
-    testID?: string;
 }
-export const Button: FC<ButtonProps> = ({ title, onPress, color = "#2f6fed", disabled }) => {
+export const Button: FC<ButtonProps> = ({ title, onPress, color = "#2f6fed", disabled, ...rest }) => {
     return createElement(
         Pressable,
         {
+            ...rest,
             onPress,
             disabled,
+            accessibilityRole: rest.accessibilityRole ?? "button",
+            accessibilityLabel: rest.accessibilityLabel ?? title,
             style: ({ pressed }: { pressed: boolean }) =>
                 ({
                     backgroundColor: color,
@@ -284,20 +307,30 @@ export const KeyboardAvoidingView: FC<KeyboardAvoidingViewProps> = ({
 }) => createElement(View, props);
 
 // ── Switch ──────────────────────────────────────────────────────────
-export interface SwitchProps {
+export interface SwitchProps extends AccessibilityProps {
     value?: boolean;
     onValueChange?: (value: boolean) => void;
     disabled?: boolean;
     trackColor?: { false?: ColorValue; true?: ColorValue };
     thumbColor?: ColorValue;
     style?: StyleProp<ViewStyle>;
-    testID?: string;
 }
-export const Switch: FC<SwitchProps> = ({ value, onValueChange, disabled, trackColor, thumbColor, style }) => {
+export const Switch: FC<SwitchProps> = ({
+    value,
+    onValueChange,
+    disabled,
+    trackColor,
+    thumbColor,
+    style,
+    ...rest
+}) => {
     return createElement(
         Pressable,
         {
+            ...rest,
             disabled,
+            accessibilityRole: rest.accessibilityRole ?? "switch",
+            accessibilityState: { ...rest.accessibilityState, disabled, checked: value },
             onPress: () => onValueChange?.(!value),
             style: [
                 {

@@ -26,3 +26,8 @@ anyhow = "1.0"
 # sync-send / async-recv channel: the stdin reader thread hands parsed trees to a
 # foreground gpui task that applies them and calls cx.notify() (event-driven render).
 flume = "0.11"
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"

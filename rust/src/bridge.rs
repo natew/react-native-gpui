@@ -51,6 +51,26 @@ pub fn change(id: u64, value: &str) {
     emit_value(json!({ "type": "event", "id": id, "event": "change", "value": value }));
 }
 
+pub fn key_press(
+    id: u64,
+    key: &str,
+    shift_key: bool,
+    ctrl_key: bool,
+    alt_key: bool,
+    meta_key: bool,
+) {
+    emit_value(json!({
+        "type": "event",
+        "id": id,
+        "event": "keyPress",
+        "key": key,
+        "shiftKey": shift_key,
+        "ctrlKey": ctrl_key,
+        "altKey": alt_key,
+        "metaKey": meta_key
+    }));
+}
+
 /// A `<WebView>` posted a message from its page (`window.ReactNativeWebView.postMessage`
 /// / `window.ipc.postMessage`). Routed to the node's `onMessage` handler.
 pub fn webview_message(id: u64, data: &str) {

@@ -140,6 +140,17 @@ impl Element for ReactDivElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        // claim a hitbox for any View with a press handler. insert_hitbox must run in
+        // prepaint (gpui asserts the phase); the actual mouse listeners are wired in
+        // paint. `bounds` here is the div's final on-screen rect, same as in paint.
+        if self.element.listens("press")
+            || self.element.listens("longPress")
+            || self.element.listens("pressIn")
+            || self.element.listens("pressOut")
+        {
+            window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        }
+
         let (_, scroll) = overflow_mode(&self.element.style);
         if scroll {
             // clamp the stored offset to the scrollable range, then shift children up
@@ -208,7 +219,8 @@ impl Element for ReactDivElement {
         let press_out = self.element.listens("pressOut");
         if press || press_in || press_out {
             let b = bounds;
-            window.insert_hitbox(b, HitboxBehavior::Normal);
+            // hitbox is inserted in prepaint (gpui requires that phase); here we only
+            // wire the mouse listeners.
             if press_in {
                 window.on_mouse_event(move |ev: &MouseDownEvent, phase, _w, _cx| {
                     if phase == DispatchPhase::Bubble

@@ -73,9 +73,16 @@ impl Element for ReactWebViewElement {
         _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut App,
     ) {
+        // reserve the webview's rect for gpui hit-testing. insert_hitbox must run in
+        // prepaint (gpui asserts the phase — in release the assert is compiled out,
+        // which is why this only crashed debug builds). the native WKWebView
+        // composites above the Metal layer and handles its own scroll/selection;
+        // the hitbox just keeps gpui's occlusion/event routing aware of the region.
+        window.insert_hitbox(bounds, HitboxBehavior::Normal);
+
         if let Some(view) = webview(self.element.global_id) {
             let _ = view.set_bounds(wry::Rect {
                 position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(
@@ -94,12 +101,13 @@ impl Element for ReactWebViewElement {
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
-        bounds: Bounds<Pixels>,
+        _bounds: Bounds<Pixels>,
         _: &mut (),
         _: &mut (),
-        window: &mut Window,
+        _window: &mut Window,
         _: &mut App,
     ) {
-        window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        // nothing to paint: the WKWebView child draws itself. (hitbox is inserted in
+        // prepaint.)
     }
 }

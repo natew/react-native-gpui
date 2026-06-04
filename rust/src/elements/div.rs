@@ -355,11 +355,11 @@ impl Element for ReactDivElement {
                     || responder_start
                     || press_in
                 {
-                    let hitbox = hitbox.clone();
-                    window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, _cx| {
+                    let event_bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
+                    window.on_mouse_event(move |ev: &MouseDownEvent, phase, _window, _cx| {
                         if phase == DispatchPhase::Bubble
                             && ev.button == MouseButton::Left
-                            && hitbox.is_hovered(window)
+                            && event_bounds.contains(&ev.position)
                         {
                             emit_if(id, mouse_down, "mouseDown");
                             emit_if(id, pointer_down, "pointerDown");
@@ -385,11 +385,11 @@ impl Element for ReactDivElement {
                     || press
                     || press_out
                 {
-                    let hitbox = hitbox.clone();
-                    window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, _cx| {
+                    let event_bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
+                    window.on_mouse_event(move |ev: &MouseUpEvent, phase, _window, _cx| {
                         if phase == DispatchPhase::Bubble
                             && ev.button == MouseButton::Left
-                            && hitbox.is_hovered(window)
+                            && event_bounds.contains(&ev.position)
                         {
                             emit_if(id, mouse_up, "mouseUp");
                             emit_if(id, pointer_up, "pointerUp");

@@ -344,3 +344,44 @@ export const ActivityIndicator: FC<ActivityIndicatorProps> = ({ color = "#888", 
         createElement(Text, { style: { color, fontSize: dim } }, "◌"),
     );
 };
+
+// ── StatusBar (no-op on desktop — there is no OS status bar) ─────────
+export interface StatusBarProps {
+    barStyle?: "default" | "light-content" | "dark-content";
+    hidden?: boolean;
+    backgroundColor?: ColorValue;
+    translucent?: boolean;
+    animated?: boolean;
+}
+function StatusBarComponent(_props: StatusBarProps) {
+    return null;
+}
+// ── Modal — renders its children inline when visible (no OS modal layer) ─────
+export interface ModalProps {
+    visible?: boolean;
+    transparent?: boolean;
+    animationType?: "none" | "slide" | "fade";
+    onRequestClose?: () => void;
+    onShow?: () => void;
+    onDismiss?: () => void;
+    children?: ReactNode;
+    style?: StyleProp<ViewStyle>;
+}
+export const Modal: FC<ModalProps> = ({ visible = true, children }) =>
+    visible ? createElement(Fragment, null, children as any) : null;
+
+export const StatusBar = Object.assign(StatusBarComponent, {
+    currentHeight: 0,
+    setBarStyle(_style: string, _animated?: boolean): void {},
+    setHidden(_hidden: boolean, _animation?: string): void {},
+    setBackgroundColor(_color: ColorValue, _animated?: boolean): void {},
+    setTranslucent(_translucent: boolean): void {},
+    setNetworkActivityIndicatorVisible(_visible: boolean): void {},
+    pushStackEntry(props: StatusBarProps): StatusBarProps {
+        return props;
+    },
+    popStackEntry(_entry: StatusBarProps): void {},
+    replaceStackEntry(_entry: StatusBarProps, props: StatusBarProps): StatusBarProps {
+        return props;
+    },
+});

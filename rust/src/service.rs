@@ -5,9 +5,9 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui::{
-    actions, px, point, rgb, size, App, AppContext, Bounds, Context, Entity, IntoElement,
-    KeyBinding, Menu, MenuItem, ParentElement, Render, Styled, TitlebarOptions, Window,
-    WindowBounds, WindowOptions,
+    App, AppContext, Bounds, Context, Entity, IntoElement, KeyBinding, Menu, MenuItem,
+    ParentElement, Render, Styled, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
+    point, px, rgb, size,
 };
 use gpui_component::input::{InputEvent, InputState};
 
@@ -18,7 +18,7 @@ mod elements;
 mod icons;
 mod style;
 
-use elements::{create_element, ReactElement};
+use elements::{ReactElement, create_element};
 use style::{Dim, ElementStyle};
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -66,10 +66,38 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         .map(|arr| arr.iter().filter_map(parse_json_tree).collect())
         .unwrap_or_default();
 
+    let runs = obj
+        .get("runs")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| {
+                    let o = r.as_object()?;
+                    Some(crate::elements::TextRun {
+                        text: o.get("text").and_then(|v| v.as_str())?.to_string(),
+                        font_weight: o
+                            .get("fontWeight")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        color: o
+                            .get("color")
+                            .and_then(|v| v.as_str())
+                            .and_then(crate::style::parse_css_color),
+                        font_style: o
+                            .get("fontStyle")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     Some(Arc::new(ReactElement {
         global_id,
         element_type: element_type.to_string(),
         text,
+        runs,
         src,
         events,
         children,
@@ -238,13 +266,14 @@ fn fallback_root() -> Arc<ReactElement> {
         global_id: 1,
         element_type: "div".to_string(),
         text: None,
+        runs: Vec::new(),
         src: None,
         events: Vec::new(),
         children: vec![],
         style: ElementStyle {
             width: Some(Dim::Px(720.0)),
             height: Some(Dim::Px(800.0)),
-            background_color: Some(0xe9e9ec),
+            background_color: Some(crate::style::u32_to_hsla(0xe9e9ec)),
             flex_direction: Some("column".to_string()),
             ..Default::default()
         },

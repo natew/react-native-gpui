@@ -17,6 +17,8 @@ export type SerializedNode = {
     placeholder?: string;
     events?: string[];
     children?: SerializedNode[];
+    /** inline styled runs for `<Text>` with nested `<Text>` children */
+    runs?: Array<{ text: string; fontWeight?: string; color?: string; fontStyle?: string }>;
 };
 
 export type BridgeEvent =

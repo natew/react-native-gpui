@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use gpui::{
     AnyElement, App, Bounds, ContentMask, DispatchPhase, Element, ElementId, GlobalElementId,
-    HitboxBehavior, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
-    ScrollDelta, ScrollWheelEvent, Window, div, point, prelude::*, px, rgb,
+    HitboxBehavior, Hsla, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
+    ScrollDelta, ScrollWheelEvent, Window, div, point, prelude::*, px,
 };
 use once_cell::sync::Lazy;
 
@@ -99,13 +99,25 @@ impl Element for ReactDivElement {
         // If element has text content, add it
         if let Some(ref text) = self.element.text {
             if !text.is_empty() {
-                let text_color = self.element.style.color.unwrap_or(0xffffff);
+                let text_color = self.element.style.color.unwrap_or(Hsla {
+                    h: 0.0,
+                    s: 0.0,
+                    l: 1.0,
+                    a: 1.0,
+                });
                 let text_size = self.element.style.font_size.unwrap_or(14.0);
-                let te = div()
-                    .text_color(rgb(text_color))
-                    .text_size(px(text_size))
-                    .child(text.clone());
-                self.children.push(te.into_any_element());
+                let mut te = div().text_color(text_color).text_size(px(text_size));
+                if let Some(fam) = self.element.style.gpui_font_family() {
+                    te = te.font_family(fam);
+                }
+                if let Some(lh) = self.element.style.line_height {
+                    te = te.line_height(px(lh));
+                }
+                if let Some(weight) = self.element.style.gpui_font_weight() {
+                    te = te.font_weight(weight);
+                }
+                self.children
+                    .push(te.child(text.clone()).into_any_element());
             }
         }
 

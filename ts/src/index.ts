@@ -28,6 +28,8 @@ export {
     FlatList,
     SectionList,
     ActivityIndicator,
+    StatusBar,
+    Modal,
 } from "./components";
 export type {
     TextProps,
@@ -65,7 +67,31 @@ export type {
 
 // dimensions + platform APIs
 export { Dimensions, type ScaledSize } from "./Dimensions";
-export { useWindowDimensions, Platform, PixelRatio, useColorScheme } from "./apis";
+export {
+    useWindowDimensions,
+    Platform,
+    PixelRatio,
+    useColorScheme,
+    Appearance,
+    I18nManager,
+    Alert,
+    Keyboard,
+    BackHandler,
+    AppState,
+    Linking,
+    InteractionManager,
+    LayoutAnimation,
+    UIManager,
+    NativeModules,
+    findNodeHandle,
+    processColor,
+    PanResponder,
+    Vibration,
+    DeviceEventEmitter,
+    NativeEventEmitter,
+    AccessibilityInfo,
+} from "./apis";
+export { Animated, AnimatedValue, Easing } from "./Animated";
 
 // low-level bridge (escape hatch)
 export { startBridge, type Bridge, type BridgeEvent, type SerializedNode } from "./runtime";

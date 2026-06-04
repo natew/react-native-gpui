@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{AnyElement, App, IntoElement, RenderOnce, Styled, Window, px, rgb, svg};
+use gpui::{AnyElement, App, Hsla, IntoElement, RenderOnce, Styled, Window, px, svg};
 
 use crate::elements::ReactElement;
 use crate::style::ElementStyle;
@@ -37,11 +37,16 @@ impl RenderOnce for ReactSvgElement {
             .or(self.element.style.height)
             .and_then(crate::style::Dim::as_px)
             .unwrap_or(16.0);
-        let color = self.element.style.color.unwrap_or(0x000000);
+        let color = self.element.style.color.unwrap_or(Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.0,
+            a: 1.0,
+        });
         svg()
             .path(name)
             .size(px(size))
-            .text_color(rgb(color))
+            .text_color(color)
             .flex_none()
     }
 }

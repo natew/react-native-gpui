@@ -75,6 +75,32 @@ function gatherText(inst: Instance): string {
     return out;
 }
 
+type SerRun = { text: string; fontWeight?: string; color?: string; fontStyle?: string };
+
+// Walk a <Text> tree into flowing styled runs, so a nested <Text bold> inside a
+// paragraph keeps its weight/color instead of being flattened to the parent's.
+function gatherRuns(inst: Instance, inherited: Omit<SerRun, "text">): SerRun[] {
+    const own = (normalizeStyle(inst.props.style as never) ?? {}) as Record<string, unknown>;
+    const cur: Omit<SerRun, "text"> = {
+        fontWeight: (own.fontWeight as string) ?? inherited.fontWeight,
+        color: (own.color as string) ?? inherited.color,
+        fontStyle: (own.fontStyle as string) ?? inherited.fontStyle,
+    };
+    const runs: SerRun[] = [];
+    for (const c of inst.children) {
+        if (isTextLike(c)) {
+            if (c.text) runs.push({ text: c.text, ...cur });
+        } else if (c.type === "Text") {
+            runs.push(...gatherRuns(c, cur));
+        }
+    }
+    if (runs.length === 0) {
+        const ch = inst.props.children;
+        if (typeof ch === "string" || typeof ch === "number") runs.push({ text: String(ch), ...cur });
+    }
+    return runs;
+}
+
 function serialize(inst: Instance | TextInstance): SerializedNode {
     if (isTextLike(inst)) return { globalId: inst.id, type: "text", text: inst.text };
 
@@ -83,10 +109,18 @@ function serialize(inst: Instance | TextInstance): SerializedNode {
     const node: SerializedNode = { globalId: inst.id, type: "div" };
 
     switch (inst.type) {
-        case "Text":
+        case "Text": {
             node.type = "text";
-            node.text = gatherText(inst);
+            const runs = gatherRuns(inst, {
+                fontWeight: style.fontWeight as string | undefined,
+                color: style.color as string | undefined,
+                fontStyle: style.fontStyle as string | undefined,
+            });
+            node.text = runs.map((r) => r.text).join("");
+            // emit runs only when there's >1 segment (inline style changes)
+            if (runs.length > 1) node.runs = runs;
             break;
+        }
         case "TextInput":
             node.type = props.multiline ? "textarea" : "textinput";
             node.placeholder = (props.placeholder as string) ?? "";

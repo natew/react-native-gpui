@@ -12,10 +12,20 @@ pub use svg::ReactSvgElement;
 pub use text::ReactTextElement;
 pub use webview::ReactWebViewElement;
 
-use gpui::{AnyElement, IntoElement};
+use gpui::{AnyElement, Hsla, IntoElement};
 use std::sync::Arc;
 
 use crate::style::ElementStyle;
+
+/// An inline styled run within a `<Text>` — preserves nested `<Text>` styling
+/// (bold lead-ins etc.) that would otherwise be flattened away.
+#[derive(Clone, Debug)]
+pub struct TextRun {
+    pub text: String,
+    pub font_weight: Option<String>,
+    pub color: Option<Hsla>,
+    pub font_style: Option<String>,
+}
 
 /// The core element struct that represents a node in the element tree.
 #[derive(Clone)]
@@ -23,6 +33,8 @@ pub struct ReactElement {
     pub global_id: u64,
     pub element_type: String,
     pub text: Option<String>,
+    /// inline styled runs, when a `<Text>` has nested `<Text>` children.
+    pub runs: Vec<TextRun>,
     /// image / webview source uri (for `<Image>` / `<WebView>`).
     pub src: Option<String>,
     /// event names this node listens to: "press", "changeText", "layout", …

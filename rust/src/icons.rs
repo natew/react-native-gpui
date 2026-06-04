@@ -38,6 +38,11 @@ pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        // an inline SVG document (e.g. serialized by the react-native-svg shim)
+        // is its own source — render it directly rather than looking up a name.
+        if path.trim_start().starts_with("<svg") {
+            return Ok(Some(Cow::Owned(path.as_bytes().to_vec())));
+        }
         Ok(icon_bytes(path).map(|s| Cow::Borrowed(s.as_bytes())))
     }
     fn list(&self, _path: &str) -> Result<Vec<SharedString>> {

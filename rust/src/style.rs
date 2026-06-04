@@ -25,7 +25,11 @@ impl Dim {
         if let Some(p) = s.strip_suffix('%') {
             return p.trim().parse::<f32>().ok().map(|n| Dim::Pct(n / 100.0));
         }
-        s.trim_end_matches("px").trim().parse::<f32>().ok().map(Dim::Px)
+        s.trim_end_matches("px")
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(Dim::Px)
     }
 
     /// As a flex `Length` (size / min / max / inset / margin / flex-basis).
@@ -105,16 +109,24 @@ pub struct ElementStyle {
 
     // Border
     pub border_width: Option<f32>,
-    pub border_color: Option<u32>,
+    pub border_top_width: Option<f32>,
+    pub border_right_width: Option<f32>,
+    pub border_bottom_width: Option<f32>,
+    pub border_left_width: Option<f32>,
+    pub border_color: Option<Hsla>,
     pub border_radius: Option<f32>,
+    pub border_top_left_radius: Option<f32>,
+    pub border_top_right_radius: Option<f32>,
+    pub border_bottom_left_radius: Option<f32>,
+    pub border_bottom_right_radius: Option<f32>,
     pub border_style: Option<String>,
 
     // Background
-    pub background_color: Option<u32>,
+    pub background_color: Option<Hsla>,
     pub background_image: Option<String>,
 
     // Text
-    pub color: Option<u32>,
+    pub color: Option<Hsla>,
     pub font_size: Option<f32>,
     pub font_weight: Option<String>,
     pub font_family: Option<String>,
@@ -166,7 +178,10 @@ impl ElementStyle {
         }
         macro_rules! c {
             ($field:ident, $key:expr) => {
-                s.$field = o.get($key).and_then(|v| parse_hex_color(v));
+                s.$field = o
+                    .get($key)
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_css_color);
             };
         }
         // dimension fields: number | "NN%" | "auto"
@@ -204,7 +219,19 @@ impl ElementStyle {
         d!(padding_bottom, "paddingBottom");
         d!(padding_left, "paddingLeft");
         f!(border_width, "borderWidth");
+        // tamagui expands `borderWidth`/`borderColor` to per-side keys (like
+        // `rounded` → corners), so read the sides too or side borders go missing.
+        f!(border_top_width, "borderTopWidth");
+        f!(border_right_width, "borderRightWidth");
+        f!(border_bottom_width, "borderBottomWidth");
+        f!(border_left_width, "borderLeftWidth");
         f!(border_radius, "borderRadius");
+        // tamagui's `rounded` shorthand expands to the four corner keys, not the
+        // `borderRadius` shorthand — read both so rounded corners actually apply.
+        f!(border_top_left_radius, "borderTopLeftRadius");
+        f!(border_top_right_radius, "borderTopRightRadius");
+        f!(border_bottom_left_radius, "borderBottomLeftRadius");
+        f!(border_bottom_right_radius, "borderBottomRightRadius");
         f!(font_size, "fontSize");
         f!(line_height, "lineHeight");
         f!(letter_spacing, "letterSpacing");
@@ -232,7 +259,16 @@ impl ElementStyle {
 
         c!(color, "color");
         c!(background_color, "backgroundColor");
-        c!(border_color, "borderColor");
+        // gpui supports a single border color; accept the shorthand or any side
+        // (tamagui emits side colors, not the `borderColor` shorthand).
+        s.border_color = o
+            .get("borderColor")
+            .or_else(|| o.get("borderTopColor"))
+            .or_else(|| o.get("borderRightColor"))
+            .or_else(|| o.get("borderBottomColor"))
+            .or_else(|| o.get("borderLeftColor"))
+            .and_then(|v| v.as_str())
+            .and_then(parse_css_color);
 
         s
     }
@@ -266,26 +302,63 @@ impl ElementStyle {
         };
         style.flex_shrink = 0.0;
 
+        // Box model: RN/web-RN use border-box (a fixed width/height *includes*
+        // padding + border), but taffy is content-box. Subtract padding+border
+        // from fixed px sizes so a `maxWidth: 780` with padding wraps text at the
+        // same width as the web build (otherwise the content is wider → fewer
+        // wrapped lines → layout drift). Percent/auto are left to the engine.
+        let bw = |side: Option<f32>| side.or(self.border_width).unwrap_or(0.0);
+        let pad_h = self
+            .padding_left
+            .or(self.padding)
+            .and_then(Dim::as_px)
+            .unwrap_or(0.0)
+            + self
+                .padding_right
+                .or(self.padding)
+                .and_then(Dim::as_px)
+                .unwrap_or(0.0)
+            + bw(self.border_left_width)
+            + bw(self.border_right_width);
+        let pad_v = self
+            .padding_top
+            .or(self.padding)
+            .and_then(Dim::as_px)
+            .unwrap_or(0.0)
+            + self
+                .padding_bottom
+                .or(self.padding)
+                .and_then(Dim::as_px)
+                .unwrap_or(0.0)
+            + bw(self.border_top_width)
+            + bw(self.border_bottom_width);
+        let bb = |d: Dim, inset: f32| -> Length {
+            match d {
+                Dim::Px(p) => px((p - inset).max(0.0)).into(),
+                other => other.to_length(),
+            }
+        };
+
         // Dimensions (number → px, "NN%" → fraction, "auto" → auto)
         if let Some(w) = self.width {
-            style.size.width = w.to_length();
+            style.size.width = bb(w, pad_h);
         }
         if let Some(h) = self.height {
-            style.size.height = h.to_length();
+            style.size.height = bb(h, pad_v);
         }
 
         // Min/Max dimensions
         if let Some(mw) = self.min_width {
-            style.min_size.width = mw.to_length();
+            style.min_size.width = bb(mw, pad_h);
         }
         if let Some(mw) = self.max_width {
-            style.max_size.width = mw.to_length();
+            style.max_size.width = bb(mw, pad_h);
         }
         if let Some(mh) = self.min_height {
-            style.min_size.height = mh.to_length();
+            style.min_size.height = bb(mh, pad_v);
         }
         if let Some(mh) = self.max_height {
-            style.max_size.height = mh.to_length();
+            style.max_size.height = bb(mh, pad_v);
         }
 
         // Flexbox — RN's `flex: <n>` shorthand expands first, so an explicit
@@ -398,35 +471,40 @@ impl ElementStyle {
             style.padding.left = p.to_definite();
         }
 
-        // Border
-        let mut has_border = false;
-        let mut border_width_val = 0.0;
-        if let Some(bw) = self.border_width {
-            border_width_val = bw;
-            has_border = bw > 0.0;
-        }
-        if has_border {
-            style.border_widths = gpui::Edges::all(px(border_width_val).into());
-            let border_c = self
-                .border_color
-                .map(|c| {
-                    Hsla::from(Rgba {
-                        r: ((c >> 16) & 0xFF) as f32 / 255.0,
-                        g: ((c >> 8) & 0xFF) as f32 / 255.0,
-                        b: (c & 0xFF) as f32 / 255.0,
-                        a: 1.0,
-                    })
-                })
-                .unwrap_or(Hsla::from(Rgba {
-                    r: 0.0,
-                    g: 0.0,
-                    b: 0.0,
-                    a: 1.0,
-                }));
+        // Border — per-side widths (tamagui emits side-specific keys; fall back to
+        // the `borderWidth` shorthand).
+        let bwsh = self.border_width;
+        let bt = self.border_top_width.or(bwsh).unwrap_or(0.0);
+        let brw = self.border_right_width.or(bwsh).unwrap_or(0.0);
+        let bbw = self.border_bottom_width.or(bwsh).unwrap_or(0.0);
+        let blw = self.border_left_width.or(bwsh).unwrap_or(0.0);
+        if bt > 0.0 || brw > 0.0 || bbw > 0.0 || blw > 0.0 {
+            style.border_widths = gpui::Edges {
+                top: px(bt).into(),
+                right: px(brw).into(),
+                bottom: px(bbw).into(),
+                left: px(blw).into(),
+            };
+            let border_c = self.border_color.unwrap_or(Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 0.0,
+                a: 1.0,
+            });
             style.border_color = Some(border_c);
         }
-        if let Some(br) = self.border_radius {
-            style.corner_radii = gpui::Corners::all(px(br).into());
+        let r = self.border_radius;
+        let tl = self.border_top_left_radius.or(r).unwrap_or(0.0);
+        let tr = self.border_top_right_radius.or(r).unwrap_or(0.0);
+        let bl = self.border_bottom_left_radius.or(r).unwrap_or(0.0);
+        let brr = self.border_bottom_right_radius.or(r).unwrap_or(0.0);
+        if tl > 0.0 || tr > 0.0 || bl > 0.0 || brr > 0.0 {
+            style.corner_radii = gpui::Corners {
+                top_left: px(tl).into(),
+                top_right: px(tr).into(),
+                bottom_left: px(bl).into(),
+                bottom_right: px(brr).into(),
+            };
         }
 
         // Background — a CSS linear-gradient (via `backgroundImage`) wins; else a
@@ -434,14 +512,9 @@ impl ElementStyle {
         if let Some(grad) = parse_linear_gradient(self.background_image.as_deref()) {
             style.background = Some(grad.into());
         } else {
-            let bg = self.background_color.or(default_bg).map(|c| {
-                Hsla::from(Rgba {
-                    r: ((c >> 16) & 0xFF) as f32 / 255.0,
-                    g: ((c >> 8) & 0xFF) as f32 / 255.0,
-                    b: (c & 0xFF) as f32 / 255.0,
-                    a: 1.0,
-                })
-            });
+            let bg = self
+                .background_color
+                .or_else(|| default_bg.map(u32_to_hsla));
             if let Some(bg) = bg {
                 style.background = Some(bg.into());
             }
@@ -483,9 +556,35 @@ impl ElementStyle {
     pub fn gpui_font_weight(&self) -> Option<FontWeight> {
         self.font_weight.as_deref().map(parse_font_weight)
     }
+
+    /// Resolved GPUI font family. Maps tamagui/web generic families to real
+    /// installed faces so native text matches the web's system font.
+    pub fn gpui_font_family(&self) -> Option<gpui::SharedString> {
+        self.font_family.as_deref().map(map_font_family)
+    }
 }
 
-fn parse_font_weight(s: &str) -> FontWeight {
+fn map_font_family(f: &str) -> gpui::SharedString {
+    // take the first family in a CSS stack, strip quotes
+    let first = f
+        .split(',')
+        .next()
+        .unwrap_or(f)
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'');
+    match first.to_ascii_lowercase().as_str() {
+        // web `-apple-system` at UI/body sizes renders SF Pro *Text* (the small
+        // optical master); match it explicitly so glyph advances/wrapping line up.
+        "" | "system" | "system-ui" | "-apple-system" | "blinkmacsystemfont" | "sans-serif" => {
+            "SF Pro Text".into()
+        }
+        "ui-monospace" | "monospace" | "sfmono-regular" => "Menlo".into(),
+        _ => first.to_string().into(),
+    }
+}
+
+pub fn parse_font_weight(s: &str) -> FontWeight {
     match s.trim().to_ascii_lowercase().as_str() {
         "100" | "thin" => FontWeight::THIN,
         "200" | "extralight" | "ultralight" => FontWeight::EXTRA_LIGHT,
@@ -514,7 +613,11 @@ fn parse_linear_gradient(input: Option<&str>) -> Option<gpui::Background> {
     let first = parts[0].trim();
     let (angle, colors) = if first.ends_with("deg") || first.parse::<f32>().is_ok() {
         (
-            first.trim_end_matches("deg").trim().parse::<f32>().unwrap_or(180.0),
+            first
+                .trim_end_matches("deg")
+                .trim()
+                .parse::<f32>()
+                .unwrap_or(180.0),
             &parts[1..],
         )
     } else {
@@ -618,7 +721,7 @@ fn split_top_level_commas(input: &str) -> Vec<String> {
 }
 
 /// Parse `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb(...)`, `rgba(...)`, or `black`/`white`.
-fn parse_css_color(input: &str) -> Option<Hsla> {
+pub fn parse_css_color(input: &str) -> Option<Hsla> {
     let s = input.trim();
     let to = |r: u32, g: u32, b: u32, a: f32| {
         Hsla::from(Rgba {
@@ -637,6 +740,30 @@ fn parse_css_color(input: &str) -> Option<Hsla> {
         if parts.len() >= 3 {
             let a = parts.get(3).copied().unwrap_or(1.0);
             return Some(to(parts[0] as u32, parts[1] as u32, parts[2] as u32, a));
+        }
+        return None;
+    }
+    if let Some(rest) = s.strip_prefix("hsla(").or_else(|| s.strip_prefix("hsl(")) {
+        // CSS `hsl(h, s%, l%, a)` maps straight onto GPUI's native Hsla.
+        let inner = rest.trim_end_matches(')');
+        let nums: Vec<f32> = inner
+            .split(',')
+            .filter_map(|p| {
+                p.trim()
+                    .trim_end_matches('%')
+                    .trim_end_matches("deg")
+                    .trim()
+                    .parse::<f32>()
+                    .ok()
+            })
+            .collect();
+        if nums.len() >= 3 {
+            return Some(Hsla {
+                h: (nums[0] / 360.0).rem_euclid(1.0),
+                s: (nums[1] / 100.0).clamp(0.0, 1.0),
+                l: (nums[2] / 100.0).clamp(0.0, 1.0),
+                a: nums.get(3).copied().unwrap_or(1.0).clamp(0.0, 1.0),
+            });
         }
         return None;
     }
@@ -721,17 +848,11 @@ fn parse_align_self(a: &str) -> Option<gpui::AlignSelf> {
     }
 }
 
-fn parse_hex_color(v: &Value) -> Option<u32> {
-    let s = v.as_str()?;
-    let s = s.trim_start_matches('#');
-    if s.len() == 6 {
-        u32::from_str_radix(s, 16).ok()
-    } else if s.len() == 3 {
-        let r = u32::from_str_radix(&s[0..1], 16).ok()? * 17;
-        let g = u32::from_str_radix(&s[1..2], 16).ok()? * 17;
-        let b = u32::from_str_radix(&s[2..3], 16).ok()? * 17;
-        Some((r << 16) | (g << 8) | b)
-    } else {
-        None
-    }
+pub fn u32_to_hsla(c: u32) -> Hsla {
+    Hsla::from(Rgba {
+        r: ((c >> 16) & 0xFF) as f32 / 255.0,
+        g: ((c >> 8) & 0xFF) as f32 / 255.0,
+        b: (c & 0xFF) as f32 / 255.0,
+        a: 1.0,
+    })
 }

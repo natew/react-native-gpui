@@ -114,6 +114,7 @@ Point the runtime at a specific binary with `RNGPUI_SERVICE=/path/to/rngpui-serv
 
 ```sh
 bun run examples/kitchen-sink.tsx     # the full component surface + self-validating layout
+bun run conformance:input            # TextInput typing, Return submit, Shift+Return newline
 bun run conformance:text-lines        # visual fixture for Text numberOfLines
 bun run examples/superconductor.tsx   # native shell + WebView content hybrid
 ```

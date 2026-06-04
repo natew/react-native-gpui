@@ -27,6 +27,7 @@
         "build:ts": "npm run build:clean && npm run build:types && npm run build:bundle",
         "typecheck": "tsc --noEmit",
         "kitchen": "bun run examples/kitchen-sink.tsx",
+        "conformance:input": "bun run examples/input-conformance.tsx",
         "conformance:text-lines": "bun run examples/number-of-lines-conformance.tsx",
         "pixel-diff": "bun run scripts/pixel-diff.mjs",
         "superconductor": "bun run examples/superconductor.tsx",

@@ -3,7 +3,7 @@
 use std::io::{self, BufRead};
 use std::sync::Arc;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use gpui::{
@@ -11,7 +11,7 @@ use gpui::{
     Menu, MenuItem, ParentElement, Render, Styled, TitlebarOptions, Window, WindowBounds,
     WindowOptions, actions, point, px, rgb, size,
 };
-use gpui_component::input::{InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState, Position};
 use gpui_component::theme::{Theme, ThemeMode};
 use serde::Deserialize;
 
@@ -211,24 +211,85 @@ struct ServiceApp {
     // persistent gpui-component input state, one per <TextInput>/<TextArea> id.
     inputs: HashMap<u64, Entity<InputState>>,
     input_values: HashMap<u64, Option<String>>,
+    suppressed_input_changes: HashMap<u64, VecDeque<String>>,
     // persistent native WebView, one per <WebView> id, + its last-loaded content.
     webviews: HashMap<u64, Rc<wry::WebView>>,
     webview_content: HashMap<u64, String>,
 }
 
-/// collect (id, placeholder, value, multiline) for every text-input node in the tree.
-fn collect_inputs(el: &Arc<ReactElement>, out: &mut Vec<(u64, String, Option<String>, bool)>) {
+type InputSpec = (u64, String, Option<String>, bool, bool);
+
+/// collect (id, placeholder, value, multiline, keypress listener) for every text-input node in the tree.
+fn collect_inputs(el: &Arc<ReactElement>, out: &mut Vec<InputSpec>) {
     if el.element_type == "textinput" || el.element_type == "textarea" {
         out.push((
             el.global_id,
             el.text.clone().unwrap_or_default(),
             el.value.clone(),
             el.element_type == "textarea",
+            el.listens("keyPress"),
         ));
     }
     for c in &el.children {
         collect_inputs(c, out);
     }
+}
+
+fn position_for_byte_offset(text: &str, byte_offset: usize) -> Position {
+    let mut line = 0;
+    let mut character = 0;
+    for (index, ch) in text.char_indices() {
+        if index >= byte_offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += ch.len_utf16() as u32;
+        }
+    }
+    Position { line, character }
+}
+
+fn value_without_submit_newline(input: &InputState) -> Option<(String, Position)> {
+    let value = input.value().to_string();
+    let cursor = input.cursor().min(value.len());
+    let newline_start = cursor.checked_sub(1)?;
+    if value.get(newline_start..cursor) != Some("\n") {
+        return None;
+    }
+    let mut next = value;
+    next.replace_range(newline_start..cursor, "");
+    let cursor_position = position_for_byte_offset(&next, newline_start);
+    Some((next, cursor_position))
+}
+
+fn suppress_next_input_change(
+    suppressed: &mut HashMap<u64, VecDeque<String>>,
+    id: u64,
+    value: String,
+) {
+    suppressed.entry(id).or_default().push_back(value);
+}
+
+fn consume_suppressed_input_change(
+    suppressed: &mut HashMap<u64, VecDeque<String>>,
+    id: u64,
+    value: &str,
+) -> bool {
+    let Some(values) = suppressed.get_mut(&id) else {
+        return false;
+    };
+    let Some(index) = values.iter().position(|expected| expected == value) else {
+        return false;
+    };
+    values.remove(index);
+    let empty = values.is_empty();
+    if empty {
+        suppressed.remove(&id);
+    }
+    true
 }
 
 /// Collect (id, content, is_html) for every webview node. Prefers a `src` uri;
@@ -282,10 +343,12 @@ impl Render for ServiceApp {
         // it so this view re-renders (and the edit shows) when the input changes.
         let mut specs = Vec::new();
         collect_inputs(&self.root, &mut specs);
-        let present: HashSet<u64> = specs.iter().map(|(id, _, _, _)| *id).collect();
+        let present: HashSet<u64> = specs.iter().map(|(id, _, _, _, _)| *id).collect();
         self.inputs.retain(|id, _| present.contains(id));
         self.input_values.retain(|id, _| present.contains(id));
-        for (id, placeholder, value, multiline) in specs {
+        self.suppressed_input_changes
+            .retain(|id, _| present.contains(id));
+        for (id, placeholder, value, multiline, listens_key_press) in specs {
             if !self.inputs.contains_key(&id) {
                 let initial_value = value.clone();
                 let state = cx.new(|cx| {
@@ -298,16 +361,50 @@ impl Render for ServiceApp {
                     }
                     s
                 });
-                cx.subscribe(&state, move |_this, input, ev: &InputEvent, cx| match ev {
-                    InputEvent::Change => {
-                        let value = input.read(cx).value();
-                        bridge::change_text(id, value.as_ref());
-                        bridge::change(id, value.as_ref());
-                    }
-                    InputEvent::PressEnter { .. } => bridge::event(id, "submit"),
-                    InputEvent::Focus => bridge::event(id, "focus"),
-                    InputEvent::Blur => bridge::event(id, "blur"),
-                })
+                cx.subscribe_in(
+                    &state,
+                    window,
+                    move |this, input, ev: &InputEvent, window, cx| match ev {
+                        InputEvent::Change => {
+                            let value = input.read(cx).value().to_string();
+                            if consume_suppressed_input_change(
+                                &mut this.suppressed_input_changes,
+                                id,
+                                &value,
+                            ) {
+                                return;
+                            }
+                            bridge::change_text(id, value.as_ref());
+                            bridge::change(id, value.as_ref());
+                        }
+                        InputEvent::PressEnter { .. } => {
+                            if listens_key_press {
+                                bridge::key_press(id, "Enter", false, false, false, false);
+                            }
+                            if multiline {
+                                let next = value_without_submit_newline(input.read(cx));
+                                if let Some((next, cursor_position)) = next {
+                                    bridge::change_text(id, next.as_ref());
+                                    bridge::change(id, next.as_ref());
+                                    suppress_next_input_change(
+                                        &mut this.suppressed_input_changes,
+                                        id,
+                                        next.clone(),
+                                    );
+                                    input.update(cx, |input, cx| {
+                                        input.set_value(next, window, cx);
+                                        input.set_cursor_position(cursor_position, window, cx);
+                                    });
+                                }
+                                bridge::event(id, "submit");
+                            } else {
+                                bridge::event(id, "submit");
+                            }
+                        }
+                        InputEvent::Focus => bridge::event(id, "focus"),
+                        InputEvent::Blur => bridge::event(id, "blur"),
+                    },
+                )
                 .detach();
                 // re-render this view when the input's contents/cursor change
                 cx.observe(&state, |_this, _input, cx| cx.notify()).detach();
@@ -318,6 +415,11 @@ impl Render for ServiceApp {
                     if let Some(state) = self.inputs.get(&id) {
                         state.update(cx, |input, cx| {
                             if input.value().as_ref() != next_value.as_str() {
+                                suppress_next_input_change(
+                                    &mut self.suppressed_input_changes,
+                                    id,
+                                    next_value.clone(),
+                                );
                                 input.set_value(next_value, window, cx);
                             }
                         });
@@ -629,6 +731,7 @@ fn main() {
             last_h: 0.0,
             inputs: HashMap::new(),
             input_values: HashMap::new(),
+            suppressed_input_changes: HashMap::new(),
             webviews: HashMap::new(),
             webview_content: HashMap::new(),
         });

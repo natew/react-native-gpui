@@ -97,10 +97,9 @@ impl ReactInputElement {
                                     cx.stop_propagation();
                                     return;
                                 }
-                                if listens_key_press {
-                                    cx.stop_propagation();
-                                    return;
-                                }
+                                crate::bridge::event(element_id, "submit");
+                                cx.stop_propagation();
+                                return;
                             }
                             let Some(text) = keystroke.key_char.as_deref() else {
                                 return;

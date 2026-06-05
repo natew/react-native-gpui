@@ -509,3 +509,23 @@ export const StatusBar = Object.assign(StatusBarComponent, {
         return props;
     },
 });
+
+const nativeComponentNameMap: Record<string, string> = {
+    PortalHostView: "RNTPortalHostView",
+    PortalView: "RNTPortalView",
+};
+
+export function requireNativeComponent(name: string) {
+    const hostName = nativeComponentNameMap[name] ?? name;
+    return forwardRef<unknown, Record<string, unknown>>(function NativeComponent(props, ref) {
+        return createElement(hostName as any, { ...props, ref }, props.children as ReactNode);
+    });
+}
+
+export function codegenNativeComponent(name: string) {
+    return requireNativeComponent(name);
+}
+
+export function codegenNativeCommands<T extends object = Record<string, never>>(): T {
+    return {} as T;
+}

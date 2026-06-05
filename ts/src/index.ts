@@ -31,6 +31,9 @@ export {
     ActivityIndicator,
     StatusBar,
     Modal,
+    requireNativeComponent,
+    codegenNativeComponent,
+    codegenNativeCommands,
 } from "./components";
 export type {
     TextProps,

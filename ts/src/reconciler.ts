@@ -157,6 +157,8 @@ export function dispatchEvent(
         pageY?: number;
         locationX?: number;
         locationY?: number;
+        scrollX?: number;
+        scrollY?: number;
         layout?: unknown;
     },
 ) {
@@ -395,6 +397,8 @@ function createEvent(
         pageY?: number;
         locationX?: number;
         locationY?: number;
+        scrollX?: number;
+        scrollY?: number;
         layout?: unknown;
     },
 ) {
@@ -423,6 +427,10 @@ function createEvent(
             locationY: payload.locationY ?? 0,
             pageX: payload.pageX ?? 0,
             pageY: payload.pageY ?? 0,
+            contentOffset: {
+                x: payload.scrollX ?? 0,
+                y: payload.scrollY ?? 0,
+            },
         },
         locationX: payload.locationX ?? 0,
         locationY: payload.locationY ?? 0,

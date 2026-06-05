@@ -81,6 +81,16 @@ pub fn mouse_event(
     }));
 }
 
+pub fn scroll_event(id: u64, x: f32, y: f32) {
+    emit_value(json!({
+        "type": "event",
+        "id": id,
+        "event": "scroll",
+        "scrollX": x,
+        "scrollY": y
+    }));
+}
+
 pub fn change_text(id: u64, value: &str) {
     emit_value(json!({ "type": "event", "id": id, "event": "changeText", "value": value }));
 }

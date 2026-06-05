@@ -58,6 +58,8 @@ export type BridgeEvent =
           pageY?: number;
           locationX?: number;
           locationY?: number;
+          scrollX?: number;
+          scrollY?: number;
           layout?: { x: number; y: number; width: number; height: number };
       };
 

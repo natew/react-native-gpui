@@ -328,6 +328,7 @@ impl Element for ReactDivElement {
             let max_scroll_x = prepaint.max_scroll_x;
             let max_scroll_y = prepaint.max_scroll_y;
             let hitbox = prepaint.hitbox.clone();
+            let on_scroll = self.element.listens("scroll");
             window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble
                     && hitbox
@@ -349,6 +350,9 @@ impl Element for ReactDivElement {
                     };
                     if (next.x - cur.x).abs() > 0.01 || (next.y - cur.y).abs() > 0.01 {
                         set_scroll(id, next);
+                        if on_scroll {
+                            crate::bridge::scroll_event(id, next.x, next.y);
+                        }
                         window.refresh(); // on-demand: repaint to reflect the new offset
                         cx.stop_propagation();
                     }

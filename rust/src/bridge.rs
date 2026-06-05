@@ -131,14 +131,22 @@ pub fn layout_if_changed(id: u64, x: f32, y: f32, width: f32, height: f32) {
         }
         last.insert(id, key);
     }
-    emit_value(json!({
-        "type": "event", "id": id, "event": "layout",
-        "layout": { "x": x, "y": y, "width": width, "height": height }
-    }));
+    emit_layout(id, x, y, width, height);
 }
 
 pub fn remember_layout(id: u64, x: f32, y: f32, width: f32, height: f32) {
     LAST_FRAME.lock().unwrap().insert(id, (x, y, width, height));
+}
+
+pub fn cached_layout(id: u64) -> Option<(f32, f32, f32, f32)> {
+    LAST_FRAME.lock().unwrap().get(&id).copied()
+}
+
+pub fn emit_layout(id: u64, x: f32, y: f32, width: f32, height: f32) {
+    emit_value(json!({
+        "type": "event", "id": id, "event": "layout",
+        "layout": { "x": x, "y": y, "width": width, "height": height }
+    }));
 }
 
 /// emit one cached layout event when a node newly subscribes after it has already
@@ -162,10 +170,7 @@ pub fn emit_cached_layout_for_new_subscribers(present: &std::collections::HashSe
     let frames = LAST_FRAME.lock().unwrap();
     for id in new_subscribers {
         if let Some((x, y, width, height)) = frames.get(&id).copied() {
-            emit_value(json!({
-                "type": "event", "id": id, "event": "layout",
-                "layout": { "x": x, "y": y, "width": width, "height": height }
-            }));
+            emit_layout(id, x, y, width, height);
         }
     }
 }

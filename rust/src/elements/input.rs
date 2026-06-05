@@ -8,7 +8,7 @@ use gpui::{
 };
 use gpui_component::input::{Input, InputState};
 
-use crate::elements::ReactElement;
+use crate::elements::{ReactElement, report_layout};
 use crate::style::ElementStyle;
 
 // The service owns the persistent InputState entities; it publishes a snapshot
@@ -193,6 +193,7 @@ impl Element for ReactInputElement {
     ) {
         #[cfg(target_os = "macos")]
         crate::ax::update_frame(window, &self.element, bounds);
+        report_layout(&self.element, bounds);
 
         if let Some(child) = self.child.as_mut() {
             child.prepaint(window, cx);

@@ -325,6 +325,22 @@ fn collect_layout_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
     }
 }
 
+fn emit_definite_cached_layouts(el: &Arc<ReactElement>) {
+    if el.listens("layout") {
+        if let Some((x, y, cached_w, cached_h)) = bridge::cached_layout(el.global_id) {
+            let width = el.style.width.and_then(Dim::as_px).unwrap_or(cached_w);
+            let height = el.style.height.and_then(Dim::as_px).unwrap_or(cached_h);
+            if (width - cached_w).abs() > 0.5 || (height - cached_h).abs() > 0.5 {
+                bridge::remember_layout(el.global_id, x, y, width, height);
+                bridge::emit_layout(el.global_id, x, y, width, height);
+            }
+        }
+    }
+    for c in &el.children {
+        emit_definite_cached_layouts(c);
+    }
+}
+
 fn collect_node_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
     out.insert(el.global_id);
     for c in &el.children {
@@ -861,6 +877,7 @@ fn main() {
                                 let mut layout_ids = HashSet::new();
                                 collect_layout_ids(&next_root, &mut layout_ids);
                                 bridge::emit_cached_layout_for_new_subscribers(&layout_ids);
+                                emit_definite_cached_layouts(&next_root);
                                 this.root = next_root;
                                 cx.notify();
                             }
@@ -888,6 +905,15 @@ fn main() {
                         });
                         if applied.is_err() {
                             break; // view dropped
+                        }
+                        if window_handle
+                            .update(cx, |_root, window, root_cx| {
+                                root_cx.notify();
+                                window.refresh();
+                            })
+                            .is_err()
+                        {
+                            break;
                         }
                         if cx.update(|cx| cx.refresh_windows()).is_err() {
                             break;

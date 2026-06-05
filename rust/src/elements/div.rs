@@ -9,7 +9,7 @@ use gpui::{
 };
 use once_cell::sync::Lazy;
 
-use crate::elements::{ReactElement, create_element};
+use crate::elements::{ReactElement, create_element, report_layout};
 use crate::style::ElementStyle;
 
 // Scroll offset per scroll-container id, persisted across the continuous
@@ -733,24 +733,7 @@ impl Element for ReactDivElement {
             }
         }
 
-        crate::bridge::remember_layout(
-            id,
-            bounds.origin.x.into(),
-            bounds.origin.y.into(),
-            bounds.size.width.into(),
-            bounds.size.height.into(),
-        );
-
-        // onLayout: report the measured rect (deduped per id across frames).
-        if self.element.listens("layout") {
-            crate::bridge::layout_if_changed(
-                id,
-                bounds.origin.x.into(),
-                bounds.origin.y.into(),
-                bounds.size.width.into(),
-                bounds.size.height.into(),
-            );
-        }
+        report_layout(&self.element, bounds);
 
         if let (Some(hitbox), Some(mouse_cursor)) = (prepaint.hitbox.as_ref(), style.mouse_cursor) {
             window.set_cursor_style(mouse_cursor, hitbox);

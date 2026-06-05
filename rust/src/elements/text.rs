@@ -6,7 +6,7 @@ use gpui::{
     Window, div, px,
 };
 
-use crate::elements::ReactElement;
+use crate::elements::{ReactElement, report_layout};
 use crate::style::ElementStyle;
 
 pub struct ReactTextElement {
@@ -190,6 +190,7 @@ impl Element for ReactTextElement {
     ) {
         #[cfg(target_os = "macos")]
         crate::ax::update_frame(window, &self.element, bounds);
+        report_layout(&self.element, bounds);
 
         if let Some(child) = self.child.as_mut() {
             child.prepaint(window, cx);

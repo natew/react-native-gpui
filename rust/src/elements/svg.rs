@@ -5,7 +5,7 @@ use gpui::{
     Pixels, Styled, Window, px, svg,
 };
 
-use crate::elements::ReactElement;
+use crate::elements::{ReactElement, report_layout};
 use crate::style::ElementStyle;
 
 /// RN-bridge `<Svg name="…">` → a GPUI monochrome icon: an svg alpha-mask tinted
@@ -91,6 +91,7 @@ impl Element for ReactSvgElement {
     ) {
         #[cfg(target_os = "macos")]
         crate::ax::update_frame(window, &self.element, bounds);
+        report_layout(&self.element, bounds);
 
         if let Some(child) = self.child.as_mut() {
             child.prepaint(window, cx);

@@ -40,6 +40,7 @@ const measuredIds = new Set<number>();
 const layouts = new Map<number, LayoutRect>();
 const instances = new Map<number, Instance>();
 const pendingMeasures = new Map<number, Array<() => void>>();
+const layoutSignatures = new Map<number, string>();
 const PORTAL_HOST_TYPE = "RNTPortalHostView";
 const PORTAL_VIEW_TYPE = "RNTPortalView";
 
@@ -193,11 +194,14 @@ function layoutFor(id: number): LayoutRect {
 }
 
 function requestMeasuredLayout(id: number): boolean {
+    const hasLayout = layouts.has(id);
     if (!measuredIds.has(id)) {
         measuredIds.add(id);
         requestPseudoCommit();
+    } else if (!hasLayout) {
+        requestPseudoCommit();
     }
-    return layouts.has(id);
+    return hasLayout;
 }
 
 function afterMeasuredLayout(id: number, callback: () => void) {
@@ -217,6 +221,24 @@ function flushPendingMeasures(id: number) {
     for (const callback of callbacks) callback();
 }
 
+function layoutSignature(type: string, props: Record<string, unknown>): string {
+    const style = normalizeStyle(props.style as never) ?? {};
+    return JSON.stringify({
+        type,
+        style,
+        numberOfLines: props.numberOfLines,
+        multiline: props.multiline,
+        source: props.source,
+        src: props.src,
+    });
+}
+
+function invalidateLayout(node: Instance | TextInstance) {
+    if (isTextLike(node)) return;
+    layouts.delete(node.id);
+    for (const child of node.children) invalidateLayout(child);
+}
+
 function cleanupInstance(node: Instance | TextInstance) {
     if (isTextLike(node)) return;
     handlers.delete(node.id);
@@ -225,6 +247,7 @@ function cleanupInstance(node: Instance | TextInstance) {
     measuredIds.delete(node.id);
     layouts.delete(node.id);
     instances.delete(node.id);
+    layoutSignatures.delete(node.id);
     pendingMeasures.delete(node.id);
     for (const child of node.children) cleanupInstance(child);
 }
@@ -325,6 +348,7 @@ function createPublicInstance(type: string, props: Record<string, unknown>): Ins
         },
     };
     instances.set(id, instance);
+    layoutSignatures.set(id, layoutSignature(type, props));
     return instance;
 }
 
@@ -714,9 +738,11 @@ const hostConfig: any = {
     },
     appendInitialChild(parent: Instance, child: Instance | TextInstance) {
         parent.children.push(child);
+        invalidateLayout(parent);
     },
     appendChild(parent: Instance, child: Instance | TextInstance) {
         parent.children.push(child);
+        invalidateLayout(parent);
     },
     appendChildToContainer(container: Container, child: Instance | TextInstance) {
         container.children.push(child);
@@ -725,6 +751,7 @@ const hostConfig: any = {
         const i = parent.children.indexOf(child);
         if (i !== -1) {
             parent.children.splice(i, 1);
+            invalidateLayout(parent);
             cleanupInstance(child);
         }
     },
@@ -738,6 +765,7 @@ const hostConfig: any = {
     insertBefore(parent: Instance, child: Instance | TextInstance, before: Instance | TextInstance) {
         const i = parent.children.indexOf(before);
         parent.children.splice(i === -1 ? parent.children.length : i, 0, child);
+        invalidateLayout(parent);
     },
     insertInContainerBefore(container: Container, child: Instance | TextInstance, before: Instance | TextInstance) {
         const i = container.children.indexOf(before);
@@ -745,6 +773,11 @@ const hostConfig: any = {
     },
     // react-reconciler 0.31 signature: (instance, type, prevProps, nextProps, handle)
     commitUpdate(instance: Instance, _type: string, _prevProps: unknown, nextProps: Record<string, unknown>) {
+        const nextSignature = layoutSignature(instance.type, nextProps);
+        if (layoutSignatures.get(instance.id) !== nextSignature) {
+            layoutSignatures.set(instance.id, nextSignature);
+            invalidateLayout(instance);
+        }
         instance.props = nextProps;
         registerHandlers(instance.id, nextProps);
     },

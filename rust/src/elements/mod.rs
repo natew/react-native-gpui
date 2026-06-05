@@ -12,7 +12,7 @@ pub use svg::ReactSvgElement;
 pub use text::ReactTextElement;
 pub use webview::ReactWebViewElement;
 
-use gpui::{AnyElement, Hsla, IntoElement};
+use gpui::{AnyElement, Bounds, Hsla, IntoElement, Pixels};
 use std::sync::Arc;
 
 use crate::style::ElementStyle;
@@ -79,6 +79,26 @@ impl ReactElement {
             return cached.clone();
         }
         self.style.build_gpui_style(default_bg)
+    }
+}
+
+pub fn report_layout(element: &ReactElement, bounds: Bounds<Pixels>) {
+    let id = element.global_id;
+    crate::bridge::remember_layout(
+        id,
+        bounds.origin.x.into(),
+        bounds.origin.y.into(),
+        bounds.size.width.into(),
+        bounds.size.height.into(),
+    );
+    if element.listens("layout") {
+        crate::bridge::layout_if_changed(
+            id,
+            bounds.origin.x.into(),
+            bounds.origin.y.into(),
+            bounds.size.width.into(),
+            bounds.size.height.into(),
+        );
     }
 }
 

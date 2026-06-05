@@ -8,7 +8,7 @@ use gpui::{
     Pixels, Window,
 };
 
-use crate::elements::ReactElement;
+use crate::elements::{ReactElement, report_layout};
 
 // The service owns one persistent wry WebView per `<WebView>` id and publishes a
 // snapshot here each render, so this (stateless) element can resolve its view by id
@@ -78,6 +78,7 @@ impl Element for ReactWebViewElement {
     ) {
         #[cfg(target_os = "macos")]
         crate::ax::update_frame(window, &self.element, bounds);
+        report_layout(&self.element, bounds);
 
         // reserve the webview's rect for gpui hit-testing. insert_hitbox must run in
         // prepaint (gpui asserts the phase — in release the assert is compiled out,

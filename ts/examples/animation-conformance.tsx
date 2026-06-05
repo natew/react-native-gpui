@@ -23,6 +23,9 @@ const C = {
     sub: "#66758c",
 };
 
+const holdMs = numberEnv("RNGPUI_ANIMATION_HOLD_MS", 5000);
+const durationMs = numberEnv("RNGPUI_ANIMATION_DURATION_MS", 900);
+
 function App() {
     const left = useRef(new Animated.Value(18)).current;
     const opacity = useRef(new Animated.Value(0.28)).current;
@@ -34,16 +37,17 @@ function App() {
         const sub = left.addListener(({ value }) => setCurrentLeft(value));
         const timer = setTimeout(() => {
             setPhase("running");
+            console.log("CONFORMANCE animation RUNNING");
             Animated.parallel([
                 Animated.timing(left, {
                     toValue: 244,
-                    duration: 900,
+                    duration: durationMs,
                     easing: Easing.inOut(Easing.cubic),
                     useNativeDriver: false,
                 } as never),
                 Animated.timing(opacity, {
                     toValue: 1,
-                    duration: 900,
+                    duration: durationMs,
                     easing: Easing.inOut(Easing.cubic),
                     useNativeDriver: false,
                 } as never),
@@ -52,7 +56,7 @@ function App() {
                 setPhase("done");
                 console.log(`CONFORMANCE animation ${finished ? "PASS" : "FAIL"} left=${left.__getValue().toFixed(1)}`);
             });
-        }, 5000);
+        }, holdMs);
         return () => {
             clearTimeout(timer);
             left.removeListener(sub);
@@ -130,3 +134,8 @@ const s = StyleSheet.create({
 });
 
 render(<App />, { width: 404, height: 180 });
+
+function numberEnv(name: string, fallback: number): number {
+    const value = Number(process.env[name] ?? fallback);
+    return Number.isFinite(value) && value >= 0 ? value : fallback;
+}

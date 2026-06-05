@@ -6,8 +6,8 @@ mod text;
 pub mod webview;
 
 pub use div::{
-    ReactDivElement, clear_native_layout_override, retain_native_layout_keys, scroll_to,
-    scroll_to_end, set_native_layout_override,
+    ReactDivElement, animate_native_layout_override, clear_native_layout_override,
+    retain_native_layout_keys, scroll_to, scroll_to_end, set_native_layout_override,
 };
 pub use image::ReactImageElement;
 pub use input::ReactInputElement;

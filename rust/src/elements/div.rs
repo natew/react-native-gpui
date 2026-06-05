@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, Bounds, ContentMask, CursorStyle, DispatchPhase, Display, Element, ElementId,
@@ -32,6 +33,16 @@ struct NativeLayoutFrame {
     height: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct NativeLayoutAnimation {
+    from_width: Option<f32>,
+    to_width: Option<f32>,
+    from_height: Option<f32>,
+    to_height: Option<f32>,
+    start: Instant,
+    duration: Duration,
+}
+
 #[derive(Clone, Debug)]
 struct ActiveNativeResize {
     handle_id: u64,
@@ -50,6 +61,8 @@ static ACTIVE_MOUSE_TARGET: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(N
 static NATIVE_LAYOUT_OVERRIDES: Lazy<Mutex<HashMap<String, NativeLayoutOverride>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static NATIVE_LAYOUT_FRAMES: Lazy<Mutex<HashMap<String, NativeLayoutFrame>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static NATIVE_LAYOUT_ANIMATIONS: Lazy<Mutex<HashMap<String, NativeLayoutAnimation>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static ACTIVE_NATIVE_RESIZE: Lazy<Mutex<Option<ActiveNativeResize>>> =
     Lazy::new(|| Mutex::new(None));
@@ -87,6 +100,52 @@ pub fn set_native_layout_override(key: &str, width: Option<f32>, height: Option<
     if key.is_empty() {
         return;
     }
+    NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().remove(key);
+    set_native_layout_override_now(key, width, height);
+}
+
+pub fn animate_native_layout_override(
+    key: &str,
+    width: Option<f32>,
+    height: Option<f32>,
+    duration_ms: f32,
+) {
+    if key.is_empty() {
+        return;
+    }
+    if duration_ms <= 0.0 || (!duration_ms.is_finite()) {
+        set_native_layout_override(key, width, height);
+        return;
+    }
+
+    let current = native_layout_override(key);
+    let frame = NATIVE_LAYOUT_FRAMES.lock().unwrap().get(key).copied();
+    let from_width = width.map(|_| {
+        current
+            .width
+            .or_else(|| frame.map(|frame| frame.width))
+            .unwrap_or(0.0)
+    });
+    let from_height = height.map(|_| {
+        current
+            .height
+            .or_else(|| frame.map(|frame| frame.height))
+            .unwrap_or(0.0)
+    });
+    NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().insert(
+        key.to_string(),
+        NativeLayoutAnimation {
+            from_width,
+            to_width: width,
+            from_height,
+            to_height: height,
+            start: Instant::now(),
+            duration: Duration::from_secs_f32((duration_ms / 1000.0).max(0.001)),
+        },
+    );
+}
+
+fn set_native_layout_override_now(key: &str, width: Option<f32>, height: Option<f32>) {
     let mut overrides = NATIVE_LAYOUT_OVERRIDES.lock().unwrap();
     let mut next = overrides.get(key).copied().unwrap_or_default();
     if width.is_some() {
@@ -103,6 +162,7 @@ pub fn set_native_layout_override(key: &str, width: Option<f32>, height: Option<
 }
 
 pub fn clear_native_layout_override(key: &str) {
+    NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().remove(key);
     NATIVE_LAYOUT_OVERRIDES.lock().unwrap().remove(key);
 }
 
@@ -115,6 +175,10 @@ pub fn retain_native_layout_keys(keys: &HashSet<String>) {
         .lock()
         .unwrap()
         .retain(|key, _| keys.contains(key));
+    NATIVE_LAYOUT_ANIMATIONS
+        .lock()
+        .unwrap()
+        .retain(|key, _| keys.contains(key));
 }
 
 fn take_scroll_to_end(id: u64) -> bool {
@@ -122,12 +186,60 @@ fn take_scroll_to_end(id: u64) -> bool {
 }
 
 fn native_layout_override(key: &str) -> NativeLayoutOverride {
+    if let Some(animation) = NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().get(key).copied() {
+        let now = Instant::now();
+        let (next, done) = native_layout_animation_value(animation, now);
+        if done {
+            NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().remove(key);
+            set_native_layout_override_now(key, animation.to_width, animation.to_height);
+            return NATIVE_LAYOUT_OVERRIDES
+                .lock()
+                .unwrap()
+                .get(key)
+                .copied()
+                .unwrap_or_default();
+        }
+        return next;
+    }
     NATIVE_LAYOUT_OVERRIDES
         .lock()
         .unwrap()
         .get(key)
         .copied()
         .unwrap_or_default()
+}
+
+fn native_layout_is_animating(key: &str) -> bool {
+    NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().contains_key(key)
+}
+
+fn native_layout_animation_value(
+    animation: NativeLayoutAnimation,
+    now: Instant,
+) -> (NativeLayoutOverride, bool) {
+    let elapsed = now.saturating_duration_since(animation.start);
+    let raw_progress = elapsed.as_secs_f32() / animation.duration.as_secs_f32();
+    let done = raw_progress >= 1.0;
+    let progress = ease_out_cubic(raw_progress.clamp(0.0, 1.0));
+    (
+        NativeLayoutOverride {
+            width: animation
+                .to_width
+                .map(|to| lerp(animation.from_width.unwrap_or(to), to, progress)),
+            height: animation
+                .to_height
+                .map(|to| lerp(animation.from_height.unwrap_or(to), to, progress)),
+        },
+        done,
+    )
+}
+
+fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+fn lerp(from: f32, to: f32, t: f32) -> f32 {
+    from + (to - from) * t
 }
 
 fn remember_native_layout_frame(key: &str, width: f32, height: f32) {
@@ -314,6 +426,9 @@ impl Element for ReactDivElement {
             }
             if let Some(height) = native.height {
                 style.size.height = px(height).into();
+            }
+            if native_layout_is_animating(key) {
+                window.refresh();
             }
         }
         let inherited = self.element.style.clone();
@@ -999,14 +1114,17 @@ impl IntoElement for ReactDivElement {
 #[cfg(test)]
 mod tests {
     use std::sync::{Mutex, MutexGuard};
+    use std::time::{Duration, Instant};
 
     use gpui::px;
     use once_cell::sync::Lazy;
 
     use super::{
-        ActiveNativeResize, NATIVE_LAYOUT_FRAMES, NATIVE_LAYOUT_OVERRIDES, NativeLayoutOverride,
-        clear_native_layout_override, get_scroll, native_layout_override,
-        remember_native_layout_frame, scroll_to, set_native_layout_override, update_native_resize,
+        ActiveNativeResize, NATIVE_LAYOUT_ANIMATIONS, NATIVE_LAYOUT_FRAMES,
+        NATIVE_LAYOUT_OVERRIDES, NativeLayoutAnimation, NativeLayoutOverride,
+        clear_native_layout_override, get_scroll, native_layout_animation_value,
+        native_layout_override, remember_native_layout_frame, scroll_to,
+        set_native_layout_override, update_native_resize,
     };
     use crate::elements::NativeResizeEdge;
 
@@ -1044,6 +1162,38 @@ mod tests {
             native_layout_override("pane-a"),
             NativeLayoutOverride::default()
         );
+    }
+
+    #[test]
+    fn native_layout_animation_interpolates_to_final_size() {
+        let start = Instant::now();
+        let animation = NativeLayoutAnimation {
+            from_width: Some(100.0),
+            to_width: Some(200.0),
+            from_height: Some(60.0),
+            to_height: Some(120.0),
+            start,
+            duration: Duration::from_millis(100),
+        };
+
+        let (initial, done) = native_layout_animation_value(animation, start);
+        assert_eq!(initial.width, Some(100.0));
+        assert_eq!(initial.height, Some(60.0));
+        assert!(!done);
+
+        let (mid, done) =
+            native_layout_animation_value(animation, start + Duration::from_millis(50));
+        assert!(mid.width.unwrap() > 100.0);
+        assert!(mid.width.unwrap() < 200.0);
+        assert!(mid.height.unwrap() > 60.0);
+        assert!(mid.height.unwrap() < 120.0);
+        assert!(!done);
+
+        let (final_size, done) =
+            native_layout_animation_value(animation, start + Duration::from_millis(100));
+        assert_eq!(final_size.width, Some(200.0));
+        assert_eq!(final_size.height, Some(120.0));
+        assert!(done);
     }
 
     #[test]
@@ -1104,6 +1254,17 @@ mod tests {
                 height: 10.0,
             },
         );
+        NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().insert(
+            "drop".to_string(),
+            NativeLayoutAnimation {
+                from_width: Some(20.0),
+                to_width: Some(40.0),
+                from_height: None,
+                to_height: None,
+                start: Instant::now(),
+                duration: Duration::from_millis(100),
+            },
+        );
         super::retain_native_layout_keys(&["keep".to_string()].into_iter().collect());
 
         let overrides = NATIVE_LAYOUT_OVERRIDES.lock().unwrap();
@@ -1111,6 +1272,12 @@ mod tests {
         assert!(!overrides.contains_key("drop"));
         drop(overrides);
         assert!(!NATIVE_LAYOUT_FRAMES.lock().unwrap().contains_key("drop"));
+        assert!(
+            !NATIVE_LAYOUT_ANIMATIONS
+                .lock()
+                .unwrap()
+                .contains_key("drop")
+        );
         clear_native_layout_override("keep");
     }
 }

@@ -1,212 +1,270 @@
 #!/usr/bin/env bun
-import { deflateSync } from "node:zlib";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
-import { Animated, Easing } from "../src/index.ts";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-let crcTable;
-
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = process.argv[2] || "/tmp/rngpui-animation-conformance";
-const beforePath = `${outDir}/frame-before.png`;
-const afterPath = `${outDir}/frame-after.png`;
-const diffPath = `${outDir}/frame-diff.png`;
+const holdMs = 1800;
+const durationMs = 3200;
+const expectedWidth = 404;
+const expectedHeight = 180;
 
+const beforePath = `${outDir}/frame-before.png`;
+const midPath = `${outDir}/frame-mid.png`;
+const afterPath = `${outDir}/frame-after.png`;
+const beforeMidDiffPath = `${outDir}/frame-before-mid-diff.png`;
+const midAfterDiffPath = `${outDir}/frame-mid-after-diff.png`;
+
+const screenCaptureKitSwift = `
+import Foundation
+import AppKit
+import ScreenCaptureKit
+
+let _ = NSApplication.shared
+let windowID = CGWindowID(UInt32(CommandLine.arguments[1])!)
+let path = CommandLine.arguments[2]
+
+final class CaptureBox: @unchecked Sendable {
+    var code = 0
+    var done = false
+}
+
+func captureImage(contentFilter: SCContentFilter, configuration: SCStreamConfiguration) async throws -> CGImage {
+    do {
+        return try await SCScreenshotManager.captureImage(
+            contentFilter: contentFilter,
+            configuration: configuration
+        )
+    } catch {
+        let ns = error as NSError
+        if ns.domain == "com.apple.ScreenCaptureKit.SCStreamErrorDomain" && ns.code == -3801 {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            return try await SCScreenshotManager.captureImage(
+                contentFilter: contentFilter,
+                configuration: configuration
+            )
+        }
+        throw error
+    }
+}
+
+let box = CaptureBox()
+Task { @MainActor in
+    do {
+        let content = try await SCShareableContent.current
+        guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
+            throw NSError(
+                domain: "AnimationFrameDiff",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "window not found"]
+            )
+        }
+
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let config = SCStreamConfiguration()
+        let scale = NSScreen.screens.first(where: { !$0.frame.intersection(window.frame).isNull })?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? 1
+        config.width = max(1, Int(window.frame.width * scale))
+        config.height = max(1, Int(window.frame.height * scale))
+        config.showsCursor = false
+        config.scalesToFit = true
+        config.preservesAspectRatio = true
+        config.ignoreShadowsSingleWindow = true
+        config.ignoreGlobalClipSingleWindow = true
+
+        let image = try await captureImage(contentFilter: filter, configuration: config)
+        let rep = NSBitmapImageRep(cgImage: image)
+        guard let data = rep.representation(using: .png, properties: [:]) else {
+            throw NSError(
+                domain: "AnimationFrameDiff",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "png encode failed"]
+            )
+        }
+        try data.write(to: URL(fileURLWithPath: path))
+    } catch {
+        fputs("capture failed: \\(error)\\n", stderr)
+        box.code = 1
+    }
+    box.done = true
+}
+
+let deadline = Date().addingTimeInterval(8)
+while !box.done && Date() < deadline {
+    RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
+}
+if !box.done {
+    fputs("capture timed out\\n", stderr)
+    box.code = 1
+}
+exit(Int32(box.code))
+`;
+
+rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
-const before = { left: 18, opacity: 0.28 };
-const after = await runAnimation();
+const child = spawn("bun", ["examples/animation-conformance.tsx"], {
+    cwd: root,
+    env: {
+        ...process.env,
+        RNGPUI_NO_ACTIVATE: "1",
+        RNGPUI_ANIMATION_HOLD_MS: String(holdMs),
+        RNGPUI_ANIMATION_DURATION_MS: String(durationMs),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+});
 
-writePng(beforePath, drawFrame(before));
-writePng(afterPath, drawFrame(after));
+let output = "";
+let exited = false;
+let exitLabel = "";
 
-const diff = diffImages(drawFrame(before), drawFrame(after), 12);
-writePng(diffPath, diff.image);
+child.stdout?.on("data", (chunk) => {
+    output += chunk.toString();
+});
+child.stderr?.on("data", (chunk) => {
+    output += chunk.toString();
+});
+child.on("exit", (code, signal) => {
+    exited = true;
+    exitLabel = `code=${code ?? "null"} signal=${signal ?? "null"}`;
+});
 
-const ratio = diff.changed / diff.total;
-console.log(
-    [
-        "ANIMATION_FRAME_DIFF",
-        `before=${beforePath}`,
-        `after=${afterPath}`,
-        `diff=${diffPath}`,
-        `beforeLeft=${before.left.toFixed(1)}`,
-        `afterLeft=${after.left.toFixed(1)}`,
-        `pixels=${diff.total}`,
-        `changed=${diff.changed}`,
-        `ratio=${ratio.toFixed(6)}`,
-    ].join(" "),
-);
+try {
+    const windowId = await waitForAnimationWindow();
+    await sleep(220);
+    captureWindow(windowId, beforePath);
 
-if (after.left < 240 || after.opacity < 0.98) {
-    console.error(`animation did not reach final values: left=${after.left} opacity=${after.opacity}`);
-    process.exit(1);
+    await waitForOutput("CONFORMANCE animation RUNNING", 6000);
+    await sleep(Math.round(durationMs * 0.3));
+    captureWindow(windowId, midPath);
+
+    await waitForOutput("CONFORMANCE animation PASS", 6000);
+    await sleep(160);
+    captureWindow(windowId, afterPath);
+
+    if (!child.killed) child.kill("SIGTERM");
+
+    const beforeMid = pixelDiff(beforePath, midPath, beforeMidDiffPath);
+    const midAfter = pixelDiff(midPath, afterPath, midAfterDiffPath);
+    console.log(
+        [
+            "ANIMATION_FRAME_DIFF",
+            `before=${beforePath}`,
+            `mid=${midPath}`,
+            `after=${afterPath}`,
+            `beforeMidDiff=${beforeMidDiffPath}`,
+            `midAfterDiff=${midAfterDiffPath}`,
+            `beforeMidRatio=${beforeMid.ratio}`,
+            `midAfterRatio=${midAfter.ratio}`,
+        ].join(" "),
+    );
+} catch (error) {
+    if (!child.killed) child.kill("SIGTERM");
+    fail(error instanceof Error ? error.message : String(error));
 }
-if (ratio < 0.01) {
-    console.error(`animation frame diff ratio ${ratio.toFixed(6)} is below 0.01`);
-    process.exit(1);
+
+async function waitForAnimationWindow() {
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+        const windows = listWindows();
+        const match = windows.find(
+            (window) =>
+                window.owner === "rngpui-service" &&
+                window.title === "react-native-gpui" &&
+                Math.abs(window.width - expectedWidth) <= 60 &&
+                Math.abs(window.height - expectedHeight) <= 60,
+        );
+        if (match) return match.id;
+        await sleep(120);
+    }
+    throw new Error("animation GPUI window was not found");
 }
 
-async function runAnimation() {
-    const left = new Animated.Value(18);
-    const opacity = new Animated.Value(0.28);
-    return await new Promise((resolve) => {
-        Animated.parallel([
-            Animated.timing(left, {
-                toValue: 244,
-                duration: 180,
-                easing: Easing.inOut(Easing.cubic),
-                useNativeDriver: false,
-            }),
-            Animated.timing(opacity, {
-                toValue: 1,
-                duration: 180,
-                easing: Easing.inOut(Easing.cubic),
-                useNativeDriver: false,
-            }),
-        ]).start(({ finished }) => {
-            if (!finished) {
-                resolve({ left: left.__getValue(), opacity: opacity.__getValue() });
-                return;
-            }
-            resolve({ left: left.__getValue(), opacity: opacity.__getValue() });
-        });
+function listWindows() {
+    const swift = `
+import Foundation
+import CoreGraphics
+let opts = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)
+let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] ?? []
+for window in list {
+    let owner = window[kCGWindowOwnerName as String] as? String ?? ""
+    let title = window[kCGWindowName as String] as? String ?? ""
+    let number = (window[kCGWindowNumber as String] as? NSNumber)?.intValue ?? 0
+    let pid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.intValue ?? 0
+    let bounds = window[kCGWindowBounds as String] as? [String: Any] ?? [:]
+    let width = (bounds["Width"] as? NSNumber)?.intValue ?? 0
+    let height = (bounds["Height"] as? NSNumber)?.intValue ?? 0
+    print("\\(number)\\t\\(pid)\\t\\(owner)\\t\\(title)\\t\\(width)\\t\\(height)")
+}
+`;
+    const raw = execFileSync("swift", ["-e", swift], { encoding: "utf8" });
+    return raw
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => {
+            const [id, pid, owner, title, width, height] = line.split("\t");
+            return {
+                id: Number(id),
+                pid: Number(pid),
+                owner,
+                title,
+                width: Number(width),
+                height: Number(height),
+            };
+        })
+        .filter((window) => Number.isFinite(window.id) && window.id > 0);
+}
+
+async function waitForOutput(needle, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (output.includes(needle)) return;
+        if (exited) throw new Error(`animation fixture exited before ${needle}: ${exitLabel}\n${output.trim()}`);
+        await sleep(40);
+    }
+    throw new Error(`timed out waiting for ${needle}\n${output.trim()}`);
+}
+
+function captureWindow(windowId, path) {
+    execFileSync("swift", ["-e", screenCaptureKitSwift, String(windowId), path], {
+        encoding: "utf8",
+        stdio: "pipe",
     });
+    if (!existsSync(path)) throw new Error(`screencapture did not write ${path}`);
 }
 
-function drawFrame({ left, opacity }) {
-    const width = 404;
-    const height = 180;
-    const rgba = Buffer.alloc(width * height * 4, 0xff);
-    fill(rgba, width, 0, 0, width, height, [243, 246, 251, 255]);
-    roundRect(rgba, width, 22, 22, 360, 136, 12, [255, 255, 255, 255]);
-    strokeRoundRect(rgba, width, 22, 22, 360, 136, 12, [202, 213, 230, 255]);
-    roundRect(rgba, width, 56, 72, 312, 52, 26, [217, 229, 246, 255]);
-    roundRect(rgba, width, Math.round(56 + left), 80, 52, 36, 18, [47, 111, 237, Math.round(255 * opacity)]);
-    return { width, height, rgba };
+function pixelDiff(before, after, diffOut) {
+    const raw = execFileSync(
+        "bun",
+        [
+            "scripts/pixel-diff.mjs",
+            before,
+            after,
+            "--threshold",
+            "18",
+            "--min-diff-ratio",
+            "0.004",
+            "--diff-out",
+            diffOut,
+        ],
+        { cwd: root, encoding: "utf8" },
+    );
+    process.stdout.write(raw);
+    const match = /ratio=([0-9.]+)/.exec(raw);
+    if (!match) throw new Error(`pixel diff did not report a ratio\n${raw.trim()}`);
+    return { ratio: match[1] };
 }
 
-function fill(rgba, width, x, y, w, h, color) {
-    for (let yy = y; yy < y + h; yy += 1) {
-        for (let xx = x; xx < x + w; xx += 1) setPixel(rgba, width, xx, yy, color);
-    }
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function roundRect(rgba, width, x, y, w, h, r, color) {
-    for (let yy = y; yy < y + h; yy += 1) {
-        for (let xx = x; xx < x + w; xx += 1) {
-            if (insideRoundRect(xx, yy, x, y, w, h, r)) blendPixel(rgba, width, xx, yy, color);
-        }
-    }
-}
-
-function strokeRoundRect(rgba, width, x, y, w, h, r, color) {
-    roundRect(rgba, width, x, y, w, 1, 1, color);
-    roundRect(rgba, width, x, y + h - 1, w, 1, 1, color);
-    roundRect(rgba, width, x, y, 1, h, 1, color);
-    roundRect(rgba, width, x + w - 1, y, 1, h, 1, color);
-    for (let yy = y; yy < y + h; yy += 1) {
-        for (let xx = x; xx < x + w; xx += 1) {
-            const outer = insideRoundRect(xx, yy, x, y, w, h, r);
-            const inner = insideRoundRect(xx, yy, x + 1, y + 1, w - 2, h - 2, Math.max(0, r - 1));
-            if (outer && !inner) blendPixel(rgba, width, xx, yy, color);
-        }
-    }
-}
-
-function insideRoundRect(px, py, x, y, w, h, r) {
-    const rx = px < x + r ? x + r : px >= x + w - r ? x + w - r - 1 : px;
-    const ry = py < y + r ? y + r : py >= y + h - r ? y + h - r - 1 : py;
-    const dx = px - rx;
-    const dy = py - ry;
-    return dx * dx + dy * dy <= r * r;
-}
-
-function setPixel(rgba, width, x, y, [r, g, b, a]) {
-    const i = (y * width + x) * 4;
-    rgba[i] = r;
-    rgba[i + 1] = g;
-    rgba[i + 2] = b;
-    rgba[i + 3] = a;
-}
-
-function blendPixel(rgba, width, x, y, [r, g, b, a]) {
-    const i = (y * width + x) * 4;
-    const alpha = a / 255;
-    rgba[i] = Math.round(r * alpha + rgba[i] * (1 - alpha));
-    rgba[i + 1] = Math.round(g * alpha + rgba[i + 1] * (1 - alpha));
-    rgba[i + 2] = Math.round(b * alpha + rgba[i + 2] * (1 - alpha));
-    rgba[i + 3] = 255;
-}
-
-function diffImages(before, after, threshold) {
-    const image = { width: before.width, height: before.height, rgba: Buffer.alloc(before.rgba.length) };
-    let changed = 0;
-    for (let i = 0; i < before.rgba.length; i += 4) {
-        const dr = Math.abs(before.rgba[i] - after.rgba[i]);
-        const dg = Math.abs(before.rgba[i + 1] - after.rgba[i + 1]);
-        const db = Math.abs(before.rgba[i + 2] - after.rgba[i + 2]);
-        const changedPixel = Math.max(dr, dg, db) > threshold;
-        if (changedPixel) changed += 1;
-        image.rgba[i] = changedPixel ? 255 : after.rgba[i];
-        image.rgba[i + 1] = changedPixel ? 0 : after.rgba[i + 1];
-        image.rgba[i + 2] = changedPixel ? 180 : after.rgba[i + 2];
-        image.rgba[i + 3] = 255;
-    }
-    return { image, changed, total: before.width * before.height };
-}
-
-function writePng(path, image) {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, encodePng(image.width, image.height, image.rgba));
-}
-
-function encodePng(width, height, rgba) {
-    const rowBytes = width * 4;
-    const raw = Buffer.alloc((rowBytes + 1) * height);
-    for (let y = 0; y < height; y += 1) {
-        raw[y * (rowBytes + 1)] = 0;
-        rgba.copy(raw, y * (rowBytes + 1) + 1, y * rowBytes, y * rowBytes + rowBytes);
-    }
-    return Buffer.concat([
-        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-        chunk("IHDR", ihdr(width, height)),
-        chunk("IDAT", deflateSync(raw)),
-        chunk("IEND", Buffer.alloc(0)),
-    ]);
-}
-
-function ihdr(width, height) {
-    const buf = Buffer.alloc(13);
-    buf.writeUInt32BE(width, 0);
-    buf.writeUInt32BE(height, 4);
-    buf[8] = 8;
-    buf[9] = 6;
-    buf[10] = 0;
-    buf[11] = 0;
-    buf[12] = 0;
-    return buf;
-}
-
-function chunk(type, data) {
-    const name = Buffer.from(type);
-    const out = Buffer.alloc(12 + data.length);
-    out.writeUInt32BE(data.length, 0);
-    name.copy(out, 4);
-    data.copy(out, 8);
-    out.writeUInt32BE(crc32(Buffer.concat([name, data])), 8 + data.length);
-    return out;
-}
-
-function crc32(buf) {
-    if (!crcTable) {
-        crcTable = new Uint32Array(256);
-        for (let n = 0; n < 256; n += 1) {
-            let c = n;
-            for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-            crcTable[n] = c >>> 0;
-        }
-    }
-    let c = 0xffffffff;
-    for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8);
-    return (c ^ 0xffffffff) >>> 0;
+function fail(message) {
+    if (output.trim()) console.error(output.trim());
+    console.error(`ANIMATION_FRAME_DIFF_FAIL ${message}`);
+    process.exit(1);
 }

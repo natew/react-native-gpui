@@ -32,8 +32,10 @@ mod icons;
 mod liquid_glass;
 mod style;
 
+use elements::webview::WebViewContent;
 use elements::{AccessibilityInfo, ReactElement, create_element};
 use elements::{NativeResizeEdge, NativeResizeSpec};
+use raw_window_handle::HasWindowHandle;
 use style::{Dim, ElementStyle};
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -250,9 +252,8 @@ struct ServiceApp {
     input_values: HashMap<u64, Option<String>>,
     input_secure: HashMap<u64, bool>,
     suppressed_input_changes: HashMap<u64, VecDeque<String>>,
-    // persistent native WebView, one per <WebView> id, + its last-loaded content.
+    // persistent native WebView, one per <WebView> id.
     webviews: HashMap<u64, Rc<wry::WebView>>,
-    webview_content: HashMap<u64, String>,
 }
 
 type InputSpec = (u64, String, Option<String>, bool, bool);
@@ -524,18 +525,26 @@ impl Render for ServiceApp {
         }
         elements::input::set_entities(self.inputs.clone());
 
-        // Same lifecycle for <WebView>: create a native child view per id, (re)load
-        // its content when it changes, and let the element resize it each frame.
+        // Same lifecycle for <WebView>: create a native child view per id, then
+        // let the element resize and load it once layout has real bounds.
         let mut wv_specs = Vec::new();
         collect_webviews(&self.root, &mut wv_specs);
         let present_wv: HashSet<u64> = wv_specs.iter().map(|(id, _, _)| *id).collect();
         self.webviews.retain(|id, _| present_wv.contains(id));
-        self.webview_content.retain(|id, _| present_wv.contains(id));
+        let mut webview_content = HashMap::new();
         for (id, content, is_html) in wv_specs {
+            webview_content.insert(
+                id,
+                WebViewContent {
+                    body: content,
+                    is_html,
+                },
+            );
             let view = self.webviews.entry(id).or_insert_with(|| {
                 let dbg = std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok();
+                let window_handle = window.window_handle().expect("No window handle");
                 let wv = wry::WebViewBuilder::new()
-                    .with_transparent(true)
+                    .with_transparent(false)
                     // RN-compatible bridge so page code can talk to the host:
                     // window.ReactNativeWebView.postMessage(d) → the node's onMessage.
                     .with_initialization_script(RN_WEBVIEW_SHIM)
@@ -548,9 +557,8 @@ impl Render for ServiceApp {
                         }
                         bridge::webview_message(id, body);
                     })
-                    // page finished loading → fire the node's onLoad. (also a handy
-                    // screenshot-independent "did it render" signal under DEBUG, since a
-                    // WKWebView's content surface isn't visible to window/screen capture.)
+                    // page finished loading → fire the node's onLoad. Under DEBUG this is
+                    // also the quickest way to distinguish load from compositing issues.
                     .with_on_page_load_handler(move |event, _url| {
                         if matches!(event, wry::PageLoadEvent::Finished) {
                             if dbg {
@@ -559,29 +567,14 @@ impl Render for ServiceApp {
                             bridge::event(id, "load");
                         }
                     })
-                    .build_as_child(&*window)
+                    .build_as_child(&window_handle)
                     .expect("failed to create webview");
                 let _ = wv.set_visible(true);
                 Rc::new(wv)
             });
-            let dbg = std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok();
-            if self.webview_content.get(&id) != Some(&content) {
-                let r = if is_html {
-                    view.load_html(&content)
-                } else {
-                    view.load_url(&content)
-                };
-                if dbg {
-                    eprintln!(
-                        "[webview {id}] load is_html={is_html} len={} -> {:?}",
-                        content.len(),
-                        r.map(|_| "ok")
-                    );
-                }
-                self.webview_content.insert(id, content);
-            }
+            let _ = view.set_visible(true);
         }
-        elements::webview::set_webviews(self.webviews.clone());
+        elements::webview::set_webviews(self.webviews.clone(), webview_content);
 
         // GC layout-dedup state for nodes that left the tree.
         let mut node_ids = HashSet::new();
@@ -697,6 +690,7 @@ enum Incoming {
         key: String,
         width: Option<f32>,
         height: Option<f32>,
+        animate_ms: Option<f32>,
         clear: bool,
     },
     FocusInput {
@@ -732,6 +726,10 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
                     key: key.to_string(),
                     width: v.get("width").and_then(|x| x.as_f64()).map(|x| x as f32),
                     height: v.get("height").and_then(|x| x.as_f64()).map(|x| x as f32),
+                    animate_ms: v
+                        .get("animateMs")
+                        .and_then(|x| x.as_f64())
+                        .map(|x| x as f32),
                     clear: v.get("clear").and_then(|x| x.as_bool()).unwrap_or(false),
                 })
             }
@@ -874,7 +872,6 @@ fn main() {
             input_secure: HashMap::new(),
             suppressed_input_changes: HashMap::new(),
             webviews: HashMap::new(),
-            webview_content: HashMap::new(),
         });
 
         let options = WindowOptions {
@@ -897,7 +894,11 @@ fn main() {
             window_background: {
                 #[cfg(target_os = "macos")]
                 {
-                    gpui::WindowBackgroundAppearance::Transparent
+                    if std::env::var("RNGPUI_OPAQUE_WINDOW").is_ok() {
+                        gpui::WindowBackgroundAppearance::Opaque
+                    } else {
+                        gpui::WindowBackgroundAppearance::Transparent
+                    }
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -994,10 +995,15 @@ fn main() {
                                 key,
                                 width,
                                 height,
+                                animate_ms,
                                 clear,
                             } => {
                                 if clear {
                                     elements::clear_native_layout_override(&key);
+                                } else if let Some(animate_ms) = animate_ms {
+                                    elements::animate_native_layout_override(
+                                        &key, width, height, animate_ms,
+                                    );
                                 } else {
                                     elements::set_native_layout_override(&key, width, height);
                                 }
@@ -1066,12 +1072,42 @@ mod tests {
             key,
             width,
             height,
+            animate_ms,
             clear,
         }) = incoming
         {
             assert_eq!(key, "left-pane");
             assert_eq!(width, Some(286.0));
             assert_eq!(height, None);
+            assert_eq!(animate_ms, None);
+            assert!(!clear);
+        } else {
+            panic!("expected nativeLayout command");
+        }
+    }
+
+    #[test]
+    fn parses_animated_native_layout_command() {
+        let incoming = parse_incoming(&json!({
+            "$cmd": "nativeLayout",
+            "key": "right-pane",
+            "width": 0,
+            "height": 240,
+            "animateMs": 180
+        }));
+
+        if let Some(Incoming::NativeLayout {
+            key,
+            width,
+            height,
+            animate_ms,
+            clear,
+        }) = incoming
+        {
+            assert_eq!(key, "right-pane");
+            assert_eq!(width, Some(0.0));
+            assert_eq!(height, Some(240.0));
+            assert_eq!(animate_ms, Some(180.0));
             assert!(!clear);
         } else {
             panic!("expected nativeLayout command");

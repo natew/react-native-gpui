@@ -4,8 +4,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, Bounds, Element, ElementId, GlobalElementId, HitboxBehavior, IntoElement, LayoutId,
-    Pixels, Window,
+    App, Bounds, ContentMask, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior,
+    IntoElement, LayoutId, MouseDownEvent, Pixels, Window,
 };
 
 use crate::elements::{ReactElement, report_layout};
@@ -15,14 +15,60 @@ use crate::elements::{ReactElement, report_layout};
 // and park it over the right layout bounds — the standard gpui + wry overlay pattern.
 thread_local! {
     static WEBVIEWS: RefCell<HashMap<u64, Rc<wry::WebView>>> = RefCell::new(HashMap::new());
+    static WEBVIEW_CONTENT: RefCell<HashMap<u64, WebViewContent>> = RefCell::new(HashMap::new());
+    static WEBVIEW_LOADED_CONTENT: RefCell<HashMap<u64, WebViewContent>> = RefCell::new(HashMap::new());
 }
 
-pub fn set_webviews(map: HashMap<u64, Rc<wry::WebView>>) {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebViewContent {
+    pub body: String,
+    pub is_html: bool,
+}
+
+pub fn set_webviews(map: HashMap<u64, Rc<wry::WebView>>, content: HashMap<u64, WebViewContent>) {
+    let live_ids: std::collections::HashSet<u64> = map.keys().copied().collect();
     WEBVIEWS.with(|w| *w.borrow_mut() = map);
+    WEBVIEW_CONTENT.with(|c| *c.borrow_mut() = content);
+    WEBVIEW_LOADED_CONTENT.with(|loaded| {
+        loaded.borrow_mut().retain(|id, _| live_ids.contains(id));
+    });
 }
 
 fn webview(id: u64) -> Option<Rc<wry::WebView>> {
     WEBVIEWS.with(|w| w.borrow().get(&id).cloned())
+}
+
+fn load_if_needed(id: u64, view: &wry::WebView) {
+    let content = WEBVIEW_CONTENT.with(|c| c.borrow().get(&id).cloned());
+    let Some(content) = content else {
+        return;
+    };
+    let already_loaded = WEBVIEW_LOADED_CONTENT.with(|loaded| {
+        loaded
+            .borrow()
+            .get(&id)
+            .is_some_and(|loaded| loaded == &content)
+    });
+    if already_loaded {
+        return;
+    }
+
+    let result = if content.is_html {
+        view.load_html(&content.body)
+    } else {
+        view.load_url(&content.body)
+    };
+    if std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok() {
+        eprintln!(
+            "[webview {id}] load is_html={} len={} -> {:?}",
+            content.is_html,
+            content.body.len(),
+            result.map(|_| "ok")
+        );
+    }
+    WEBVIEW_LOADED_CONTENT.with(|loaded| {
+        loaded.borrow_mut().insert(id, content);
+    });
 }
 
 /// `<WebView source={{ uri }} />` / `source={{ html }}` → a native WebView child of
@@ -46,7 +92,7 @@ impl IntoElement for ReactWebViewElement {
 
 impl Element for ReactWebViewElement {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    type PrepaintState = Option<Hitbox>;
 
     fn id(&self) -> Option<ElementId> {
         Some(ElementId::Integer(self.element.global_id))
@@ -75,12 +121,12 @@ impl Element for ReactWebViewElement {
         _: &mut (),
         window: &mut Window,
         _cx: &mut App,
-    ) {
+    ) -> Self::PrepaintState {
         if self.element.style.is_display_none() {
             if let Some(view) = webview(self.element.global_id) {
                 let _ = view.set_visible(false);
             }
-            return;
+            return None;
         }
 
         #[cfg(target_os = "macos")]
@@ -92,9 +138,19 @@ impl Element for ReactWebViewElement {
         // which is why this only crashed debug builds). the native WKWebView
         // composites above the Metal layer and handles its own scroll/selection;
         // the hitbox just keeps gpui's occlusion/event routing aware of the region.
-        window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
 
         if let Some(view) = webview(self.element.global_id) {
+            if std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok() {
+                eprintln!(
+                    "[webview {}] bounds x={} y={} w={} h={}",
+                    self.element.global_id,
+                    f32::from(bounds.origin.x),
+                    f32::from(bounds.origin.y),
+                    f32::from(bounds.size.width),
+                    f32::from(bounds.size.height)
+                );
+            }
             let _ = view.set_visible(true);
             let _ = view.set_bounds(wry::Rect {
                 position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(
@@ -106,20 +162,35 @@ impl Element for ReactWebViewElement {
                     bounds.size.height.into(),
                 )),
             });
+            load_if_needed(self.element.global_id, &view);
         }
+        Some(hitbox)
     }
 
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _: &mut (),
-        _: &mut (),
-        _window: &mut Window,
+        hitbox: &mut Self::PrepaintState,
+        window: &mut Window,
         _: &mut App,
     ) {
-        // nothing to paint: the WKWebView child draws itself. (hitbox is inserted in
-        // prepaint.)
+        // The WKWebView child draws itself; the content mask tells GPUI to reserve
+        // this native surface inside the current clipping region.
+        let bounds = hitbox
+            .as_ref()
+            .map(|hitbox| hitbox.bounds)
+            .unwrap_or(bounds);
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if let Some(view) = webview(self.element.global_id) {
+                window.on_mouse_event(move |event: &MouseDownEvent, _, _, _| {
+                    if !bounds.contains(&event.position) {
+                        let _ = view.focus_parent();
+                    }
+                });
+            }
+        });
     }
 }

@@ -29,6 +29,7 @@
         "kitchen": "bun run examples/kitchen-sink.tsx",
         "conformance:animation": "bun run examples/animation-conformance.tsx",
         "conformance:animation:diff": "bun run scripts/animation-frame-diff.mjs",
+        "conformance:webview:render": "bun run scripts/webview-render-conformance.mjs",
         "conformance:file-picker": "bun run scripts/file-picker-conformance.ts",
         "conformance:display-none": "bun run scripts/display-none-conformance.ts",
         "conformance:input": "bun run examples/input-conformance.tsx",

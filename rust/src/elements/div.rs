@@ -998,7 +998,10 @@ impl IntoElement for ReactDivElement {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard};
+
     use gpui::px;
+    use once_cell::sync::Lazy;
 
     use super::{
         ActiveNativeResize, NATIVE_LAYOUT_FRAMES, NATIVE_LAYOUT_OVERRIDES, NativeLayoutOverride,
@@ -1006,6 +1009,12 @@ mod tests {
         remember_native_layout_frame, scroll_to, set_native_layout_override, update_native_resize,
     };
     use crate::elements::NativeResizeEdge;
+
+    static NATIVE_LAYOUT_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn native_layout_test_guard() -> MutexGuard<'static, ()> {
+        NATIVE_LAYOUT_TEST_LOCK.lock().unwrap()
+    }
 
     #[test]
     fn scroll_to_updates_each_axis_independently() {
@@ -1023,6 +1032,7 @@ mod tests {
 
     #[test]
     fn native_layout_override_updates_axes_independently() {
+        let _guard = native_layout_test_guard();
         clear_native_layout_override("pane-a");
         set_native_layout_override("pane-a", Some(240.0), None);
         set_native_layout_override("pane-a", None, Some(120.0));
@@ -1038,6 +1048,7 @@ mod tests {
 
     #[test]
     fn native_resize_right_edge_grows_width() {
+        let _guard = native_layout_test_guard();
         clear_native_layout_override("pane-right-edge");
         remember_native_layout_frame("pane-right-edge", 250.0, 80.0);
         let active = ActiveNativeResize {
@@ -1060,6 +1071,7 @@ mod tests {
 
     #[test]
     fn native_resize_left_edge_shrinks_width_and_clamps() {
+        let _guard = native_layout_test_guard();
         clear_native_layout_override("pane-left-edge");
         remember_native_layout_frame("pane-left-edge", 300.0, 80.0);
         let active = ActiveNativeResize {
@@ -1082,6 +1094,7 @@ mod tests {
 
     #[test]
     fn retain_native_layout_keys_drops_stale_state() {
+        let _guard = native_layout_test_guard();
         set_native_layout_override("keep", Some(10.0), None);
         set_native_layout_override("drop", Some(20.0), None);
         NATIVE_LAYOUT_FRAMES.lock().unwrap().insert(

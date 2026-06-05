@@ -5,7 +5,10 @@ mod svg;
 mod text;
 pub mod webview;
 
-pub use div::{ReactDivElement, scroll_to, scroll_to_end};
+pub use div::{
+    ReactDivElement, clear_native_layout_override, retain_native_layout_keys, scroll_to,
+    scroll_to_end, set_native_layout_override,
+};
 pub use image::ReactImageElement;
 pub use input::ReactInputElement;
 pub use svg::ReactSvgElement;
@@ -42,6 +45,35 @@ pub struct TextRun {
     pub font_style: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeResizeEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl NativeResizeEdge {
+    pub fn is_horizontal(self) -> bool {
+        matches!(self, Self::Left | Self::Right)
+    }
+
+    pub fn delta_sign(self) -> f32 {
+        match self {
+            Self::Right | Self::Bottom => 1.0,
+            Self::Left | Self::Top => -1.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct NativeResizeSpec {
+    pub target: String,
+    pub edge: NativeResizeEdge,
+    pub min: Option<f32>,
+    pub max: Option<f32>,
+}
+
 /// The core element struct that represents a node in the element tree.
 #[derive(Clone)]
 pub struct ReactElement {
@@ -62,6 +94,10 @@ pub struct ReactElement {
     pub editable: bool,
     /// event names this node listens to: "press", "changeText", "layout", …
     pub events: Vec<String>,
+    /// native-only key for runtime layout overrides, bypassing React commits.
+    pub native_layout_key: Option<String>,
+    /// native-only resize gesture applied to a keyed layout target.
+    pub native_resize: Option<NativeResizeSpec>,
     pub accessibility: AccessibilityInfo,
     pub children: Vec<Arc<ReactElement>>,
     pub style: ElementStyle,

@@ -24,6 +24,17 @@ export type SerializedNode = {
     children?: SerializedNode[];
     /** inline styled runs for `<Text>` with nested `<Text>` children */
     runs?: Array<{ text: string; fontWeight?: string; color?: string; fontStyle?: string }>;
+    /** native-only layout override key, used by the gpui runtime without React commits */
+    nativeLayoutKey?: string;
+    /** native-only resize gesture, applied to a keyed native layout target */
+    nativeResize?: SerializedNativeResize;
+};
+
+export type SerializedNativeResize = {
+    target: string;
+    edge: "left" | "right" | "top" | "bottom";
+    min?: number;
+    max?: number;
 };
 
 export type SerializedAccessibility = {

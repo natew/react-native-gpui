@@ -59,6 +59,7 @@ APIs: `StyleSheet`, `Dimensions`, `useWindowDimensions`, `Platform`, `PixelRatio
 - **Native portals** (`PortalProvider`, `Portal`, `PortalHost`) render overlay content at the matching host during GPUI serialization, so Tamagui Dialog/Popover/Sheet can avoid legacy state-driven portal fallbacks.
 - **RN-style measurement** (`measure`, `measureInWindow`, `measureLayout`) is exposed on host refs. Floating overlay libraries such as Tamagui's Popover/Select can measure trigger and content nodes without app-specific adapters.
 - **RN Animated** runs JS-frame animations through React commits; animated styles resolve to plain GPUI styles each frame.
+- **Native layout overrides** (`nativeLayoutKey`, `nativeResize`, `NativeLayout`) let narrow chrome interactions such as pane resizing mutate GPUI layout in the native service without a React commit per pointer frame.
 - **Styling** matches RN: flexbox (Yoga semantics — `flex:1`, `%`, `auto`), `backgroundColor`, gradients via `backgroundImage`, `boxShadow` / iOS `shadow*` / `elevation`, `borderRadius`, `overflow: scroll`, `opacity`.
 - **`Svg`** renders a monochrome icon tinted by `style.color`.
 
@@ -123,6 +124,7 @@ bun run conformance:animation        # Animated frame progression fixture
 bun run conformance:animation:diff   # deterministic Animated PNG frame diff
 bun run conformance:input            # TextInput typing, Return submit, Shift+Return newline
 bun run conformance:portal           # Portal overlay and TextInput-in-portal behavior
+bun run conformance:native-layout    # native layout override without React width state
 bun run conformance:text-lines        # visual fixture for Text numberOfLines
 bun run examples/superconductor.tsx   # native shell + WebView content hybrid
 ```

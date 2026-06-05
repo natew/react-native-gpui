@@ -72,6 +72,8 @@ export type {
     LayoutChangeEvent,
     GestureResponderEvent,
     MouseResponderEvent,
+    NativeResizeEdge,
+    NativeResizeSpec,
 } from "./types";
 
 // dimensions + platform APIs
@@ -105,6 +107,7 @@ export {
 export { Animated, AnimatedValue, Easing } from "./Animated";
 export {
     AppCommands,
+    NativeLayout,
     type AppCommandBinding,
     type AppCommandConfig,
     type AppCommandMenu,

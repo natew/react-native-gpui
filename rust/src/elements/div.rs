@@ -2,14 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    AnyElement, App, Bounds, ContentMask, DispatchPhase, Display, Element, ElementId,
+    AnyElement, App, Bounds, ContentMask, CursorStyle, DispatchPhase, Display, Element, ElementId,
     GlobalElementId, Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, Modifiers, MouseButton,
     MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta,
     ScrollWheelEvent, Window, div, point, prelude::*, px,
 };
 use once_cell::sync::Lazy;
 
-use crate::elements::{ReactElement, create_element, report_layout};
+use crate::elements::{NativeResizeEdge, ReactElement, create_element, report_layout};
 use crate::style::ElementStyle;
 
 // Scroll offset per scroll-container id, persisted across the continuous
@@ -20,10 +20,39 @@ struct ScrollOffset {
     y: f32,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct NativeLayoutOverride {
+    width: Option<f32>,
+    height: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct NativeLayoutFrame {
+    width: f32,
+    height: f32,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveNativeResize {
+    handle_id: u64,
+    target: String,
+    edge: NativeResizeEdge,
+    min: Option<f32>,
+    max: Option<f32>,
+    start_position: f32,
+    start_value: f32,
+}
+
 static SCROLL: Lazy<Mutex<HashMap<u64, ScrollOffset>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static SCROLL_TO_END: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static ACTIVE_MOUSE_TARGET: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
+static NATIVE_LAYOUT_OVERRIDES: Lazy<Mutex<HashMap<String, NativeLayoutOverride>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static NATIVE_LAYOUT_FRAMES: Lazy<Mutex<HashMap<String, NativeLayoutFrame>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static ACTIVE_NATIVE_RESIZE: Lazy<Mutex<Option<ActiveNativeResize>>> =
+    Lazy::new(|| Mutex::new(None));
 
 #[derive(Clone, Default)]
 pub struct DivPrepaintState {
@@ -54,8 +83,124 @@ pub fn scroll_to_end(id: u64) {
     SCROLL_TO_END.lock().unwrap().insert(id);
 }
 
+pub fn set_native_layout_override(key: &str, width: Option<f32>, height: Option<f32>) {
+    if key.is_empty() {
+        return;
+    }
+    let mut overrides = NATIVE_LAYOUT_OVERRIDES.lock().unwrap();
+    let mut next = overrides.get(key).copied().unwrap_or_default();
+    if width.is_some() {
+        next.width = width;
+    }
+    if height.is_some() {
+        next.height = height;
+    }
+    if next.width.is_none() && next.height.is_none() {
+        overrides.remove(key);
+    } else {
+        overrides.insert(key.to_string(), next);
+    }
+}
+
+pub fn clear_native_layout_override(key: &str) {
+    NATIVE_LAYOUT_OVERRIDES.lock().unwrap().remove(key);
+}
+
+pub fn retain_native_layout_keys(keys: &HashSet<String>) {
+    NATIVE_LAYOUT_OVERRIDES
+        .lock()
+        .unwrap()
+        .retain(|key, _| keys.contains(key));
+    NATIVE_LAYOUT_FRAMES
+        .lock()
+        .unwrap()
+        .retain(|key, _| keys.contains(key));
+}
+
 fn take_scroll_to_end(id: u64) -> bool {
     SCROLL_TO_END.lock().unwrap().remove(&id)
+}
+
+fn native_layout_override(key: &str) -> NativeLayoutOverride {
+    NATIVE_LAYOUT_OVERRIDES
+        .lock()
+        .unwrap()
+        .get(key)
+        .copied()
+        .unwrap_or_default()
+}
+
+fn remember_native_layout_frame(key: &str, width: f32, height: f32) {
+    NATIVE_LAYOUT_FRAMES
+        .lock()
+        .unwrap()
+        .insert(key.to_string(), NativeLayoutFrame { width, height });
+}
+
+fn native_layout_value(key: &str, edge: NativeResizeEdge) -> Option<f32> {
+    let current = native_layout_override(key);
+    if edge.is_horizontal() {
+        current.width.or_else(|| {
+            NATIVE_LAYOUT_FRAMES
+                .lock()
+                .unwrap()
+                .get(key)
+                .map(|frame| frame.width)
+        })
+    } else {
+        current.height.or_else(|| {
+            NATIVE_LAYOUT_FRAMES
+                .lock()
+                .unwrap()
+                .get(key)
+                .map(|frame| frame.height)
+        })
+    }
+}
+
+fn native_resize_position(edge: NativeResizeEdge, position: Point<Pixels>) -> f32 {
+    if edge.is_horizontal() {
+        position.x.into()
+    } else {
+        position.y.into()
+    }
+}
+
+fn native_resize_cursor(edge: NativeResizeEdge) -> CursorStyle {
+    if edge.is_horizontal() {
+        CursorStyle::ResizeColumn
+    } else {
+        CursorStyle::ResizeRow
+    }
+}
+
+fn update_native_resize(active: &ActiveNativeResize, position: Point<Pixels>) -> bool {
+    let delta = (native_resize_position(active.edge, position) - active.start_position)
+        * active.edge.delta_sign();
+    let mut next = active.start_value + delta;
+    if let Some(min) = active.min {
+        next = next.max(min);
+    }
+    if let Some(max) = active.max {
+        next = next.min(max);
+    }
+
+    let current = native_layout_override(&active.target);
+    if active.edge.is_horizontal() {
+        let changed = current.width.is_none_or(|value| (value - next).abs() > 0.5);
+        if changed {
+            set_native_layout_override(&active.target, Some(next), None);
+        }
+        changed
+    } else {
+        let changed = current
+            .height
+            .is_none_or(|value| (value - next).abs() > 0.5);
+        if changed {
+            set_native_layout_override(&active.target, None, Some(next));
+        }
+        changed
+    }
 }
 
 fn emit_if(id: u64, enabled: bool, name: &str) {
@@ -161,7 +306,16 @@ impl Element for ReactDivElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let style = self.element.build_gpui_style(None);
+        let mut style = self.element.build_gpui_style(None);
+        if let Some(key) = self.element.native_layout_key.as_deref() {
+            let native = native_layout_override(key);
+            if let Some(width) = native.width {
+                style.size.width = px(width).into();
+            }
+            if let Some(height) = native.height {
+                style.size.height = px(height).into();
+            }
+        }
         let inherited = self.element.style.clone();
 
         if style.display == Display::None {
@@ -234,40 +388,41 @@ impl Element for ReactDivElement {
         // claim a hitbox for any view that handles pointer or scroll input.
         // insert_hitbox must run in prepaint (gpui asserts the phase); mouse
         // listeners are wired in paint and query the hitbox's current hover state.
-        let interactive = [
-            "click",
-            "mouseDown",
-            "mouseUp",
-            "mouseEnter",
-            "mouseLeave",
-            "mouseOver",
-            "mouseOut",
-            "mouseMove",
-            "pointerDown",
-            "pointerUp",
-            "pointerEnter",
-            "pointerLeave",
-            "pointerMove",
-            "touchStart",
-            "touchMove",
-            "touchEnd",
-            "touchCancel",
-            "startShouldSetResponder",
-            "startShouldSetResponderCapture",
-            "responderGrant",
-            "responderMove",
-            "responderRelease",
-            "responderStart",
-            "responderEnd",
-            "responderTerminate",
-            "responderTerminationRequest",
-            "press",
-            "longPress",
-            "pressIn",
-            "pressOut",
-        ]
-        .iter()
-        .any(|name| self.element.listens(name));
+        let interactive = self.element.native_resize.is_some()
+            || [
+                "click",
+                "mouseDown",
+                "mouseUp",
+                "mouseEnter",
+                "mouseLeave",
+                "mouseOver",
+                "mouseOut",
+                "mouseMove",
+                "pointerDown",
+                "pointerUp",
+                "pointerEnter",
+                "pointerLeave",
+                "pointerMove",
+                "touchStart",
+                "touchMove",
+                "touchEnd",
+                "touchCancel",
+                "startShouldSetResponder",
+                "startShouldSetResponderCapture",
+                "responderGrant",
+                "responderMove",
+                "responderRelease",
+                "responderStart",
+                "responderEnd",
+                "responderTerminate",
+                "responderTerminationRequest",
+                "press",
+                "longPress",
+                "pressIn",
+                "pressOut",
+            ]
+            .iter()
+            .any(|name| self.element.listens(name));
         let cursor = self.element.style.cursor.is_some();
         let hitbox = if interactive || scroll || cursor {
             Some(window.insert_hitbox(bounds, HitboxBehavior::Normal))
@@ -370,6 +525,57 @@ impl Element for ReactDivElement {
                         window.refresh(); // on-demand: repaint to reflect the new offset
                         cx.stop_propagation();
                     }
+                }
+            });
+        }
+
+        if let (Some(spec), Some(hitbox)) =
+            (self.element.native_resize.clone(), prepaint.hitbox.clone())
+        {
+            let id = self.element.global_id;
+            let event_bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
+            let down_spec = spec.clone();
+            window.on_mouse_event(move |ev: &MouseDownEvent, phase, _window, cx| {
+                if phase == DispatchPhase::Bubble
+                    && ev.button == MouseButton::Left
+                    && event_bounds.contains(&ev.position)
+                {
+                    let start_value = native_layout_value(&down_spec.target, down_spec.edge)
+                        .unwrap_or_else(|| down_spec.min.unwrap_or(0.0));
+                    *ACTIVE_NATIVE_RESIZE.lock().unwrap() = Some(ActiveNativeResize {
+                        handle_id: id,
+                        target: down_spec.target.clone(),
+                        edge: down_spec.edge,
+                        min: down_spec.min,
+                        max: down_spec.max,
+                        start_position: native_resize_position(down_spec.edge, ev.position),
+                        start_value,
+                    });
+                    cx.stop_propagation();
+                }
+            });
+
+            window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                let active = ACTIVE_NATIVE_RESIZE.lock().unwrap().clone();
+                if let Some(active) = active.filter(|active| active.handle_id == id) {
+                    if update_native_resize(&active, ev.position) {
+                        window.refresh();
+                    }
+                    cx.stop_propagation();
+                }
+            });
+
+            window.on_mouse_event(move |ev: &MouseUpEvent, phase, _window, cx| {
+                if phase != DispatchPhase::Bubble || ev.button != MouseButton::Left {
+                    return;
+                }
+                let mut active = ACTIVE_NATIVE_RESIZE.lock().unwrap();
+                if active.as_ref().is_some_and(|active| active.handle_id == id) {
+                    *active = None;
+                    cx.stop_propagation();
                 }
             });
         }
@@ -751,9 +957,19 @@ impl Element for ReactDivElement {
             }
         }
 
+        if let Some(key) = self.element.native_layout_key.as_deref() {
+            remember_native_layout_frame(key, bounds.size.width.into(), bounds.size.height.into());
+        }
+
         report_layout(&self.element, bounds);
 
-        if let (Some(hitbox), Some(mouse_cursor)) = (prepaint.hitbox.as_ref(), style.mouse_cursor) {
+        let mouse_cursor = style.mouse_cursor.or_else(|| {
+            self.element
+                .native_resize
+                .as_ref()
+                .map(|spec| native_resize_cursor(spec.edge))
+        });
+        if let (Some(hitbox), Some(mouse_cursor)) = (prepaint.hitbox.as_ref(), mouse_cursor) {
             window.set_cursor_style(mouse_cursor, hitbox);
         }
 
@@ -782,7 +998,14 @@ impl IntoElement for ReactDivElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_scroll, scroll_to};
+    use gpui::px;
+
+    use super::{
+        ActiveNativeResize, NATIVE_LAYOUT_FRAMES, NATIVE_LAYOUT_OVERRIDES, NativeLayoutOverride,
+        clear_native_layout_override, get_scroll, native_layout_override,
+        remember_native_layout_frame, scroll_to, set_native_layout_override, update_native_resize,
+    };
+    use crate::elements::NativeResizeEdge;
 
     #[test]
     fn scroll_to_updates_each_axis_independently() {
@@ -796,5 +1019,85 @@ mod tests {
         let next = get_scroll(id);
         assert_eq!(next.x, 42.0);
         assert_eq!(next.y, 77.0);
+    }
+
+    #[test]
+    fn native_layout_override_updates_axes_independently() {
+        clear_native_layout_override("pane-a");
+        set_native_layout_override("pane-a", Some(240.0), None);
+        set_native_layout_override("pane-a", None, Some(120.0));
+        let next = native_layout_override("pane-a");
+        assert_eq!(next.width, Some(240.0));
+        assert_eq!(next.height, Some(120.0));
+        clear_native_layout_override("pane-a");
+        assert_eq!(
+            native_layout_override("pane-a"),
+            NativeLayoutOverride::default()
+        );
+    }
+
+    #[test]
+    fn native_resize_right_edge_grows_width() {
+        clear_native_layout_override("pane-right-edge");
+        remember_native_layout_frame("pane-right-edge", 250.0, 80.0);
+        let active = ActiveNativeResize {
+            handle_id: 1,
+            target: "pane-right-edge".to_string(),
+            edge: NativeResizeEdge::Right,
+            min: Some(210.0),
+            max: Some(420.0),
+            start_position: 100.0,
+            start_value: 250.0,
+        };
+
+        assert!(update_native_resize(
+            &active,
+            gpui::point(px(132.0), px(0.0))
+        ));
+        assert_eq!(native_layout_override("pane-right-edge").width, Some(282.0));
+        clear_native_layout_override("pane-right-edge");
+    }
+
+    #[test]
+    fn native_resize_left_edge_shrinks_width_and_clamps() {
+        clear_native_layout_override("pane-left-edge");
+        remember_native_layout_frame("pane-left-edge", 300.0, 80.0);
+        let active = ActiveNativeResize {
+            handle_id: 1,
+            target: "pane-left-edge".to_string(),
+            edge: NativeResizeEdge::Left,
+            min: Some(240.0),
+            max: Some(460.0),
+            start_position: 100.0,
+            start_value: 300.0,
+        };
+
+        assert!(update_native_resize(
+            &active,
+            gpui::point(px(190.0), px(0.0))
+        ));
+        assert_eq!(native_layout_override("pane-left-edge").width, Some(240.0));
+        clear_native_layout_override("pane-left-edge");
+    }
+
+    #[test]
+    fn retain_native_layout_keys_drops_stale_state() {
+        set_native_layout_override("keep", Some(10.0), None);
+        set_native_layout_override("drop", Some(20.0), None);
+        NATIVE_LAYOUT_FRAMES.lock().unwrap().insert(
+            "drop".to_string(),
+            super::NativeLayoutFrame {
+                width: 20.0,
+                height: 10.0,
+            },
+        );
+        super::retain_native_layout_keys(&["keep".to_string()].into_iter().collect());
+
+        let overrides = NATIVE_LAYOUT_OVERRIDES.lock().unwrap();
+        assert!(overrides.contains_key("keep"));
+        assert!(!overrides.contains_key("drop"));
+        drop(overrides);
+        assert!(!NATIVE_LAYOUT_FRAMES.lock().unwrap().contains_key("drop"));
+        clear_native_layout_override("keep");
     }
 }

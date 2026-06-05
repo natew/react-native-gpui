@@ -281,4 +281,17 @@ export interface ViewProps extends AccessibilityProps {
     onHoverOut?: (event: MouseResponderEvent) => void;
     onLayout?: (event: LayoutChangeEvent) => void;
     pointerEvents?: "auto" | "none" | "box-none" | "box-only";
+    /** gpui-only: stable key whose width/height may be changed by native runtime commands. */
+    nativeLayoutKey?: string;
+    /** gpui-only: drag this view to resize a keyed native layout target without React commits. */
+    nativeResize?: NativeResizeSpec;
+}
+
+export type NativeResizeEdge = "left" | "right" | "top" | "bottom";
+
+export interface NativeResizeSpec {
+    target: string;
+    edge: NativeResizeEdge;
+    min?: number;
+    max?: number;
 }

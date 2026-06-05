@@ -31,6 +31,7 @@ mod icons;
 mod style;
 
 use elements::{AccessibilityInfo, ReactElement, create_element};
+use elements::{NativeResizeEdge, NativeResizeSpec};
 use style::{Dim, ElementStyle};
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -96,6 +97,12 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         .get("accessibility")
         .and_then(parse_accessibility)
         .unwrap_or_default();
+    let native_layout_key = obj
+        .get("nativeLayoutKey")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let native_resize = obj.get("nativeResize").and_then(parse_native_resize);
     let style = obj
         .get("style")
         .map(ElementStyle::from_json)
@@ -144,11 +151,34 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         secure_text_entry,
         editable,
         events,
+        native_layout_key,
+        native_resize,
         accessibility,
         children,
         style,
         cached_gpui_style: None,
     }))
+}
+
+fn parse_native_resize(value: &serde_json::Value) -> Option<NativeResizeSpec> {
+    let obj = value.as_object()?;
+    let target = obj.get("target").and_then(|v| v.as_str())?;
+    if target.is_empty() {
+        return None;
+    }
+    let edge = match obj.get("edge").and_then(|v| v.as_str())? {
+        "left" => NativeResizeEdge::Left,
+        "right" => NativeResizeEdge::Right,
+        "top" => NativeResizeEdge::Top,
+        "bottom" => NativeResizeEdge::Bottom,
+        _ => return None,
+    };
+    Some(NativeResizeSpec {
+        target: target.to_string(),
+        edge,
+        min: obj.get("min").and_then(|v| v.as_f64()).map(|v| v as f32),
+        max: obj.get("max").and_then(|v| v.as_f64()).map(|v| v as f32),
+    })
 }
 
 fn parse_accessibility(value: &serde_json::Value) -> Option<AccessibilityInfo> {
@@ -347,6 +377,15 @@ fn collect_node_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
     }
 }
 
+fn collect_native_layout_keys(el: &Arc<ReactElement>, out: &mut HashSet<String>) {
+    if let Some(key) = el.native_layout_key.as_ref() {
+        out.insert(key.clone());
+    }
+    for c in &el.children {
+        collect_native_layout_keys(c, out);
+    }
+}
+
 impl Render for ServiceApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         // The tree is applied (and a re-render scheduled) by the stdin pump task in
@@ -539,6 +578,9 @@ impl Render for ServiceApp {
         let mut node_ids = HashSet::new();
         collect_node_ids(&self.root, &mut node_ids);
         bridge::retain_layout(&node_ids);
+        let mut native_layout_keys = HashSet::new();
+        collect_native_layout_keys(&self.root, &mut native_layout_keys);
+        elements::retain_native_layout_keys(&native_layout_keys);
 
         let mut layout_ids = HashSet::new();
         collect_layout_ids(&self.root, &mut layout_ids);
@@ -573,6 +615,8 @@ fn fallback_root() -> Arc<ReactElement> {
         secure_text_entry: false,
         editable: true,
         events: Vec::new(),
+        native_layout_key: None,
+        native_resize: None,
         accessibility: AccessibilityInfo::default(),
         children: vec![],
         style: ElementStyle {
@@ -642,6 +686,12 @@ enum Incoming {
     ScrollToEnd {
         id: u64,
     },
+    NativeLayout {
+        key: String,
+        width: Option<f32>,
+        height: Option<f32>,
+        clear: bool,
+    },
     FocusInput {
         id: u64,
     },
@@ -669,6 +719,15 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
                 y: v.get("y").and_then(|x| x.as_f64()).map(|x| x as f32),
             }),
             "scrollToEnd" => id.map(|id| Incoming::ScrollToEnd { id }),
+            "nativeLayout" => {
+                let key = v.get("key").and_then(|x| x.as_str())?;
+                Some(Incoming::NativeLayout {
+                    key: key.to_string(),
+                    width: v.get("width").and_then(|x| x.as_f64()).map(|x| x as f32),
+                    height: v.get("height").and_then(|x| x.as_f64()).map(|x| x as f32),
+                    clear: v.get("clear").and_then(|x| x.as_bool()).unwrap_or(false),
+                })
+            }
             "focusInput" => id.map(|id| Incoming::FocusInput { id }),
             "blurInput" => Some(Incoming::BlurInput),
             "appCommands" => serde_json::from_value(v.clone())
@@ -884,6 +943,9 @@ fn main() {
                                 let mut node_ids = HashSet::new();
                                 collect_node_ids(&next_root, &mut node_ids);
                                 bridge::retain_layout(&node_ids);
+                                let mut native_layout_keys = HashSet::new();
+                                collect_native_layout_keys(&next_root, &mut native_layout_keys);
+                                elements::retain_native_layout_keys(&native_layout_keys);
                                 let mut layout_ids = HashSet::new();
                                 collect_layout_ids(&next_root, &mut layout_ids);
                                 bridge::emit_cached_layout_for_new_subscribers(&layout_ids);
@@ -907,6 +969,19 @@ fn main() {
                             }
                             Incoming::ScrollToEnd { id } => {
                                 elements::scroll_to_end(id);
+                                cx.notify();
+                            }
+                            Incoming::NativeLayout {
+                                key,
+                                width,
+                                height,
+                                clear,
+                            } => {
+                                if clear {
+                                    elements::clear_native_layout_override(&key);
+                                } else {
+                                    elements::set_native_layout_override(&key, width, height);
+                                }
                                 cx.notify();
                             }
                             Incoming::FocusInput { .. }
@@ -956,6 +1031,57 @@ mod tests {
             assert_eq!(y, Some(13.0));
         } else {
             panic!("expected scrollTo command");
+        }
+    }
+
+    #[test]
+    fn parses_native_layout_command() {
+        let incoming = parse_incoming(&json!({
+            "$cmd": "nativeLayout",
+            "key": "left-pane",
+            "width": 286,
+            "clear": false
+        }));
+
+        if let Some(Incoming::NativeLayout {
+            key,
+            width,
+            height,
+            clear,
+        }) = incoming
+        {
+            assert_eq!(key, "left-pane");
+            assert_eq!(width, Some(286.0));
+            assert_eq!(height, None);
+            assert!(!clear);
+        } else {
+            panic!("expected nativeLayout command");
+        }
+    }
+
+    #[test]
+    fn parses_native_resize_from_tree() {
+        let incoming = parse_incoming(&json!({
+            "globalId": 1,
+            "type": "div",
+            "nativeLayoutKey": "left-pane",
+            "nativeResize": {
+                "target": "right-pane",
+                "edge": "left",
+                "min": 240,
+                "max": 460
+            }
+        }));
+
+        if let Some(Incoming::Tree(root)) = incoming {
+            assert_eq!(root.native_layout_key.as_deref(), Some("left-pane"));
+            let resize = root.native_resize.as_ref().expect("native resize");
+            assert_eq!(resize.target, "right-pane");
+            assert_eq!(resize.edge, super::NativeResizeEdge::Left);
+            assert_eq!(resize.min, Some(240.0));
+            assert_eq!(resize.max, Some(460.0));
+        } else {
+            panic!("expected tree");
         }
     }
 }

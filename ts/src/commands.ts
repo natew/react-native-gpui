@@ -27,6 +27,7 @@ export type Command =
     | { $cmd: "reload"; id: number }
     | { $cmd: "scrollTo"; id: number; x?: number; y?: number }
     | { $cmd: "scrollToEnd"; id: number }
+    | { $cmd: "nativeLayout"; key: string; width?: number; height?: number; clear?: boolean }
     | { $cmd: "focusInput"; id: number }
     | { $cmd: "blurInput"; id: number }
     | ({ $cmd: "appCommands" } & AppCommandConfig);
@@ -42,6 +43,24 @@ export function setCommandSink(fn: (cmd: Command) => void) {
 export function sendCommand(cmd: Command) {
     sink?.(cmd);
 }
+
+export const NativeLayout = {
+    setSize(key: string, size: { width?: number; height?: number }) {
+        sendCommand({ $cmd: "nativeLayout", key, ...size });
+    },
+
+    setWidth(key: string, width: number) {
+        sendCommand({ $cmd: "nativeLayout", key, width });
+    },
+
+    setHeight(key: string, height: number) {
+        sendCommand({ $cmd: "nativeLayout", key, height });
+    },
+
+    clear(key: string) {
+        sendCommand({ $cmd: "nativeLayout", key, clear: true });
+    },
+};
 
 export const AppCommands = {
     configure(config: AppCommandConfig) {

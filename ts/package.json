@@ -33,6 +33,7 @@
         "conformance:display-none": "bun run scripts/display-none-conformance.ts",
         "conformance:input": "bun run examples/input-conformance.tsx",
         "conformance:measure": "bun run examples/measure-conformance.tsx",
+        "conformance:native-layout": "bun run examples/native-layout-conformance.tsx",
         "conformance:portal": "bun run examples/portal-conformance.tsx",
         "conformance:text-lines": "bun run examples/number-of-lines-conformance.tsx",
         "pixel-diff": "bun run scripts/pixel-diff.mjs",

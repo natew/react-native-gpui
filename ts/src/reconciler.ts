@@ -232,6 +232,8 @@ function layoutSignature(type: string, props: Record<string, unknown>): string {
         multiline: props.multiline,
         source: props.source,
         src: props.src,
+        nativeLayoutKey: props.nativeLayoutKey,
+        nativeResize: props.nativeResize,
     });
 }
 
@@ -675,6 +677,10 @@ function serialize(inst: Instance | TextInstance, context: PortalContext): Seria
     }
 
     if (Object.keys(style).length) node.style = style;
+    const nativeLayoutKey = stringProp(props, "nativeLayoutKey");
+    if (nativeLayoutKey) node.nativeLayoutKey = nativeLayoutKey;
+    const nativeResize = normalizeNativeResize(props.nativeResize);
+    if (nativeResize) node.nativeResize = nativeResize;
     const evts = handlers.get(inst.id);
     const eventNames = evts ? Object.keys(evts) : [];
     if (measuredIds.has(inst.id) && !eventNames.includes("layout")) eventNames.push("layout");
@@ -697,6 +703,19 @@ function serialize(inst: Instance | TextInstance, context: PortalContext): Seria
         if (kids.length) node.children = kids;
     }
     return node;
+}
+
+function normalizeNativeResize(value: unknown): SerializedNode["nativeResize"] | undefined {
+    if (!value || typeof value !== "object") return undefined;
+    const spec = value as Record<string, unknown>;
+    const target = spec.target;
+    const edge = spec.edge;
+    if (typeof target !== "string" || target.length === 0) return undefined;
+    if (edge !== "left" && edge !== "right" && edge !== "top" && edge !== "bottom") return undefined;
+    const out: NonNullable<SerializedNode["nativeResize"]> = { target, edge };
+    if (typeof spec.min === "number") out.min = spec.min;
+    if (typeof spec.max === "number") out.max = spec.max;
+    return out;
 }
 
 function imageSource(source: unknown): string | undefined {

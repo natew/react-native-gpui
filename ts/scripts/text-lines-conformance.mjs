@@ -95,11 +95,44 @@ async function waitForTextWindow(timeoutMs) {
 }
 
 function listWindows() {
-    const raw = execFileSync("cua-driver", ["call", "list_windows", "{}"], {
+    const swift = `
+import Foundation
+import CoreGraphics
+let list = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+for window in list {
+    let owner = window[kCGWindowOwnerName as String] as? String ?? ""
+    let title = window[kCGWindowName as String] as? String ?? ""
+    let id = (window[kCGWindowNumber as String] as? NSNumber)?.intValue ?? 0
+    let pid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.intValue ?? 0
+    let bounds = window[kCGWindowBounds as String] as? [String: Any] ?? [:]
+    let width = (bounds["Width"] as? NSNumber)?.intValue ?? 0
+    let height = (bounds["Height"] as? NSNumber)?.intValue ?? 0
+    print("\\(id)\\t\\(pid)\\t\\(owner)\\t\\(title)\\t\\(width)\\t\\(height)")
+}
+`;
+    const raw = execFileSync("swift", ["-e", swift], {
         encoding: "utf8",
         stdio: "pipe",
     });
-    return JSON.parse(raw).windows || [];
+    return raw
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => {
+            const [window_id, pid, app_name, title, width, height] = line.split("\t");
+            return {
+                window_id: Number(window_id),
+                pid: Number(pid),
+                app_name,
+                title,
+                is_on_screen: Number(width) > 0 && Number(height) > 0,
+                bounds: {
+                    width: Number(width),
+                    height: Number(height),
+                },
+            };
+        })
+        .filter((window) => Number.isFinite(window.window_id) && window.window_id > 0);
 }
 
 function captureWindow(window, path) {

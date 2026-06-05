@@ -73,10 +73,10 @@ async function waitForInputWindow() {
         try {
             const pid = await servicePid();
             if (pid) {
-                const windows = await cuaJson("list_windows", { pid });
-                const window = [...(windows.windows || [])]
+                const windows = await listGpuiWindows(pid);
+                const window = [...windows]
                     .filter((item) => item.title === "react-native-gpui")
-                    .sort((a, b) => Number(b.is_on_screen) - Number(a.is_on_screen))[0];
+                    .sort((a, b) => b.width * b.height - a.width * a.height)[0];
                 if (window) {
                     const state = await cuaJson("get_window_state", {
                         pid,
@@ -104,6 +104,41 @@ async function servicePid() {
     const pids = await servicePids();
     const fresh = pids.filter((pid) => !ignoredServicePids.has(pid));
     return fresh.sort((a, b) => b - a)[0] ?? 0;
+}
+
+async function listGpuiWindows(pid) {
+    const swift = `
+import Foundation
+import CoreGraphics
+let targetPid = Int(CommandLine.arguments[1])!
+let list = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+for window in list {
+    let ownerPid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.intValue ?? 0
+    if ownerPid != targetPid { continue }
+    let id = (window[kCGWindowNumber as String] as? NSNumber)?.intValue ?? 0
+    let title = window[kCGWindowName as String] as? String ?? ""
+    let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+    let bounds = window[kCGWindowBounds as String] as? [String: Any] ?? [:]
+    let width = (bounds["Width"] as? NSNumber)?.intValue ?? 0
+    let height = (bounds["Height"] as? NSNumber)?.intValue ?? 0
+    print("\\(id)\\t\\(title)\\t\\(layer)\\t\\(width)\\t\\(height)")
+}
+`;
+    const result = await execFileText("swift", ["-e", swift, String(pid)]);
+    return result.stdout
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => {
+            const [window_id, title, layer, width, height] = line.split("\t");
+            return {
+                window_id: Number(window_id),
+                title,
+                layer: Number(layer),
+                width: Number(width),
+                height: Number(height),
+            };
+        })
+        .filter((window) => Number.isFinite(window.window_id) && window.window_id > 0 && window.width > 0 && window.height > 0);
 }
 
 async function servicePids() {

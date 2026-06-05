@@ -26,6 +26,8 @@ struct InvokeCommand {
 
 #[cfg(target_os = "macos")]
 mod ax;
+#[cfg(target_os = "macos")]
+mod background_window;
 mod bridge;
 mod elements;
 mod icons;
@@ -978,9 +980,19 @@ fn main() {
             .open_window(options, move |window, cx| {
                 #[cfg(target_os = "macos")]
                 liquid_glass::install(window);
+                #[cfg(target_os = "macos")]
+                if background {
+                    background_window::lower(window);
+                }
                 cx.new(|cx| gpui_component::Root::new(content, window, cx))
             })
             .expect("open window");
+        #[cfg(target_os = "macos")]
+        if background {
+            let _ = window_handle.update(cx, |_root, window, _cx| {
+                background_window::lower(window);
+            });
+        }
         // bring the app to the front so keystrokes reach the focused input
         // (skipped in background mode so it doesn't pop over your work).
         if !background {

@@ -9,7 +9,7 @@ use std::rc::Rc;
 use gpui::{
     App, AppContext, Bounds, Context, Entity, InteractiveElement as _, IntoElement, KeyBinding,
     Menu, MenuItem, ParentElement, Render, Styled, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, actions, point, px, rgb, size,
+    WindowOptions, actions, point, px, size,
 };
 use gpui_component::input::{Enter, InputEvent, InputState, Position};
 use gpui_component::theme::{Theme, ThemeMode};
@@ -602,7 +602,6 @@ impl Render for ServiceApp {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0xe9e9ec))
             .on_action(|action: &InvokeCommand, _window, _cx| {
                 bridge::command(&action.id);
             })

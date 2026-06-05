@@ -134,8 +134,27 @@ fn js_key(keystroke: &gpui::Keystroke) -> String {
         keystroke
             .key_char
             .clone()
-            .unwrap_or_else(|| keystroke.key.clone())
+            .unwrap_or_else(|| js_named_key(&keystroke.key))
     }
+}
+
+fn js_named_key(key: &str) -> String {
+    match key {
+        "escape" => "Escape",
+        "tab" => "Tab",
+        "backspace" => "Backspace",
+        "delete" => "Delete",
+        "up" => "ArrowUp",
+        "down" => "ArrowDown",
+        "left" => "ArrowLeft",
+        "right" => "ArrowRight",
+        "home" => "Home",
+        "end" => "End",
+        "pageup" => "PageUp",
+        "pagedown" => "PageDown",
+        other => other,
+    }
+    .to_string()
 }
 
 impl Element for ReactInputElement {
@@ -200,5 +219,19 @@ impl IntoElement for ReactInputElement {
     type Element = Self;
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::js_named_key;
+
+    #[test]
+    fn maps_gpui_navigation_keys_to_js_names() {
+        assert_eq!(js_named_key("escape"), "Escape");
+        assert_eq!(js_named_key("up"), "ArrowUp");
+        assert_eq!(js_named_key("down"), "ArrowDown");
+        assert_eq!(js_named_key("left"), "ArrowLeft");
+        assert_eq!(js_named_key("right"), "ArrowRight");
     }
 }

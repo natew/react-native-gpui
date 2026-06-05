@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use cocoa::appkit::{
     NSView, NSViewHeightSizable, NSViewWidthSizable, NSVisualEffectBlendingMode,
@@ -8,16 +9,19 @@ use cocoa::appkit::{
 use cocoa::base::{NO, YES, id, nil};
 use cocoa::foundation::NSRect;
 use gpui::Window;
+use objc::declare::ClassDecl;
 use objc::runtime::{BOOL, Class, Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
 use once_cell::sync::Lazy;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 const NS_WINDOW_BELOW: i64 = -1;
-const GLASS_VARIANT_CLEAR: i64 = 1;
+const GLASS_VARIANT_CONTROL: i64 = 19;
+const WINDOW_CORNER_RADIUS: f64 = 22.0;
 
 static INSTALLED_CONTENT_VIEWS: Lazy<Mutex<HashSet<usize>>> =
     Lazy::new(|| Mutex::new(HashSet::new()));
+static CORNER_RADIUS: AtomicU64 = AtomicU64::new(0);
 
 pub fn install(window: &mut Window) {
     let Some(ns_view) = raw_ns_view(window) else {
@@ -36,6 +40,7 @@ pub fn install(window: &mut Window) {
         }
 
         configure_transparent_window(ns_window, content_view, ns_view);
+        apply_window_corner_radius(ns_window, WINDOW_CORNER_RADIUS);
 
         let key = content_view as usize;
         if !remember_content_view(key) {
@@ -94,6 +99,61 @@ unsafe fn configure_transparent_view(view: id, clear_color: id) {
     let _: () = msg_send![layer, setBackgroundColor: clear_cg_color];
 }
 
+extern "C" fn overridden_corner_radius(_this: &Object, _cmd: Sel) -> f64 {
+    f64::from_bits(CORNER_RADIUS.load(Ordering::Relaxed))
+}
+
+unsafe extern "C" {
+    fn object_setClass(obj: *mut Object, cls: *const Class) -> *const Class;
+}
+
+unsafe fn apply_window_corner_radius(ns_window: id, radius: f64) {
+    if ns_window == nil || Class::get("NSGlassEffectView").is_none() {
+        return;
+    }
+
+    CORNER_RADIUS.store(radius.to_bits(), Ordering::Relaxed);
+
+    let content_view: id = msg_send![ns_window, contentView];
+    if content_view == nil {
+        return;
+    }
+
+    let frame_view: id = msg_send![content_view, superview];
+    if frame_view == nil {
+        return;
+    }
+
+    let original_class: *const Class = msg_send![frame_view, class];
+    let original_name = unsafe { (*original_class).name() };
+    let subclass_name = format!("_RNGPUIRoundedCorner_{original_name}");
+
+    let subclass: &Class = if let Some(existing) = Class::get(&subclass_name) {
+        existing
+    } else if let Some(mut decl) = ClassDecl::new(&subclass_name, unsafe { &*original_class }) {
+        unsafe {
+            decl.add_method(
+                Sel::register("_cornerRadius"),
+                overridden_corner_radius as extern "C" fn(&Object, Sel) -> f64,
+            );
+            decl.add_method(
+                Sel::register("_getCachedWindowCornerRadius"),
+                overridden_corner_radius as extern "C" fn(&Object, Sel) -> f64,
+            );
+        }
+        decl.register()
+    } else {
+        return;
+    };
+
+    let current_class: *const Class = msg_send![frame_view, class];
+    if !std::ptr::eq(current_class, subclass) {
+        unsafe {
+            object_setClass(frame_view, subclass as *const Class);
+        }
+    }
+}
+
 fn raw_ns_view(window: &mut Window) -> Option<id> {
     let handle = window.window_handle().ok()?;
     match handle.as_raw() {
@@ -121,7 +181,7 @@ unsafe fn create_glass_view(bounds: NSRect) -> id {
         let glass: id = msg_send![glass, initWithFrame: bounds];
         unsafe {
             configure_common_view(glass);
-            set_i64_property(glass, "variant", GLASS_VARIANT_CLEAR);
+            set_i64_property(glass, "variant", GLASS_VARIANT_CONTROL);
         }
         return glass;
     }

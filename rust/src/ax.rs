@@ -252,7 +252,7 @@ fn collect_descriptors(
         selected: element.accessibility.selected,
         checked: element.accessibility.checked.clone(),
         expanded: element.accessibility.expanded,
-        is_element: element.accessibility.accessible != Some(false),
+        is_element: ax_is_element(element),
         events: element.events.clone(),
     });
 
@@ -300,6 +300,20 @@ fn ax_role(element: &ReactElement) -> String {
     .to_string()
 }
 
+fn ax_is_element(element: &ReactElement) -> bool {
+    if element.accessibility.accessible == Some(false) {
+        return false;
+    }
+    if element.element_type == "svg"
+        && element.accessibility.accessible != Some(true)
+        && element.accessibility.label.is_none()
+        && element.accessibility.role.is_none()
+    {
+        return false;
+    }
+    true
+}
+
 fn ax_label(element: &ReactElement) -> Option<String> {
     if let Some(label) = element.accessibility.label.as_ref() {
         if !label.is_empty() {
@@ -310,7 +324,7 @@ fn ax_label(element: &ReactElement) -> Option<String> {
     match element.element_type.as_str() {
         "text" => element.text.clone().filter(|text| !text.is_empty()),
         "textinput" | "textarea" => element.text.clone().filter(|text| !text.is_empty()),
-        "image" | "svg" => element.text.clone().filter(|text| !text.is_empty()),
+        "image" => element.text.clone().filter(|text| !text.is_empty()),
         _ if element.accessibility.accessible == Some(true)
             || element.accessibility.role.is_some()
             || element.listens("press")
@@ -735,10 +749,37 @@ extern "C" fn accessibility_set_value_for_attribute(
 
 #[cfg(test)]
 mod tests {
-    use super::events_have_press_action;
+    use super::{ax_is_element, ax_label, events_have_press_action};
+    use crate::elements::{AccessibilityInfo, ReactElement};
+    use crate::style::ElementStyle;
 
     fn events(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    fn element(
+        element_type: &str,
+        text: Option<&str>,
+        accessibility: AccessibilityInfo,
+    ) -> ReactElement {
+        ReactElement {
+            global_id: 1,
+            element_type: element_type.to_string(),
+            text: text.map(String::from),
+            number_of_lines: None,
+            runs: Vec::new(),
+            src: None,
+            value: None,
+            secure_text_entry: false,
+            editable: true,
+            events: Vec::new(),
+            native_layout_key: None,
+            native_resize: None,
+            accessibility,
+            children: Vec::new(),
+            style: ElementStyle::default(),
+            cached_gpui_style: None,
+        }
     }
 
     #[test]
@@ -756,6 +797,29 @@ mod tests {
         assert!(!events_have_press_action(&events(&["mouseEnter"])));
         assert!(!events_have_press_action(&events(&["pressIn", "pressOut"])));
         assert!(!events_have_press_action(&events(&["responderGrant"])));
+    }
+
+    #[test]
+    fn unlabeled_svg_is_decorative_for_accessibility() {
+        let svg = element("svg", Some("<svg><path /></svg>"), AccessibilityInfo::default());
+
+        assert!(!ax_is_element(&svg));
+        assert_eq!(ax_label(&svg), None);
+    }
+
+    #[test]
+    fn labeled_svg_can_be_exposed_for_accessibility() {
+        let svg = element(
+            "svg",
+            Some("<svg><path /></svg>"),
+            AccessibilityInfo {
+                label: Some("Search".to_string()),
+                ..AccessibilityInfo::default()
+            },
+        );
+
+        assert!(ax_is_element(&svg));
+        assert_eq!(ax_label(&svg), Some("Search".to_string()));
     }
 }
 

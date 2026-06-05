@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
-import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -9,42 +9,24 @@ const outDir = process.argv[2] || "/tmp/rngpui-webview-render-conformance";
 const firstPath = `${outDir}/webview-first.png`;
 const secondPath = `${outDir}/webview-second.png`;
 const diffPath = `${outDir}/webview-clock-diff.png`;
+const appName = `RNGPUIWebViewRender${process.pid}`;
+const appRoot = `${outDir}/${appName}.app`;
+const executable = `${appRoot}/Contents/MacOS/${appName}`;
+const logPath = `${outDir}/webview-probe.log`;
+const pidPath = `${outDir}/webview-probe.pid`;
 
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
-const child = spawn("bun", ["examples/webview-probe.tsx"], {
-    cwd: root,
-    env: {
-        ...process.env,
-        RNGPUI_NO_ACTIVATE: "1",
-        RNGPUI_WEBVIEW_DEBUG: "1",
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-});
-
-let output = "";
-let exited = false;
-let exitLabel = "";
-
-child.stdout?.on("data", (chunk) => {
-    output += chunk.toString();
-});
-child.stderr?.on("data", (chunk) => {
-    output += chunk.toString();
-});
-child.on("exit", (code, signal) => {
-    exited = true;
-    exitLabel = `code=${code ?? "null"} signal=${signal ?? "null"}`;
-});
+launchProbeApp();
 
 try {
     await waitForOutput("page-load finished", 8000);
-    const windowId = await waitForProbeWindow();
+    const probeWindow = await waitForProbeWindow();
     await sleep(500);
-    captureWindow(windowId, firstPath);
+    captureWindow(probeWindow, firstPath);
     await sleep(1250);
-    captureWindow(windowId, secondPath);
+    captureWindow(probeWindow, secondPath);
 
     const crop = clockCrop(firstPath);
     const raw = execFileSync(
@@ -65,11 +47,11 @@ try {
         { cwd: root, encoding: "utf8" },
     );
     process.stdout.write(raw);
-    console.log(`WEBVIEW_RENDER_CONFORMANCE_PASS window=${windowId} crop=${crop} first=${firstPath} second=${secondPath}`);
+    console.log(`WEBVIEW_RENDER_CONFORMANCE_PASS window=${probeWindow.id} crop=${crop} first=${firstPath} second=${secondPath}`);
 } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
 } finally {
-    if (!child.killed) child.kill("SIGTERM");
+    killProbeApp();
 }
 
 async function waitForProbeWindow() {
@@ -77,12 +59,12 @@ async function waitForProbeWindow() {
     while (Date.now() < deadline) {
         const match = listWindows().find(
             (window) =>
-                window.owner === "rngpui-service" &&
+                window.owner === appName &&
                 window.title === "react-native-gpui" &&
                 Math.abs(window.width - 1180) <= 80 &&
                 Math.abs(window.height - 760) <= 80,
         );
-        if (match) return match.id;
+        if (match) return match;
         await sleep(100);
     }
     throw new Error("webview probe window was not found");
@@ -98,10 +80,11 @@ for window in list {
     let owner = window[kCGWindowOwnerName as String] as? String ?? ""
     let title = window[kCGWindowName as String] as? String ?? ""
     let number = (window[kCGWindowNumber as String] as? NSNumber)?.intValue ?? 0
+    let pid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.intValue ?? 0
     let bounds = window[kCGWindowBounds as String] as? [String: Any] ?? [:]
     let width = (bounds["Width"] as? NSNumber)?.intValue ?? 0
     let height = (bounds["Height"] as? NSNumber)?.intValue ?? 0
-    print("\\(number)\\t\\(owner)\\t\\(title)\\t\\(width)\\t\\(height)")
+    print("\\(number)\\t\\(owner)\\t\\(title)\\t\\(pid)\\t\\(width)\\t\\(height)")
 }
 `;
     return execFileSync("swift", ["-e", swift], { encoding: "utf8" })
@@ -109,29 +92,43 @@ for window in list {
         .split("\n")
         .filter(Boolean)
         .map((line) => {
-            const [id, owner, title, width, height] = line.split("\t");
+            const [id, owner, title, pid, width, height] = line.split("\t");
             return {
                 id: Number(id),
                 owner,
                 title,
+                pid: Number(pid),
                 width: Number(width),
                 height: Number(height),
             };
         })
-        .filter((window) => Number.isFinite(window.id) && window.id > 0);
+        .filter((window) => Number.isFinite(window.id) && window.id > 0 && Number.isFinite(window.pid) && window.pid > 0);
 }
 
-function captureWindow(windowId, path) {
-    execFileSync("screencapture", ["-x", "-l", String(windowId), path], { stdio: "pipe" });
+function captureWindow(window, path) {
+    execFileSync(
+        "cua-driver",
+        [
+            "call",
+            "get_window_state",
+            JSON.stringify({
+                pid: window.pid,
+                window_id: window.id,
+                capture_mode: "vision",
+                screenshot_out_file: path,
+            }),
+        ],
+        { stdio: "pipe" },
+    );
     if (!existsSync(path)) throw new Error(`screencapture did not write ${path}`);
 }
 
 function clockCrop(path) {
     const { width, height } = imageSize(path);
-    const cropWidth = Math.min(760, width);
-    const cropHeight = Math.min(220, height);
+    const cropWidth = Math.min(360, width);
+    const cropHeight = Math.min(140, height);
     const x = Math.max(0, Math.round(width / 2 - cropWidth / 2));
-    const y = Math.max(0, Math.round(height * 0.55));
+    const y = Math.max(0, Math.round(height * 0.54));
     return `${x},${y},${cropWidth},${cropHeight}`;
 }
 
@@ -146,11 +143,12 @@ function imageSize(path) {
 async function waitForOutput(needle, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+        const output = readOutput();
         if (output.includes(needle)) return;
-        if (exited) throw new Error(`webview fixture exited before ${needle}: ${exitLabel}\n${output.trim()}`);
+        if (probeExited()) throw new Error(`webview fixture exited before ${needle}\n${output.trim()}`);
         await sleep(50);
     }
-    throw new Error(`timed out waiting for ${needle}\n${output.trim()}`);
+    throw new Error(`timed out waiting for ${needle}\n${readOutput().trim()}`);
 }
 
 function sleep(ms) {
@@ -158,7 +156,91 @@ function sleep(ms) {
 }
 
 function fail(message) {
+    const output = readOutput();
     if (output.trim()) console.error(output.trim());
     console.error(`WEBVIEW_RENDER_CONFORMANCE_FAIL ${message}`);
     process.exit(1);
+}
+
+function launchProbeApp() {
+    mkdirSync(dirname(executable), { recursive: true });
+    writeFileSync(
+        `${appRoot}/Contents/Info.plist`,
+        `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key>
+  <string>${appName}</string>
+  <key>CFBundleIdentifier</key>
+  <string>dev.rngpui.webview-render.${process.pid}</string>
+  <key>CFBundleName</key>
+  <string>${appName}</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+</dict>
+</plist>
+`,
+    );
+    writeFileSync(
+        executable,
+        `#!/bin/zsh
+set -e
+export PATH=${quote(process.env.PATH || "/usr/bin:/bin:/usr/sbin:/sbin")}
+export HOME=${quote(process.env.HOME || "")}
+export USER=${quote(process.env.USER || "")}
+export SHELL=${quote(process.env.SHELL || "/bin/zsh")}
+export TMPDIR=${quote(process.env.TMPDIR || "/tmp/")}
+export RNGPUI_NO_ACTIVATE=1
+export RNGPUI_WEBVIEW_DEBUG=1
+cd ${quote(root)}
+child=0
+cleanup() {
+  if [[ "$child" != "0" ]]; then
+    kill "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+  fi
+}
+trap cleanup TERM INT EXIT
+echo $$ > ${quote(pidPath)}
+${quote(process.execPath)} examples/webview-probe.tsx > ${quote(logPath)} 2>&1 &
+child=$!
+wait "$child"
+`,
+    );
+    chmodSync(executable, 0o755);
+    execFileSync("open", ["-gj", appRoot], { stdio: "pipe" });
+}
+
+function readOutput() {
+    return existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
+}
+
+function probePid() {
+    if (!existsSync(pidPath)) return null;
+    const pid = Number(readFileSync(pidPath, "utf8").trim());
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
+}
+
+function probeExited() {
+    const pid = probePid();
+    if (!pid) return false;
+    try {
+        process.kill(pid, 0);
+        return false;
+    } catch {
+        return true;
+    }
+}
+
+function killProbeApp() {
+    const pid = probePid();
+    if (!pid) return;
+    try {
+        process.kill(pid, "SIGTERM");
+    } catch {}
+}
+
+function quote(value) {
+    return `'${String(value).replaceAll("'", "'\\''")}'`;
 }

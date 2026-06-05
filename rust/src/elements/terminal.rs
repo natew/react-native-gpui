@@ -52,7 +52,9 @@ impl ReactGhosttyTerminalElement {
         let focus_handle = terminal_focus_handle(self.element.global_id, cx);
         let click_focus_handle = focus_handle.clone();
         let listens_key_press = self.element.listens("keyPress");
+        let listens_press = self.element.listens("press");
         let element_id = self.element.global_id;
+        let press_element_id = element_id;
 
         let mut root = div()
             .size_full()
@@ -66,6 +68,9 @@ impl ReactGhosttyTerminalElement {
                 MouseButton::Left,
                 move |_: &MouseDownEvent, window: &mut Window, _: &mut App| {
                     click_focus_handle.focus(window);
+                    if listens_press {
+                        crate::bridge::event(press_element_id, "press");
+                    }
                 },
             )
             .on_key_down(move |event: &KeyDownEvent, _: &mut Window, cx: &mut App| {

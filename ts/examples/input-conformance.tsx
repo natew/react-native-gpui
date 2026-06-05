@@ -15,7 +15,7 @@
  *   - Shift+Return inserts a newline and does not submit
  *   - onKeyPress observes Enter but does not perform the submit
  */
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
     render,
     View,
@@ -23,6 +23,7 @@ import {
     TextInput,
     Pressable,
     StyleSheet,
+    type TextInputHandle,
 } from "../src/index";
 
 const C = {
@@ -44,9 +45,38 @@ function App() {
     const [submitCount, setSubmitCount] = useState(0);
     const [submitted, setSubmitted] = useState("");
     const draftRef = useRef("");
+    const enterKeyCountRef = useRef(0);
+    const submitCountRef = useRef(0);
+    const changeCountRef = useRef(0);
+    const keyPressCountRef = useRef(0);
+    const inputRef = useRef<TextInputHandle | null>(null);
+    const expected = process.env.RNGPUI_INPUT_EXPECT;
+
+    useEffect(() => {
+        let focusAttempts = 0;
+        const focusTimer = setInterval(() => {
+            focusAttempts += 1;
+            inputRef.current?.focus();
+            if (focusAttempts >= 10) clearInterval(focusTimer);
+        }, 150);
+        let failTimer: ReturnType<typeof setTimeout> | undefined;
+        if (expected) {
+            failTimer = setTimeout(() => {
+                console.error(
+                    `CONFORMANCE input FAIL timeout draft=${JSON.stringify(draftRef.current)} submitted=${JSON.stringify(submitted)}`,
+                );
+                process.exit(1);
+            }, 20000);
+        }
+        return () => {
+            clearInterval(focusTimer);
+            if (failTimer) clearTimeout(failTimer);
+        };
+    }, []);
 
     function updateDraft(text: string) {
         draftRef.current = text;
+        changeCountRef.current += 1;
         setDraft(text);
         setChangeCount((count) => count + 1);
         console.log(`CONFORMANCE input change value=${JSON.stringify(text)}`);
@@ -55,10 +85,28 @@ function App() {
     function submit(source: string) {
         const text = draftRef.current;
         if (!text.trim()) return;
+        submitCountRef.current += 1;
         setSubmitted(`${source}:${text}`);
         setSubmitCount((count) => count + 1);
         updateDraft("");
         console.log(`CONFORMANCE input enter-submit PASS source=${source} text=${JSON.stringify(text)}`);
+        if (expected) {
+            if (
+                text === expected &&
+                enterKeyCountRef.current === 2 &&
+                submitCountRef.current === 1 &&
+                keyPressCountRef.current > enterKeyCountRef.current &&
+                changeCountRef.current > 0
+            ) {
+                console.log("CONFORMANCE input all PASS");
+                setTimeout(() => process.exit(0), 50);
+            } else {
+                console.error(
+                    `CONFORMANCE input FAIL expected=${JSON.stringify(expected)} got=${JSON.stringify(text)} enterKeys=${enterKeyCountRef.current} submits=${submitCountRef.current} keyPresses=${keyPressCountRef.current} changes=${changeCountRef.current}`,
+                );
+                setTimeout(() => process.exit(1), 50);
+            }
+        }
     }
 
     function onKeyPress(event: unknown) {
@@ -67,8 +115,12 @@ function App() {
             nativeEvent?: { key?: string; shiftKey?: boolean; isComposing?: boolean };
         };
         const key = typed.nativeEvent?.key;
-        if (key !== "Enter" || typed.nativeEvent?.isComposing) return;
-        setEnterKeyCount((count) => count + 1);
+        if (typed.nativeEvent?.isComposing) return;
+        keyPressCountRef.current += 1;
+        console.log(`CONFORMANCE input keyPress key=${JSON.stringify(key)}`);
+        if (key !== "Enter") return;
+        enterKeyCountRef.current += 1;
+        setEnterKeyCount(enterKeyCountRef.current);
     }
 
     return (
@@ -79,6 +131,7 @@ function App() {
                 </Text>
                 <View style={s.field}>
                     <TextInput
+                        ref={inputRef}
                         value={draft}
                         onChangeText={updateDraft}
                         onKeyPress={onKeyPress}

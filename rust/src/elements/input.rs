@@ -54,7 +54,6 @@ impl ReactInputElement {
             Some(state) => {
                 let editable = self.element.editable;
                 let listens_key_press = self.element.listens("keyPress");
-                let element_type = self.element.element_type.clone();
                 let element_id = self.element.global_id;
                 let mut input = Input::new(&state)
                     .appearance(false)
@@ -65,59 +64,22 @@ impl ReactInputElement {
                 }
                 div()
                     .size_full()
-                    .on_key_down({
-                        let state = state.clone();
-                        move |event: &KeyDownEvent, window: &mut Window, cx: &mut App| {
-                            let keystroke = &event.keystroke;
-                            if !editable {
-                                cx.stop_propagation();
-                                return;
-                            }
-                            let key = js_key(keystroke);
-                            if listens_key_press {
-                                crate::bridge::key_press(
-                                    element_id,
-                                    &key,
-                                    keystroke.modifiers.shift,
-                                    keystroke.modifiers.control,
-                                    keystroke.modifiers.alt,
-                                    keystroke.modifiers.platform,
-                                );
-                            }
-                            if element_type == "textarea"
-                                && key == "Enter"
-                                && !keystroke.modifiers.control
-                                && !keystroke.modifiers.alt
-                                && !keystroke.modifiers.platform
-                            {
-                                if keystroke.modifiers.shift {
-                                    state.update(cx, |input, cx| {
-                                        input.insert("\n".to_string(), window, cx);
-                                    });
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                crate::bridge::event(element_id, "submit");
-                                cx.stop_propagation();
-                                return;
-                            }
-                            let Some(text) = keystroke.key_char.as_deref() else {
-                                return;
-                            };
-                            if text == "\n"
-                                || text == "\t"
-                                || keystroke.modifiers.control
-                                || keystroke.modifiers.platform
-                                || keystroke.modifiers.function
-                            {
-                                return;
-                            }
-                            let text = text.to_string();
-                            state.update(cx, |input, cx| {
-                                input.insert(text, window, cx);
-                            });
-                            cx.stop_propagation();
+                    .on_key_down(move |event: &KeyDownEvent, _: &mut Window, _: &mut App| {
+                        if !editable || !listens_key_press {
+                            return;
                         }
+                        let key = js_key(&event.keystroke);
+                        if key == "Enter" {
+                            return;
+                        }
+                        crate::bridge::key_press(
+                            element_id,
+                            &key,
+                            event.keystroke.modifiers.shift,
+                            event.keystroke.modifiers.control,
+                            event.keystroke.modifiers.alt,
+                            event.keystroke.modifiers.platform,
+                        );
                     })
                     .child(input)
                     .into_any_element()
@@ -158,7 +120,7 @@ fn js_named_key(key: &str) -> String {
 }
 
 impl Element for ReactInputElement {
-    type RequestLayoutState = ();
+    type RequestLayoutState = LayoutId;
     type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
@@ -175,11 +137,16 @@ impl Element for ReactInputElement {
         _: Option<&gpui::InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
-    ) -> (LayoutId, ()) {
+    ) -> (LayoutId, LayoutId) {
         let mut child = self.build_child();
-        let layout_id = child.request_layout(window, cx);
+        let child_layout_id = child.request_layout(window, cx);
+        let layout_id = window.request_layout(
+            self.element.build_gpui_style(None),
+            std::iter::once(child_layout_id),
+            cx,
+        );
         self.child = Some(child);
-        (layout_id, ())
+        (layout_id, child_layout_id)
     }
 
     fn prepaint(
@@ -187,7 +154,7 @@ impl Element for ReactInputElement {
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut (),
+        _: &mut LayoutId,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -205,7 +172,7 @@ impl Element for ReactInputElement {
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
         _: Bounds<Pixels>,
-        _: &mut (),
+        _: &mut LayoutId,
         _: &mut (),
         window: &mut Window,
         cx: &mut App,

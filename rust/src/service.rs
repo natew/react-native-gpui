@@ -11,7 +11,7 @@ use gpui::{
     Menu, MenuItem, ParentElement, Render, Styled, TitlebarOptions, Window, WindowBounds,
     WindowOptions, actions, point, px, rgb, size,
 };
-use gpui_component::input::{InputEvent, InputState, Position};
+use gpui_component::input::{Enter, InputEvent, InputState, Position};
 use gpui_component::theme::{Theme, ThemeMode};
 use serde::Deserialize;
 
@@ -223,9 +223,9 @@ struct ServiceApp {
     webview_content: HashMap<u64, String>,
 }
 
-type InputSpec = (u64, String, Option<String>, bool, bool, bool);
+type InputSpec = (u64, String, Option<String>, bool, bool);
 
-/// collect (id, placeholder, value, multiline, secure, keypress listener) for every text-input node in the tree.
+/// collect (id, placeholder, value, multiline, secure) for every text-input node in the tree.
 fn collect_inputs(el: &Arc<ReactElement>, out: &mut Vec<InputSpec>) {
     if el.element_type == "textinput" || el.element_type == "textarea" {
         let multiline = el.element_type == "textarea";
@@ -235,7 +235,6 @@ fn collect_inputs(el: &Arc<ReactElement>, out: &mut Vec<InputSpec>) {
             el.value.clone(),
             multiline,
             el.secure_text_entry && !multiline,
-            el.listens("keyPress"),
         ));
     }
     for c in &el.children {
@@ -374,13 +373,13 @@ impl Render for ServiceApp {
         // it so this view re-renders (and the edit shows) when the input changes.
         let mut specs = Vec::new();
         collect_inputs(&self.root, &mut specs);
-        let present: HashSet<u64> = specs.iter().map(|(id, _, _, _, _, _)| *id).collect();
+        let present: HashSet<u64> = specs.iter().map(|(id, _, _, _, _)| *id).collect();
         self.inputs.retain(|id, _| present.contains(id));
         self.input_values.retain(|id, _| present.contains(id));
         self.input_secure.retain(|id, _| present.contains(id));
         self.suppressed_input_changes
             .retain(|id, _| present.contains(id));
-        for (id, placeholder, value, multiline, secure, listens_key_press) in specs {
+        for (id, placeholder, value, multiline, secure) in specs {
             if !self.inputs.contains_key(&id) {
                 let initial_value = value.clone();
                 let state = cx.new(|cx| {
@@ -412,11 +411,15 @@ impl Render for ServiceApp {
                             bridge::change_text(id, value.as_ref());
                             bridge::change(id, value.as_ref());
                         }
-                        InputEvent::PressEnter { .. } => {
-                            if listens_key_press {
-                                bridge::key_press(id, "Enter", false, false, false, false);
-                            }
+                        InputEvent::PressEnter { secondary } => {
+                            bridge::key_press(id, "Enter", *secondary, false, false, false);
                             if multiline {
+                                if *secondary {
+                                    let value = input.read(cx).value().to_string();
+                                    bridge::change_text(id, value.as_ref());
+                                    bridge::change(id, value.as_ref());
+                                    return;
+                                }
                                 let next = value_without_submit_newline(input.read(cx));
                                 if let Some((next, cursor_position)) = next {
                                     bridge::change_text(id, next.as_ref());
@@ -768,6 +771,13 @@ fn main() {
         // sets up gpui-component's theme + the input key bindings (backspace,
         // arrows, select-all, copy/paste, word-motion, …) used by InputState.
         gpui_component::init(cx);
+        // React Native multiline TextInput uses shift+enter for a newline when
+        // plain enter submits. gpui-component only binds platform-secondary+enter.
+        cx.bind_keys([KeyBinding::new(
+            "shift-enter",
+            Enter { secondary: true },
+            Some("Input"),
+        )]);
 
         // quit on ⌘Q and when the last window closes (X button).
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());

@@ -56,6 +56,7 @@ APIs: `StyleSheet`, `Dimensions`, `useWindowDimensions`, `Platform`, `PixelRatio
 
 - **Real text input** (`TextInput`) is backed by [gpui-component](https://github.com/longbridge/gpui-component)'s editor: selection, IME, copy/paste, word motion, multiline.
 - **Text truncation** follows React Native's `numberOfLines`: one-line labels truncate with ellipsis, and multi-line labels are line-clamped.
+- **Native portals** (`PortalProvider`, `Portal`, `PortalHost`) render overlay content at the matching host during GPUI serialization, so Tamagui Dialog/Popover/Sheet can avoid legacy state-driven portal fallbacks.
 - **Styling** matches RN: flexbox (Yoga semantics — `flex:1`, `%`, `auto`), `backgroundColor`, gradients via `backgroundImage`, `boxShadow` / iOS `shadow*` / `elevation`, `borderRadius`, `overflow: scroll`, `opacity`.
 - **`Svg`** renders a monochrome icon tinted by `style.color`.
 
@@ -115,6 +116,7 @@ Point the runtime at a specific binary with `RNGPUI_SERVICE=/path/to/rngpui-serv
 ```sh
 bun run examples/kitchen-sink.tsx     # the full component surface + self-validating layout
 bun run conformance:input            # TextInput typing, Return submit, Shift+Return newline
+bun run conformance:portal           # Portal overlay and TextInput-in-portal behavior
 bun run conformance:text-lines        # visual fixture for Text numberOfLines
 bun run examples/superconductor.tsx   # native shell + WebView content hybrid
 ```

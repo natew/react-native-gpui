@@ -29,6 +29,8 @@ let commit: ((tree: SerializedNode) => void) | null = null;
 let currentContainer: Container | null = null;
 const hoveredIds = new Set<number>();
 const pressedIds = new Set<number>();
+const PORTAL_HOST_TYPE = "RNTPortalHostView";
+const PORTAL_VIEW_TYPE = "RNTPortalView";
 
 // ── event registry (id → { event: handler }) ────────────────────────
 const PROP_TO_EVENT: Record<string, string> = {
@@ -363,8 +365,52 @@ function gatherRuns(inst: Instance, inherited: Omit<SerRun, "text">): SerRun[] {
     return runs;
 }
 
-function serialize(inst: Instance | TextInstance): SerializedNode {
+type PortalContext = {
+    byHost: Map<string, Instance[]>;
+    usedHosts: Set<string>;
+};
+
+function portalHostName(props: Record<string, unknown>): string {
+    return stringProp(props, "hostName", "name") ?? "root";
+}
+
+function collectPortals(node: Instance | TextInstance, byHost: Map<string, Instance[]>) {
+    if (isTextLike(node)) return;
+    if (node.type === PORTAL_VIEW_TYPE) {
+        const hostName = portalHostName(node.props);
+        const entries = byHost.get(hostName);
+        if (entries) entries.push(node);
+        else byHost.set(hostName, [node]);
+    }
+    for (const child of node.children) collectPortals(child, byHost);
+}
+
+function serializeChildren(children: Array<Instance | TextInstance>, context: PortalContext): SerializedNode[] {
+    const out: SerializedNode[] = [];
+    for (const child of children) {
+        const next = serialize(child, context);
+        if (next) out.push(next);
+    }
+    return out;
+}
+
+function serializePortalEntry(inst: Instance, context: PortalContext): SerializedNode[] {
+    const style = (normalizeStyle(inst.props.style as never) ?? {}) as Record<string, unknown>;
+    const children = serializeChildren(inst.children, context);
+    if (Object.keys(style).length === 0) return children;
+    return [
+        {
+            globalId: inst.id,
+            type: "div",
+            style,
+            children,
+        },
+    ];
+}
+
+function serialize(inst: Instance | TextInstance, context: PortalContext): SerializedNode | null {
     if (isTextLike(inst)) return { globalId: inst.id, type: "text", text: inst.text };
+    if (inst.type === PORTAL_VIEW_TYPE) return null;
 
     const props = inst.props;
     const baseStyle = (normalizeStyle(props.style as never) ?? {}) as Record<string, unknown>;
@@ -422,6 +468,9 @@ function serialize(inst: Instance | TextInstance): SerializedNode {
             node.type = "div";
             if (style.overflow === undefined) style.overflow = "scroll";
             break;
+        case PORTAL_HOST_TYPE:
+            node.type = "div";
+            break;
         default:
             node.type = "div";
     }
@@ -433,8 +482,17 @@ function serialize(inst: Instance | TextInstance): SerializedNode {
     if (accessibility) node.accessibility = accessibility;
 
     if (node.type === "div" || node.type === "svg" /* svg has no children but harmless */) {
-        const kids: SerializedNode[] = [];
-        for (const c of inst.children) kids.push(serialize(c));
+        const kids = serializeChildren(inst.children, context);
+        if (inst.type === PORTAL_HOST_TYPE) {
+            const hostName = portalHostName(props);
+            if (!context.usedHosts.has(hostName)) {
+                context.usedHosts.add(hostName);
+                const portalEntries = context.byHost.get(hostName) ?? [];
+                for (const entry of portalEntries) {
+                    kids.push(...serializePortalEntry(entry, context));
+                }
+            }
+        }
         if (kids.length) node.children = kids;
     }
     return node;
@@ -448,13 +506,16 @@ function imageSource(source: unknown): string | undefined {
 
 export function serializeContainer(c: Container): SerializedNode {
     currentContainer = c;
+    const byHost = new Map<string, Instance[]>();
+    for (const child of c.children) collectPortals(child, byHost);
+    const context: PortalContext = { byHost, usedHosts: new Set() };
     // id 0 is reserved for the window root, so it never collides with element ids
     // (genId starts at 1) — keeps scroll/input/webview maps keyed cleanly.
     return {
         globalId: 0,
         type: "div",
         style: { width: c.width, height: c.height, flexDirection: "column" },
-        children: c.children.map(serialize),
+        children: serializeChildren(c.children, context),
     };
 }
 

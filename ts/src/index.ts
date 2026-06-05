@@ -104,6 +104,18 @@ export {
     type AppCommandMenu,
     type AppCommandMenuItem,
 } from "./commands";
+export {
+    Portal,
+    PortalHost,
+    PortalProvider,
+    NativePortal,
+    NativePortalHost,
+    usePortal,
+    setupTamaguiNativePortal,
+    type PortalProps,
+    type PortalHostProps,
+    type PortalProviderProps,
+} from "./portal";
 
 // low-level bridge (escape hatch)
 export { startBridge, type Bridge, type BridgeEvent, type SerializedNode } from "./runtime";

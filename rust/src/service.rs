@@ -28,6 +28,8 @@ mod ax;
 mod bridge;
 mod elements;
 mod icons;
+#[cfg(target_os = "macos")]
+mod liquid_glass;
 mod style;
 
 use elements::{AccessibilityInfo, ReactElement, create_element};
@@ -532,6 +534,7 @@ impl Render for ServiceApp {
             let view = self.webviews.entry(id).or_insert_with(|| {
                 let dbg = std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok();
                 let wv = wry::WebViewBuilder::new()
+                    .with_transparent(true)
                     // RN-compatible bridge so page code can talk to the host:
                     // window.ReactNativeWebView.postMessage(d) → the node's onMessage.
                     .with_initialization_script(RN_WEBVIEW_SHIM)
@@ -891,7 +894,16 @@ fn main() {
             is_resizable: true,
             is_minimizable: true,
             display_id: None,
-            window_background: gpui::WindowBackgroundAppearance::Blurred,
+            window_background: {
+                #[cfg(target_os = "macos")]
+                {
+                    gpui::WindowBackgroundAppearance::Transparent
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    gpui::WindowBackgroundAppearance::Blurred
+                }
+            },
             app_id: None,
             window_min_size: None,
             window_decorations: None,
@@ -901,6 +913,8 @@ fn main() {
         let pump = content.clone();
         let window_handle = cx
             .open_window(options, move |window, cx| {
+                #[cfg(target_os = "macos")]
+                liquid_glass::install(window);
                 cx.new(|cx| gpui_component::Root::new(content, window, cx))
             })
             .expect("open window");

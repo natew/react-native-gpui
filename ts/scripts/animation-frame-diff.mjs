@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,6 +16,7 @@ const midPath = `${outDir}/frame-mid.png`;
 const afterPath = `${outDir}/frame-after.png`;
 const beforeMidDiffPath = `${outDir}/frame-before-mid-diff.png`;
 const midAfterDiffPath = `${outDir}/frame-mid-after-diff.png`;
+const treeDumpPath = `${outDir}/animation-tree.json`;
 
 const screenCaptureKitSwift = `
 import Foundation
@@ -111,6 +112,7 @@ const child = spawn("bun", ["examples/animation-conformance.tsx"], {
     env: {
         ...process.env,
         RNGPUI_NO_ACTIVATE: "1",
+        RNGPUI_DUMP_TREE: treeDumpPath,
         RNGPUI_ANIMATION_HOLD_MS: String(holdMs),
         RNGPUI_ANIMATION_DURATION_MS: String(durationMs),
     },
@@ -137,8 +139,7 @@ try {
     await sleep(220);
     captureWindow(windowId, beforePath);
 
-    await waitForOutput("CONFORMANCE animation RUNNING", 6000);
-    await sleep(Math.round(durationMs * 0.3));
+    const midFrame = await waitForTreeFrame({ minLeft: 90, maxLeft: 190, timeoutMs: 6000 });
     captureWindow(windowId, midPath);
 
     await waitForOutput("CONFORMANCE animation PASS", 6000);
@@ -159,6 +160,7 @@ try {
             `midAfterDiff=${midAfterDiffPath}`,
             `beforeMidRatio=${beforeMid.ratio}`,
             `midAfterRatio=${midAfter.ratio}`,
+            `midLeft=${midFrame.left.toFixed(1)}`,
         ].join(" "),
     );
 } catch (error) {
@@ -181,6 +183,23 @@ async function waitForAnimationWindow() {
         await sleep(120);
     }
     throw new Error("animation GPUI window was not found");
+}
+
+async function waitForTreeFrame({ minLeft, maxLeft, timeoutMs }) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (existsSync(treeDumpPath)) {
+            const text = readFileSync(treeDumpPath, "utf8");
+            const match = /left=([0-9.]+).*phase=running/.exec(text);
+            if (match) {
+                const left = Number(match[1]);
+                if (left >= minLeft && left <= maxLeft) return { left };
+            }
+        }
+        if (exited) throw new Error(`animation fixture exited before mid frame: ${exitLabel}\n${output.trim()}`);
+        await sleep(20);
+    }
+    throw new Error(`timed out waiting for intermediate tree frame in [${minLeft}, ${maxLeft}]\n${output.trim()}`);
 }
 
 function listWindows() {

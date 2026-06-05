@@ -273,6 +273,8 @@ fn ax_role(element: &ReactElement) -> String {
             "checkbox" | "switch" => "AXCheckBox",
             "radio" => "AXRadioButton",
             "combobox" | "menu" | "menuitem" => "AXMenuButton",
+            "option" if events_have_press_action(&element.events) => "AXButton",
+            "option" => "AXStaticText",
             "tablist" => "AXTabGroup",
             "tab" => "AXRadioButton",
             "toolbar" | "menubar" | "radiogroup" => "AXGroup",
@@ -287,7 +289,7 @@ fn ax_role(element: &ReactElement) -> String {
         "textinput" | "textarea" => "AXTextField",
         "image" | "svg" => "AXImage",
         "webview" => "AXWebArea",
-        _ if element.listens("press") || element.listens("click") => "AXButton",
+        _ if events_have_press_action(&element.events) => "AXButton",
         _ if matches!(
             element.style.overflow.as_deref(),
             Some("scroll") | Some("auto")
@@ -749,7 +751,7 @@ extern "C" fn accessibility_set_value_for_attribute(
 
 #[cfg(test)]
 mod tests {
-    use super::{ax_is_element, ax_label, events_have_press_action};
+    use super::{ax_is_element, ax_label, ax_role, events_have_press_action};
     use crate::elements::{AccessibilityInfo, ReactElement};
     use crate::style::ElementStyle;
 
@@ -797,6 +799,29 @@ mod tests {
         assert!(!events_have_press_action(&events(&["mouseEnter"])));
         assert!(!events_have_press_action(&events(&["pressIn", "pressOut"])));
         assert!(!events_have_press_action(&events(&["responderGrant"])));
+    }
+
+    #[test]
+    fn responder_release_controls_map_to_ax_buttons() {
+        let mut item = element("div", None, AccessibilityInfo::default());
+        item.events = events(&["responderGrant", "responderRelease"]);
+
+        assert_eq!(ax_role(&item), "AXButton");
+    }
+
+    #[test]
+    fn pressable_options_map_to_ax_buttons() {
+        let mut item = element(
+            "div",
+            None,
+            AccessibilityInfo {
+                role: Some("option".to_string()),
+                ..AccessibilityInfo::default()
+            },
+        );
+        item.events = events(&["responderGrant", "responderRelease"]);
+
+        assert_eq!(ax_role(&item), "AXButton");
     }
 
     #[test]

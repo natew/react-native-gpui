@@ -18,11 +18,13 @@ const pidPath = `${outDir}/webview-probe.pid`;
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
+let probeWindow = null;
+
 launchProbeApp();
 
 try {
     await waitForOutput("page-load finished", 8000);
-    const probeWindow = await waitForProbeWindow();
+    probeWindow = await waitForProbeWindow();
     await sleep(500);
     captureWindow(probeWindow, firstPath);
     await sleep(1250);
@@ -250,6 +252,11 @@ function probeExited() {
 }
 
 function killProbeApp() {
+    if (probeWindow?.pid) {
+        try {
+            process.kill(probeWindow.pid, "SIGTERM");
+        } catch {}
+    }
     const pid = probePid();
     if (!pid) return;
     try {

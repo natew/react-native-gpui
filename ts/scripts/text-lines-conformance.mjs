@@ -42,6 +42,7 @@ child.on("exit", (code, signal) => {
     exited = true;
     exitLabel = `code=${code ?? "null"} signal=${signal ?? "null"}`;
 });
+const childExit = new Promise((resolve) => child.once("exit", resolve));
 
 try {
     await waitForPasses(5000);
@@ -53,7 +54,7 @@ try {
 } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
 } finally {
-    stop();
+    await stop();
 }
 
 async function waitForPasses(timeoutMs) {
@@ -123,8 +124,9 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function stop() {
+async function stop() {
     if (!child.killed) child.kill("SIGTERM");
+    await Promise.race([childExit, sleep(1000)]);
 }
 
 function fail(message) {

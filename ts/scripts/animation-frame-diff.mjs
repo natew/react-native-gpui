@@ -133,6 +133,7 @@ child.on("exit", (code, signal) => {
     exited = true;
     exitLabel = `code=${code ?? "null"} signal=${signal ?? "null"}`;
 });
+const childExit = new Promise((resolve) => child.once("exit", resolve));
 
 try {
     const windowId = await waitForAnimationWindow();
@@ -146,7 +147,7 @@ try {
     await sleep(160);
     captureWindow(windowId, afterPath);
 
-    if (!child.killed) child.kill("SIGTERM");
+    await stopChild();
 
     const beforeMid = pixelDiff(beforePath, midPath, beforeMidDiffPath);
     const midAfter = pixelDiff(midPath, afterPath, midAfterDiffPath);
@@ -164,7 +165,7 @@ try {
         ].join(" "),
     );
 } catch (error) {
-    if (!child.killed) child.kill("SIGTERM");
+    await stopChild();
     fail(error instanceof Error ? error.message : String(error));
 }
 
@@ -280,6 +281,11 @@ function pixelDiff(before, after, diffOut) {
 
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function stopChild() {
+    if (!child.killed) child.kill("SIGTERM");
+    await Promise.race([childExit, sleep(1000)]);
 }
 
 function fail(message) {

@@ -144,12 +144,19 @@ export function dispatchEvent(
 ) {
     const fn = handlers.get(id)?.[event];
     if (!fn) return;
-    if (event === "changeText") fn(payload.value ?? "");
-    else if (event === "change") fn(createValueEvent(event, payload.value ?? ""));
-    else if (event === "message") fn({ nativeEvent: { data: payload.value ?? "" } });
-    else if (event === "layout") fn({ nativeEvent: { layout: payload.layout } });
-    else if (event === "keyPress") fn(createKeyPressEvent(payload));
-    else fn(createEvent(event, payload));
+    let result: unknown;
+    if (event === "changeText") result = fn(payload.value ?? "");
+    else if (event === "change") result = fn(createValueEvent(event, payload.value ?? ""));
+    else if (event === "message") result = fn({ nativeEvent: { data: payload.value ?? "" } });
+    else if (event === "layout") result = fn({ nativeEvent: { layout: payload.layout } });
+    else if (event === "keyPress") result = fn(createKeyPressEvent(payload));
+    else result = fn(createEvent(event, payload));
+
+    if (result && typeof (result as Promise<unknown>).catch === "function") {
+        (result as Promise<unknown>).catch((error) => {
+            console.error("[react-native-gpui] unhandled event handler rejection", error);
+        });
+    }
 }
 
 function createValueEvent(type: string, value: string) {

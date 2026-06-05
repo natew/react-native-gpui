@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Bounds, Element, ElementId, FontStyle, GlobalElementId, HighlightStyle, Hsla,
-    IntoElement, LayoutId, ParentElement, Pixels, Styled, StyledText, Window, div, px,
+    AnyElement, App, Bounds, DefiniteLength, Element, ElementId, FontStyle, GlobalElementId,
+    HighlightStyle, Hsla, IntoElement, LayoutId, Length, ParentElement, Pixels, Styled, StyledText,
+    Window, div, px,
 };
 
 use crate::elements::ReactElement;
@@ -42,7 +43,11 @@ impl ReactTextElement {
         let weight = style.gpui_font_weight();
         let text = self.element.text.clone().unwrap_or_default();
 
-        let mut el = div().text_color(color).text_size(px(size));
+        let mut el = div()
+            .whitespace_normal()
+            .text_color(color)
+            .text_size(px(size));
+        el = apply_layout_style(el, style);
         if let Some(ref fam) = family {
             el = el.font_family(fam.clone());
         }
@@ -104,6 +109,41 @@ impl ReactTextElement {
         el.child(StyledText::new(flat).with_default_highlights(&base, highlights))
             .into_any_element()
     }
+}
+
+fn apply_layout_style(mut el: gpui::Div, style: &ElementStyle) -> gpui::Div {
+    if let Some(width) = style.width {
+        el = el.w(width.to_length());
+    }
+    if let Some(min_width) = style.min_width {
+        el = el.min_w(min_width.to_length());
+    }
+    if let Some(max_width) = style.max_width {
+        el = el.max_w(max_width.to_length());
+    }
+    if let Some(flex) = style.flex {
+        if flex > 0.0 {
+            el.style().flex_grow = Some(flex);
+            el.style().flex_shrink = Some(1.0);
+            el.style().flex_basis = Some(Length::Definite(DefiniteLength::Fraction(0.0)));
+        } else if flex == 0.0 {
+            el.style().flex_grow = Some(0.0);
+            el.style().flex_shrink = Some(0.0);
+        } else {
+            el.style().flex_grow = Some(0.0);
+            el.style().flex_shrink = Some(1.0);
+        }
+    }
+    if let Some(flex_grow) = style.flex_grow {
+        el.style().flex_grow = Some(flex_grow);
+    }
+    if let Some(flex_shrink) = style.flex_shrink {
+        el.style().flex_shrink = Some(flex_shrink);
+    }
+    if let Some(flex_basis) = style.flex_basis {
+        el.style().flex_basis = Some(flex_basis.to_length());
+    }
+    el
 }
 
 fn apply_line_limit(el: gpui::Div, number_of_lines: Option<usize>) -> gpui::Div {

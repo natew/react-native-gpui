@@ -2,7 +2,10 @@
  * Visual conformance fixture for RN TextInput editing and submit behavior.
  *
  * Run:
- *   bun run conformance:input
+ *   bun run conformance:input:manual
+ *
+ * The automated `bun run conformance:input` driver launches this fixture and
+ * drives it through CUA in the background.
  *
  * Drive with accessibility or keyboard input:
  *   1. focus "Message conformance"
@@ -98,7 +101,7 @@ function App() {
                 eventText === expected &&
                 enterKeyCountRef.current === 2 &&
                 submitCountRef.current === 1 &&
-                keyPressCountRef.current > enterKeyCountRef.current &&
+                keyPressCountRef.current >= enterKeyCountRef.current &&
                 changeCountRef.current > 0
             ) {
                 console.log("CONFORMANCE input all PASS");

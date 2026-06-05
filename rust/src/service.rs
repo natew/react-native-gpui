@@ -502,12 +502,15 @@ impl Render for ServiceApp {
                     if let Some(state) = self.inputs.get(&id) {
                         state.update(cx, |input, cx| {
                             if input.value().as_ref() != next_value.as_str() {
+                                let cursor_position =
+                                    position_for_byte_offset(&next_value, next_value.len());
                                 suppress_next_input_change(
                                     &mut self.suppressed_input_changes,
                                     id,
                                     next_value.clone(),
                                 );
                                 input.set_value(next_value, window, cx);
+                                input.set_cursor_position(cursor_position, window, cx);
                             }
                         });
                     }
@@ -1038,7 +1041,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Incoming, parse_incoming};
+    use super::{Incoming, parse_incoming, position_for_byte_offset};
     use serde_json::json;
 
     #[test]
@@ -1112,6 +1115,20 @@ mod tests {
         } else {
             panic!("expected nativeLayout command");
         }
+    }
+
+    #[test]
+    fn maps_multiline_utf16_cursor_positions() {
+        assert_eq!(position_for_byte_offset("alpha", "alpha".len()).line, 0);
+        assert_eq!(
+            position_for_byte_offset("alpha", "alpha".len()).character,
+            5
+        );
+
+        let text = "alpha\nbe😀ta";
+        let end = position_for_byte_offset(text, text.len());
+        assert_eq!(end.line, 1);
+        assert_eq!(end.character, 6);
     }
 
     #[test]

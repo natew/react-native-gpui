@@ -12,9 +12,15 @@ use once_cell::sync::Lazy;
 use crate::elements::{ReactElement, create_element};
 use crate::style::ElementStyle;
 
-// Scroll offset (in px from the top) per scroll-container id, persisted across the
-// continuous re-render loop so wheel scrolling sticks.
-static SCROLL: Lazy<Mutex<HashMap<u64, f32>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+// Scroll offset per scroll-container id, persisted across the continuous
+// re-render loop so wheel scrolling sticks.
+#[derive(Clone, Copy, Default)]
+struct ScrollOffset {
+    x: f32,
+    y: f32,
+}
+
+static SCROLL: Lazy<Mutex<HashMap<u64, ScrollOffset>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static SCROLL_TO_END: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static ACTIVE_MOUSE_TARGET: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
@@ -22,18 +28,26 @@ static ACTIVE_MOUSE_TARGET: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(N
 #[derive(Clone, Default)]
 pub struct DivPrepaintState {
     hitbox: Option<Hitbox>,
-    max_scroll: f32,
+    max_scroll_x: f32,
+    max_scroll_y: f32,
 }
 
-fn get_scroll(id: u64) -> f32 {
-    SCROLL.lock().unwrap().get(&id).copied().unwrap_or(0.0)
+fn get_scroll(id: u64) -> ScrollOffset {
+    SCROLL.lock().unwrap().get(&id).copied().unwrap_or_default()
 }
-fn set_scroll(id: u64, v: f32) {
+fn set_scroll(id: u64, v: ScrollOffset) {
     SCROLL.lock().unwrap().insert(id, v);
 }
 
-pub fn scroll_to(id: u64, y: f32) {
-    set_scroll(id, y.max(0.0));
+pub fn scroll_to(id: u64, x: Option<f32>, y: Option<f32>) {
+    let current = get_scroll(id);
+    set_scroll(
+        id,
+        ScrollOffset {
+            x: x.unwrap_or(current.x).max(0.0),
+            y: y.unwrap_or(current.y).max(0.0),
+        },
+    );
 }
 
 pub fn scroll_to_end(id: u64) {
@@ -107,15 +121,24 @@ impl ReactDivElement {
     }
 
     /// Total height of children (content), used to clamp scrolling.
-    fn content_height(layout: &[LayoutId], window: &mut Window, top: Pixels) -> Pixels {
+    fn content_size(
+        layout: &[LayoutId],
+        window: &mut Window,
+        left: Pixels,
+        top: Pixels,
+    ) -> (Pixels, Pixels) {
+        let mut right = left;
         let mut bottom = top;
         for lid in layout {
             let b = window.layout_bounds(*lid);
+            if b.right() > right {
+                right = b.right();
+            }
             if b.bottom() > bottom {
                 bottom = b.bottom();
             }
         }
-        (bottom - top).max(px(0.0))
+        ((right - left).max(px(0.0)), (bottom - top).max(px(0.0)))
     }
 }
 
@@ -242,19 +265,29 @@ impl Element for ReactDivElement {
             None
         };
 
-        let mut max_scroll = 0.0;
+        let mut max_scroll_x = 0.0;
+        let mut max_scroll_y = 0.0;
         if scroll {
             // clamp the stored offset to the scrollable range, then shift children up
             // by it (in prepaint, so hit-testing matches what's painted).
-            let content_h = Self::content_height(request_layout, window, bounds.top());
-            max_scroll = (content_h - bounds.size.height).max(px(0.0)).into();
+            let (content_w, content_h) =
+                Self::content_size(request_layout, window, bounds.left(), bounds.top());
+            max_scroll_x = (content_w - bounds.size.width).max(px(0.0)).into();
+            max_scroll_y = (content_h - bounds.size.height).max(px(0.0)).into();
+            let current = get_scroll(self.element.global_id);
             let off = if take_scroll_to_end(self.element.global_id) {
-                max_scroll
+                ScrollOffset {
+                    x: current.x.clamp(0.0, max_scroll_x),
+                    y: max_scroll_y,
+                }
             } else {
-                get_scroll(self.element.global_id).clamp(0.0, max_scroll)
+                ScrollOffset {
+                    x: current.x.clamp(0.0, max_scroll_x),
+                    y: current.y.clamp(0.0, max_scroll_y),
+                }
             };
             set_scroll(self.element.global_id, off);
-            window.with_element_offset(point(px(0.0), px(-off)), |window| {
+            window.with_element_offset(point(px(-off.x), px(-off.y)), |window| {
                 for child in &mut self.children {
                     child.prepaint(window, cx);
                 }
@@ -265,7 +298,11 @@ impl Element for ReactDivElement {
             }
         }
 
-        DivPrepaintState { hitbox, max_scroll }
+        DivPrepaintState {
+            hitbox,
+            max_scroll_x,
+            max_scroll_y,
+        }
     }
 
     fn paint(
@@ -288,7 +325,8 @@ impl Element for ReactDivElement {
         // propagation so an ancestor doesn't also move.
         if scroll {
             let id = self.element.global_id;
-            let max_scroll = prepaint.max_scroll;
+            let max_scroll_x = prepaint.max_scroll_x;
+            let max_scroll_y = prepaint.max_scroll_y;
             let hitbox = prepaint.hitbox.clone();
             window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble
@@ -300,9 +338,16 @@ impl Element for ReactDivElement {
                         ScrollDelta::Lines(p) => p.y * 32.0,
                         ScrollDelta::Pixels(p) => p.y.into(),
                     };
+                    let dx: f32 = match ev.delta {
+                        ScrollDelta::Lines(p) => p.x * 32.0,
+                        ScrollDelta::Pixels(p) => p.x.into(),
+                    };
                     let cur = get_scroll(id);
-                    let next = (cur - dy).clamp(0.0, max_scroll);
-                    if (next - cur).abs() > 0.01 {
+                    let next = ScrollOffset {
+                        x: (cur.x - dx).clamp(0.0, max_scroll_x),
+                        y: (cur.y - dy).clamp(0.0, max_scroll_y),
+                    };
+                    if (next.x - cur.x).abs() > 0.01 || (next.y - cur.y).abs() > 0.01 {
                         set_scroll(id, next);
                         window.refresh(); // on-demand: repaint to reflect the new offset
                         cx.stop_propagation();
@@ -723,5 +768,24 @@ impl IntoElement for ReactDivElement {
     type Element = AnyElement;
     fn into_element(self) -> Self::Element {
         self.into_any()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{get_scroll, scroll_to};
+
+    #[test]
+    fn scroll_to_updates_each_axis_independently() {
+        let id = 900_001;
+        scroll_to(id, Some(42.0), None);
+        let next = get_scroll(id);
+        assert_eq!(next.x, 42.0);
+        assert_eq!(next.y, 0.0);
+
+        scroll_to(id, None, Some(77.0));
+        let next = get_scroll(id);
+        assert_eq!(next.x, 42.0);
+        assert_eq!(next.y, 77.0);
     }
 }

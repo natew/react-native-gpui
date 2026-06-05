@@ -597,11 +597,24 @@ enum AppCommandMenuItem {
 /// command targeting a live `<WebView>` (host → frame: ref.injectJavaScript / reload).
 enum Incoming {
     Tree(Arc<ReactElement>),
-    Eval { id: u64, js: String },
-    Reload { id: u64 },
-    ScrollTo { id: u64, y: f32 },
-    ScrollToEnd { id: u64 },
-    FocusInput { id: u64 },
+    Eval {
+        id: u64,
+        js: String,
+    },
+    Reload {
+        id: u64,
+    },
+    ScrollTo {
+        id: u64,
+        x: Option<f32>,
+        y: Option<f32>,
+    },
+    ScrollToEnd {
+        id: u64,
+    },
+    FocusInput {
+        id: u64,
+    },
     BlurInput,
     AppCommands(AppCommandConfig),
 }
@@ -622,7 +635,8 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
             "reload" => id.map(|id| Incoming::Reload { id }),
             "scrollTo" => id.map(|id| Incoming::ScrollTo {
                 id,
-                y: v.get("y").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32,
+                x: v.get("x").and_then(|x| x.as_f64()).map(|x| x as f32),
+                y: v.get("y").and_then(|x| x.as_f64()).map(|x| x as f32),
             }),
             "scrollToEnd" => id.map(|id| Incoming::ScrollToEnd { id }),
             "focusInput" => id.map(|id| Incoming::FocusInput { id }),
@@ -844,8 +858,8 @@ fn main() {
                                     let _ = view.reload();
                                 }
                             }
-                            Incoming::ScrollTo { id, y } => {
-                                elements::scroll_to(id, y);
+                            Incoming::ScrollTo { id, x, y } => {
+                                elements::scroll_to(id, x, y);
                                 cx.notify();
                             }
                             Incoming::ScrollToEnd { id } => {
@@ -865,4 +879,28 @@ fn main() {
         })
         .detach();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Incoming, parse_incoming};
+    use serde_json::json;
+
+    #[test]
+    fn parses_scroll_to_x_and_y_axes() {
+        let incoming = parse_incoming(&json!({
+            "$cmd": "scrollTo",
+            "id": 7,
+            "x": 42,
+            "y": 13
+        }));
+
+        if let Some(Incoming::ScrollTo { id, x, y }) = incoming {
+            assert_eq!(id, 7);
+            assert_eq!(x, Some(42.0));
+            assert_eq!(y, Some(13.0));
+        } else {
+            panic!("expected scrollTo command");
+        }
+    }
 }

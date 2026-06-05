@@ -13,6 +13,13 @@ export interface Instance {
     type: string;
     props: Record<string, unknown>;
     children: Array<Instance | TextInstance>;
+    measure: (callback: MeasureCallback) => void;
+    measureInWindow: (callback: MeasureInWindowCallback) => void;
+        measureLayout: (
+            relativeToNativeNode: Instance | number | null,
+            onSuccess: (left: number, top: number, width: number, height: number) => void,
+            onFail?: () => void,
+    ) => void;
 }
 export interface TextInstance {
     id: number;
@@ -29,8 +36,14 @@ let commit: ((tree: SerializedNode) => void) | null = null;
 let currentContainer: Container | null = null;
 const hoveredIds = new Set<number>();
 const pressedIds = new Set<number>();
+const measuredIds = new Set<number>();
+const layouts = new Map<number, LayoutRect>();
 const PORTAL_HOST_TYPE = "RNTPortalHostView";
 const PORTAL_VIEW_TYPE = "RNTPortalView";
+
+type LayoutRect = { x: number; y: number; width: number; height: number };
+type MeasureCallback = (x: number, y: number, width: number, height: number, pageX: number, pageY: number) => void;
+type MeasureInWindowCallback = (x: number, y: number, width: number, height: number) => void;
 
 // ── event registry (id → { event: handler }) ────────────────────────
 const PROP_TO_EVENT: Record<string, string> = {
@@ -144,6 +157,17 @@ export function dispatchEvent(
         layout?: unknown;
     },
 ) {
+    if (event === "layout" && payload.layout && typeof payload.layout === "object") {
+        const layout = payload.layout as Partial<LayoutRect>;
+        if (
+            typeof layout.x === "number" &&
+            typeof layout.y === "number" &&
+            typeof layout.width === "number" &&
+            typeof layout.height === "number"
+        ) {
+            layouts.set(id, { x: layout.x, y: layout.y, width: layout.width, height: layout.height });
+        }
+    }
     const fn = handlers.get(id)?.[event];
     if (!fn) return;
     let result: unknown;
@@ -159,6 +183,50 @@ export function dispatchEvent(
             console.error("[react-native-gpui] unhandled event handler rejection", error);
         });
     }
+}
+
+function layoutFor(id: number): LayoutRect {
+    return layouts.get(id) ?? { x: 0, y: 0, width: 0, height: 0 };
+}
+
+function requestMeasuredLayout(id: number) {
+    if (!measuredIds.has(id)) {
+        measuredIds.add(id);
+        requestPseudoCommit();
+    }
+}
+
+function createPublicInstance(type: string, props: Record<string, unknown>): Instance {
+    const id = genId();
+    return {
+        id,
+        type,
+        props,
+        children: [],
+        measure(callback) {
+            requestMeasuredLayout(id);
+            const layout = layoutFor(id);
+            callback(0, 0, layout.width, layout.height, layout.x, layout.y);
+        },
+        measureInWindow(callback) {
+            requestMeasuredLayout(id);
+            const layout = layoutFor(id);
+            callback(layout.x, layout.y, layout.width, layout.height);
+        },
+        measureLayout(relativeToNativeNode, onSuccess, _onFail) {
+            requestMeasuredLayout(id);
+            const relativeId =
+                typeof relativeToNativeNode === "number"
+                    ? relativeToNativeNode
+                    : relativeToNativeNode && typeof relativeToNativeNode.id === "number"
+                      ? relativeToNativeNode.id
+                      : null;
+            if (relativeId != null) requestMeasuredLayout(relativeId);
+            const layout = layoutFor(id);
+            const relative = relativeId == null ? { x: 0, y: 0 } : layouts.get(relativeId);
+            onSuccess(layout.x - (relative?.x ?? 0), layout.y - (relative?.y ?? 0), layout.width, layout.height);
+        },
+    };
 }
 
 function createValueEvent(type: string, value: string) {
@@ -477,7 +545,9 @@ function serialize(inst: Instance | TextInstance, context: PortalContext): Seria
 
     if (Object.keys(style).length) node.style = style;
     const evts = handlers.get(inst.id);
-    if (evts) node.events = Object.keys(evts);
+    const eventNames = evts ? Object.keys(evts) : [];
+    if (measuredIds.has(inst.id) && !eventNames.includes("layout")) eventNames.push("layout");
+    if (eventNames.length) node.events = eventNames;
     const accessibility = serializeAccessibility(inst, node);
     if (accessibility) node.accessibility = accessibility;
 
@@ -536,7 +606,7 @@ const hostConfig: any = {
     scheduleMicrotask: queueMicrotask,
 
     createInstance(type: string, props: Record<string, unknown>): Instance {
-        const inst: Instance = { id: genId(), type, props, children: [] };
+        const inst = createPublicInstance(type, props);
         registerHandlers(inst.id, props);
         return inst;
     },
@@ -591,7 +661,13 @@ const hostConfig: any = {
         container.children = [];
     },
     detachDeletedInstance(inst: Instance) {
-        if (inst && inst.id != null) handlers.delete(inst.id);
+        if (inst && inst.id != null) {
+            handlers.delete(inst.id);
+            hoveredIds.delete(inst.id);
+            pressedIds.delete(inst.id);
+            measuredIds.delete(inst.id);
+            layouts.delete(inst.id);
+        }
     },
     getInstanceFromNode: () => null,
     beforeActiveInstanceBlur: () => {},

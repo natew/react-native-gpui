@@ -148,6 +148,13 @@ pub fn sync_tree(window: &mut Window, root: &Arc<ReactElement>) {
             attach_to_parent(view, parent_view);
         }
 
+        let roots = state
+            .nodes
+            .values()
+            .filter(|node| node.parent_id.is_none())
+            .map(|node| node.view as id)
+            .collect::<Vec<_>>();
+        set_accessibility_children(content_view, &roots);
         post_layout_changed(content_view);
     }
 }
@@ -372,6 +379,7 @@ unsafe fn create_view(node_id: u64) -> id {
     let view: id = msg_send![class, alloc];
     let view: id = msg_send![view, initWithFrame: frame];
     (*view).set_ivar(NODE_ID_IVAR, node_id);
+    let _: () = msg_send![view, setAccessibilityElement: YES];
     let _: () = msg_send![view, setHidden: NO];
     view
 }
@@ -389,6 +397,14 @@ unsafe fn attach_to_parent(view: id, parent: id) {
         }
         let _: () = msg_send![parent, addSubview: view];
     }
+}
+
+unsafe fn set_accessibility_children(view: id, children: &[id]) {
+    let array: id = msg_send![class!(NSMutableArray), arrayWithCapacity: children.len()];
+    for child in children {
+        let _: () = msg_send![array, addObject: *child];
+    }
+    let _: () = msg_send![view, setAccessibilityChildren: array];
 }
 
 unsafe fn post_layout_changed(element: id) {

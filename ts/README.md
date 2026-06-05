@@ -57,6 +57,7 @@ APIs: `StyleSheet`, `Dimensions`, `useWindowDimensions`, `Platform`, `PixelRatio
 - **Real text input** (`TextInput`) is backed by [gpui-component](https://github.com/longbridge/gpui-component)'s editor: selection, IME, copy/paste, word motion, multiline.
 - **Text truncation** follows React Native's `numberOfLines`: one-line labels truncate with ellipsis, and multi-line labels are line-clamped.
 - **Native portals** (`PortalProvider`, `Portal`, `PortalHost`) render overlay content at the matching host during GPUI serialization, so Tamagui Dialog/Popover/Sheet can avoid legacy state-driven portal fallbacks.
+- **RN-style measurement** (`measure`, `measureInWindow`, `measureLayout`) is exposed on host refs. Floating overlay libraries such as Tamagui's Popover/Select can measure trigger and content nodes without app-specific adapters.
 - **RN Animated** runs JS-frame animations through React commits; animated styles resolve to plain GPUI styles each frame.
 - **Styling** matches RN: flexbox (Yoga semantics — `flex:1`, `%`, `auto`), `backgroundColor`, gradients via `backgroundImage`, `boxShadow` / iOS `shadow*` / `elevation`, `borderRadius`, `overflow: scroll`, `opacity`.
 - **`Svg`** renders a monochrome icon tinted by `style.color`.
@@ -111,6 +112,8 @@ npm run typecheck
 ```
 
 Point the runtime at a specific binary with `RNGPUI_SERVICE=/path/to/rngpui-service`.
+Set `RNGPUI_DUMP_TREE=/tmp/tree.json` to write the latest serialized native tree
+for conformance debugging.
 
 ## Examples
 

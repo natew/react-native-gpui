@@ -3,7 +3,7 @@
  * it as newline-delimited JSON over stdin, and parses events back over stdout.
  */
 import { spawn, ChildProcess } from "child_process";
-import { existsSync } from "fs";
+import { existsSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -119,6 +119,9 @@ export function startBridge(initial: SerializedNode): Bridge {
     proc.on("exit", () => process.exit(0));
 
     const writeLine = (obj: object) => {
+        if (process.env.RNGPUI_DUMP_TREE) {
+            writeFileSync(process.env.RNGPUI_DUMP_TREE, JSON.stringify(obj, null, 2));
+        }
         if (proc.stdin && proc.stdin.writable) proc.stdin.write(JSON.stringify(obj) + "\n");
     };
     writeLine(initial);

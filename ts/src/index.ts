@@ -4,6 +4,7 @@
  *
  *   import { View, Text, StyleSheet, AppRegistry } from "react-native-gpui";
  */
+import "./raf";
 
 // render entry points
 export { createRoot, render, AppRegistry, type Root, type RootOptions } from "./render";

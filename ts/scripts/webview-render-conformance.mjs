@@ -120,7 +120,7 @@ function captureWindow(window, path) {
         ],
         { stdio: "pipe" },
     );
-    if (!existsSync(path)) throw new Error(`screencapture did not write ${path}`);
+    waitForReadableImage(path);
 }
 
 function clockCrop(path) {
@@ -138,6 +138,22 @@ function imageSize(path) {
     const height = /pixelHeight: (\d+)/.exec(raw)?.[1];
     if (!width || !height) throw new Error(`could not read image size for ${path}`);
     return { width: Number(width), height: Number(height) };
+}
+
+function waitForReadableImage(path) {
+    let lastError = "";
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+        if (existsSync(path)) {
+            try {
+                imageSize(path);
+                return;
+            } catch (error) {
+                lastError = error instanceof Error ? error.message : String(error);
+            }
+        }
+        execFileSync("sleep", ["0.1"]);
+    }
+    throw new Error(`screenshot was not readable at ${path}${lastError ? `: ${lastError}` : ""}`);
 }
 
 async function waitForOutput(needle, timeoutMs) {

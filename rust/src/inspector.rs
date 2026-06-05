@@ -659,6 +659,8 @@ mod tests {
             events: Vec::new(),
             native_layout_key: None,
             native_resize: None,
+            terminal_session_id: None,
+            terminal_frames: Vec::new(),
             accessibility: AccessibilityInfo::default(),
             children,
             style: ElementStyle::default(),

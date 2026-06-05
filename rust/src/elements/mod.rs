@@ -2,6 +2,7 @@ mod div;
 mod image;
 pub mod input;
 mod svg;
+mod terminal;
 mod text;
 pub mod webview;
 
@@ -12,6 +13,7 @@ pub use div::{
 pub use image::ReactImageElement;
 pub use input::ReactInputElement;
 pub use svg::ReactSvgElement;
+pub use terminal::ReactGhosttyTerminalElement;
 pub use text::ReactTextElement;
 pub use webview::ReactWebViewElement;
 
@@ -74,6 +76,23 @@ pub struct NativeResizeSpec {
     pub max: Option<f32>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalFrameKind {
+    Snapshot,
+    Bytes,
+    Resize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalFrame {
+    pub seq: u64,
+    pub kind: TerminalFrameKind,
+    /// base64-encoded PTY bytes for snapshot/bytes frames.
+    pub data: Option<String>,
+    pub cols: Option<u16>,
+    pub rows: Option<u16>,
+}
+
 /// The core element struct that represents a node in the element tree.
 #[derive(Clone)]
 pub struct ReactElement {
@@ -98,6 +117,10 @@ pub struct ReactElement {
     pub native_layout_key: Option<String>,
     /// native-only resize gesture applied to a keyed layout target.
     pub native_resize: Option<NativeResizeSpec>,
+    /// native terminal session key; changing it resets the Ghostty parser.
+    pub terminal_session_id: Option<String>,
+    /// ordered daemon terminal frames consumed by the native Ghostty parser.
+    pub terminal_frames: Vec<TerminalFrame>,
     pub accessibility: AccessibilityInfo,
     pub children: Vec<Arc<ReactElement>>,
     pub style: ElementStyle,
@@ -153,6 +176,9 @@ pub fn create_element(
         "svg" => ReactSvgElement::new(element, window_id, parent_style).into_any_element(),
         "image" => ReactImageElement::new(element, window_id, parent_style).into_any_element(),
         "webview" => ReactWebViewElement::new(element).into_any_element(),
+        "ghostty-terminal" => {
+            ReactGhosttyTerminalElement::new(element, window_id).into_any_element()
+        }
         "textinput" | "textarea" => {
             ReactInputElement::new(element, window_id, parent_style).into_any_element()
         }

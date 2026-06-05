@@ -14,6 +14,7 @@ import {
     type FC,
 } from "react";
 import { sendCommand } from "./commands";
+import type { SerializedTerminalFrame } from "./runtime";
 import type {
     ViewProps,
     TextStyle,
@@ -167,6 +168,19 @@ export const WebView = forwardRef<WebViewHandle, WebViewProps>(function WebView(
         [],
     );
     return createElement("WebView" as any, { ...props, ref: host });
+});
+
+export type GhosttyTerminalFrame = SerializedTerminalFrame;
+
+export interface GhosttyTerminalProps extends AccessibilityProps {
+    style?: StyleProp<ViewStyle>;
+    sessionId?: string;
+    frames?: GhosttyTerminalFrame[];
+    onLayout?: (event: LayoutChangeEvent) => void;
+}
+
+export const GhosttyTerminal = forwardRef<unknown, GhosttyTerminalProps>(function GhosttyTerminal(props, ref) {
+    return createElement("GhosttyTerminal" as any, { ...props, ref });
 });
 
 // ── ScrollView ──────────────────────────────────────────────────────

@@ -38,7 +38,7 @@ mod style;
 
 use elements::webview::WebViewContent;
 use elements::{AccessibilityInfo, ReactElement, create_element};
-use elements::{NativeResizeEdge, NativeResizeSpec};
+use elements::{NativeResizeEdge, NativeResizeSpec, TerminalFrame, TerminalFrameKind};
 use raw_window_handle::HasWindowHandle;
 use style::{Dim, ElementStyle};
 
@@ -111,6 +111,16 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         .filter(|s| !s.is_empty())
         .map(String::from);
     let native_resize = obj.get("nativeResize").and_then(parse_native_resize);
+    let terminal_session_id = obj
+        .get("terminalSessionId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let terminal_frames = obj
+        .get("terminalFrames")
+        .and_then(|v| v.as_array())
+        .map(|frames| frames.iter().filter_map(parse_terminal_frame).collect())
+        .unwrap_or_default();
     let style = obj
         .get("style")
         .map(ElementStyle::from_json)
@@ -161,11 +171,49 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         events,
         native_layout_key,
         native_resize,
+        terminal_session_id,
+        terminal_frames,
         accessibility,
         children,
         style,
         cached_gpui_style: None,
     }))
+}
+
+fn parse_terminal_frame(value: &serde_json::Value) -> Option<TerminalFrame> {
+    let obj = value.as_object()?;
+    let seq = obj.get("seq")?.as_u64()?;
+    if seq == 0 {
+        return None;
+    }
+    let kind = match obj.get("kind")?.as_str()? {
+        "snapshot" => TerminalFrameKind::Snapshot,
+        "bytes" => TerminalFrameKind::Bytes,
+        "resize" => TerminalFrameKind::Resize,
+        _ => return None,
+    };
+    let data = obj
+        .get("data")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let cols = obj
+        .get("cols")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok())
+        .filter(|v| *v > 0);
+    let rows = obj
+        .get("rows")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok())
+        .filter(|v| *v > 0);
+    Some(TerminalFrame {
+        seq,
+        kind,
+        data,
+        cols,
+        rows,
+    })
 }
 
 fn parse_native_resize(value: &serde_json::Value) -> Option<NativeResizeSpec> {
@@ -681,6 +729,8 @@ fn fallback_root() -> Arc<ReactElement> {
         events: Vec::new(),
         native_layout_key: None,
         native_resize: None,
+        terminal_session_id: None,
+        terminal_frames: Vec::new(),
         accessibility: AccessibilityInfo::default(),
         children: vec![],
         style: ElementStyle {

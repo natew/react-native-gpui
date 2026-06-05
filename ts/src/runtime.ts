@@ -28,6 +28,18 @@ export type SerializedNode = {
     nativeLayoutKey?: string;
     /** native-only resize gesture, applied to a keyed native layout target */
     nativeResize?: SerializedNativeResize;
+    /** native terminal session key; changing it resets the native Ghostty parser */
+    terminalSessionId?: string;
+    /** ordered terminal frames consumed by the native Ghostty terminal element */
+    terminalFrames?: SerializedTerminalFrame[];
+};
+
+export type SerializedTerminalFrame = {
+    seq: number;
+    kind: "snapshot" | "bytes" | "resize";
+    data?: string;
+    cols?: number;
+    rows?: number;
 };
 
 export type SerializedNativeResize = {

@@ -19,8 +19,8 @@
     ],
     "scripts": {
         "build": "npm run build:rust && npm run build:native && npm run build:ts",
-        "build:rust": "cd ../rust && cargo build --release --bin rngpui-service",
-        "build:native": "mkdir -p native && cp ../rust/target/release/rngpui-service native/rngpui-service",
+        "build:rust": "cd ../rust && PATH=/opt/homebrew/opt/zig@0.15/bin:$PATH cargo build --release --bin rngpui-service",
+        "build:native": "node scripts/build-native.mjs",
         "build:clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
         "build:types": "tsc --emitDeclarationOnly",
         "build:bundle": "bun build src/index.ts --outfile dist/index.js --target node --format esm --external react --external react/jsx-runtime --external react/jsx-dev-runtime",

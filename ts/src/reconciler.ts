@@ -683,6 +683,14 @@ function serialize(inst: Instance | TextInstance, context: PortalContext): Seria
             if (src?.html) node.text = src.html;
             break;
         }
+        case "GhosttyTerminal": {
+            node.type = "ghostty-terminal";
+            const sessionId = stringProp(props, "sessionId");
+            if (sessionId) node.terminalSessionId = sessionId;
+            const frames = normalizeTerminalFrames(props.frames);
+            if (frames.length) node.terminalFrames = frames;
+            break;
+        }
         case "ScrollView":
             node.type = "div";
             if (style.overflow === undefined) style.overflow = "scroll";
@@ -733,6 +741,33 @@ function normalizeNativeResize(value: unknown): SerializedNode["nativeResize"] |
     const out: NonNullable<SerializedNode["nativeResize"]> = { target, edge };
     if (typeof spec.min === "number") out.min = spec.min;
     if (typeof spec.max === "number") out.max = spec.max;
+    return out;
+}
+
+function normalizeTerminalFrames(value: unknown): NonNullable<SerializedNode["terminalFrames"]> {
+    if (!Array.isArray(value)) return [];
+    const out: NonNullable<SerializedNode["terminalFrames"]> = [];
+    for (const frame of value) {
+        if (!frame || typeof frame !== "object") continue;
+        const typed = frame as {
+            seq?: unknown;
+            kind?: unknown;
+            data?: unknown;
+            cols?: unknown;
+            rows?: unknown;
+        };
+        const seq = typeof typed.seq === "number" && Number.isFinite(typed.seq) ? Math.floor(typed.seq) : 0;
+        if (seq <= 0) continue;
+        if (typed.kind !== "snapshot" && typed.kind !== "bytes" && typed.kind !== "resize") continue;
+        const next: NonNullable<SerializedNode["terminalFrames"]>[number] = {
+            seq,
+            kind: typed.kind,
+        };
+        if (typeof typed.data === "string") next.data = typed.data;
+        if (typeof typed.cols === "number" && Number.isFinite(typed.cols)) next.cols = Math.max(1, Math.floor(typed.cols));
+        if (typeof typed.rows === "number" && Number.isFinite(typed.rows)) next.rows = Math.max(1, Math.floor(typed.rows));
+        out.push(next);
+    }
     return out;
 }
 

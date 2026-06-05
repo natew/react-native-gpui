@@ -149,6 +149,9 @@ fn apply_layout_style(mut el: gpui::Div, style: &ElementStyle) -> gpui::Div {
 fn apply_line_limit(el: gpui::Div, number_of_lines: Option<usize>) -> gpui::Div {
     match number_of_lines {
         Some(1) => el.truncate(),
+        // gpui line_clamp is the multi-line truncation primitive; chaining
+        // text_ellipsis() here switches to single-line overflow behavior and
+        // collapses wrapped title widths.
         Some(lines) => el.overflow_hidden().line_clamp(lines),
         None => el,
     }

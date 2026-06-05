@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = process.argv[2] || "/tmp/rngpui-animation-conformance";
 const holdMs = 1800;
-const durationMs = 3200;
+const durationMs = 10000;
 const expectedWidth = 404;
 const expectedHeight = 180;
 
@@ -140,10 +140,10 @@ try {
     await sleep(220);
     captureWindow(windowId, beforePath);
 
-    const midFrame = await waitForTreeFrame({ minLeft: 90, maxLeft: 190, timeoutMs: 6000 });
+    const midFrame = await waitForTreeFrame({ minLeft: 90, maxLeft: 140, timeoutMs: 12000 });
     captureWindow(windowId, midPath);
 
-    await waitForOutput("CONFORMANCE animation PASS", 6000);
+    await waitForOutput("CONFORMANCE animation PASS", 12000);
     await sleep(160);
     captureWindow(windowId, afterPath);
 

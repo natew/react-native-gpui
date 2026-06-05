@@ -176,6 +176,7 @@ export interface GhosttyTerminalProps extends AccessibilityProps {
     style?: StyleProp<ViewStyle>;
     sessionId?: string;
     frames?: GhosttyTerminalFrame[];
+    onKeyPress?: (event: unknown) => void;
     onLayout?: (event: LayoutChangeEvent) => void;
 }
 

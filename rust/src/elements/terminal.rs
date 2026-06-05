@@ -7,8 +7,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use gpui::{
     App, Bounds, Display, Element, ElementId, FontStyle, FontWeight, GlobalElementId,
-    HighlightStyle, Hsla, IntoElement, LayoutId, ParentElement as _, Pixels, StrikethroughStyle,
-    Styled as _, StyledText, UnderlineStyle, Window, div, px, rgba,
+    HighlightStyle, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, LayoutId,
+    MouseButton, MouseDownEvent, ParentElement as _, Pixels, StrikethroughStyle, Styled as _,
+    StyledText, UnderlineStyle, Window, div, px, rgba,
 };
 use libghostty_vt::render::{CellIterator, RowIterator};
 use libghostty_vt::style::{RgbColor, Underline};
@@ -20,6 +21,7 @@ use crate::elements::{
 
 thread_local! {
     static TERMINALS: RefCell<HashMap<u64, TerminalState>> = RefCell::new(HashMap::new());
+    static TERMINAL_FOCUS: RefCell<HashMap<u64, gpui::FocusHandle>> = RefCell::new(HashMap::new());
 }
 
 pub struct ReactGhosttyTerminalElement {
@@ -37,7 +39,7 @@ impl ReactGhosttyTerminalElement {
         }
     }
 
-    fn build_child(&self, window: &mut Window) -> gpui::AnyElement {
+    fn build_child(&self, window: &mut Window, cx: &mut App) -> gpui::AnyElement {
         let rows = terminal_rows(&self.element);
         let style = &self.element.style;
         let font_size = style.font_size.unwrap_or(12.0);
@@ -47,6 +49,10 @@ impl ReactGhosttyTerminalElement {
         let background = style
             .background_color
             .unwrap_or_else(|| color_from_hex(0x050507));
+        let focus_handle = terminal_focus_handle(self.element.global_id, cx);
+        let click_focus_handle = focus_handle.clone();
+        let listens_key_press = self.element.listens("keyPress");
+        let element_id = self.element.global_id;
 
         let mut root = div()
             .size_full()
@@ -54,7 +60,28 @@ impl ReactGhosttyTerminalElement {
             .flex_col()
             .overflow_hidden()
             .bg(background)
-            .p(px(10.0));
+            .p(px(10.0))
+            .track_focus(&focus_handle)
+            .on_mouse_down(
+                MouseButton::Left,
+                move |_: &MouseDownEvent, window: &mut Window, _: &mut App| {
+                    click_focus_handle.focus(window);
+                },
+            )
+            .on_key_down(move |event: &KeyDownEvent, _: &mut Window, cx: &mut App| {
+                if !listens_key_press || event.keystroke.modifiers.platform {
+                    return;
+                }
+                crate::bridge::key_press(
+                    element_id,
+                    &js_key(&event.keystroke),
+                    event.keystroke.modifiers.shift,
+                    event.keystroke.modifiers.control,
+                    event.keystroke.modifiers.alt,
+                    event.keystroke.modifiers.platform,
+                );
+                cx.stop_propagation();
+            });
 
         if rows.is_empty() {
             return root
@@ -145,7 +172,7 @@ impl Element for ReactGhosttyTerminalElement {
             return (window.request_layout(style, [], cx), ());
         }
 
-        let mut child = self.build_child(window);
+        let mut child = self.build_child(window, cx);
         let child_layout = child.request_layout(window, cx);
         let layout_id = window.request_layout(style, std::iter::once(child_layout), cx);
         self.child = Some(child);
@@ -407,6 +434,46 @@ impl TerminalState {
     }
 }
 
+fn terminal_focus_handle(id: u64, cx: &mut App) -> gpui::FocusHandle {
+    TERMINAL_FOCUS.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        handles
+            .entry(id)
+            .or_insert_with(|| cx.focus_handle().tab_index(0).tab_stop(true))
+            .clone()
+    })
+}
+
+fn js_key(keystroke: &gpui::Keystroke) -> String {
+    if keystroke.key == "enter" || keystroke.key_char.as_deref() == Some("\n") {
+        "Enter".to_string()
+    } else {
+        keystroke
+            .key_char
+            .clone()
+            .unwrap_or_else(|| js_named_key(&keystroke.key))
+    }
+}
+
+fn js_named_key(key: &str) -> String {
+    match key {
+        "escape" => "Escape",
+        "tab" => "Tab",
+        "backspace" => "Backspace",
+        "delete" => "Delete",
+        "up" => "ArrowUp",
+        "down" => "ArrowDown",
+        "left" => "ArrowLeft",
+        "right" => "ArrowRight",
+        "home" => "Home",
+        "end" => "End",
+        "pageup" => "PageUp",
+        "pagedown" => "PageDown",
+        other => other,
+    }
+    .to_string()
+}
+
 fn decode_frame(frame: &TerminalFrame) -> Option<Vec<u8>> {
     frame
         .data
@@ -422,4 +489,25 @@ fn rgb_color(color: RgbColor) -> Hsla {
 
 fn color_from_hex(color: u32) -> Hsla {
     Hsla::from(rgba((color << 8) | 0xff))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::js_named_key;
+
+    #[test]
+    fn maps_gpui_navigation_keys_to_js_names() {
+        assert_eq!(js_named_key("escape"), "Escape");
+        assert_eq!(js_named_key("tab"), "Tab");
+        assert_eq!(js_named_key("backspace"), "Backspace");
+        assert_eq!(js_named_key("delete"), "Delete");
+        assert_eq!(js_named_key("up"), "ArrowUp");
+        assert_eq!(js_named_key("down"), "ArrowDown");
+        assert_eq!(js_named_key("left"), "ArrowLeft");
+        assert_eq!(js_named_key("right"), "ArrowRight");
+        assert_eq!(js_named_key("home"), "Home");
+        assert_eq!(js_named_key("end"), "End");
+        assert_eq!(js_named_key("pageup"), "PageUp");
+        assert_eq!(js_named_key("pagedown"), "PageDown");
+    }
 }

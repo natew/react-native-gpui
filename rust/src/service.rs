@@ -397,6 +397,7 @@ impl Render for ServiceApp {
         if Theme::global(cx).mode != theme_mode {
             Theme::change(theme_mode, Some(window), cx);
         }
+        Theme::global_mut(cx).background = gpui::Hsla::transparent_black();
 
         // Emit a `resize` event whenever the content size changes, so the JS side
         // can update Dimensions and re-render. Bridges RN's Dimensions API.
@@ -629,7 +630,6 @@ fn fallback_root() -> Arc<ReactElement> {
         style: ElementStyle {
             width: Some(Dim::Px(720.0)),
             height: Some(Dim::Px(800.0)),
-            background_color: Some(crate::style::u32_to_hsla(0xe9e9ec)),
             flex_direction: Some("column".to_string()),
             ..Default::default()
         },
@@ -837,6 +837,7 @@ fn main() {
         // sets up gpui-component's theme + the input key bindings (backspace,
         // arrows, select-all, copy/paste, word-motion, …) used by InputState.
         gpui_component::init(cx);
+        Theme::global_mut(cx).background = gpui::Hsla::transparent_black();
         // React Native multiline TextInput uses shift+enter for a newline when
         // plain enter submits. gpui-component only binds platform-secondary+enter.
         cx.bind_keys([KeyBinding::new(

@@ -5,7 +5,7 @@ use cocoa::appkit::{
     NSView, NSViewHeightSizable, NSViewWidthSizable, NSVisualEffectBlendingMode,
     NSVisualEffectMaterial, NSVisualEffectState,
 };
-use cocoa::base::{id, nil, YES};
+use cocoa::base::{NO, YES, id, nil};
 use cocoa::foundation::NSRect;
 use gpui::Window;
 use objc::runtime::{BOOL, Class, Object, Sel};
@@ -14,7 +14,7 @@ use once_cell::sync::Lazy;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 const NS_WINDOW_BELOW: i64 = -1;
-const GLASS_VARIANT_CONTROL: i64 = 19;
+const GLASS_VARIANT_CLEAR: i64 = 1;
 
 static INSTALLED_CONTENT_VIEWS: Lazy<Mutex<HashSet<usize>>> =
     Lazy::new(|| Mutex::new(HashSet::new()));
@@ -35,6 +35,8 @@ pub fn install(window: &mut Window) {
             return;
         }
 
+        configure_transparent_window(ns_window, content_view, ns_view);
+
         let key = content_view as usize;
         if !remember_content_view(key) {
             return;
@@ -54,6 +56,42 @@ pub fn install(window: &mut Window) {
             relativeTo: nil
         ];
     }
+}
+
+unsafe fn configure_transparent_window(ns_window: id, content_view: id, ns_view: id) {
+    let clear_color: id = msg_send![class!(NSColor), clearColor];
+
+    if ns_window != nil {
+        let _: () = msg_send![ns_window, setOpaque: NO];
+        let _: () = msg_send![ns_window, setBackgroundColor: clear_color];
+        let _: () = msg_send![ns_window, setHasShadow: YES];
+        let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: YES];
+    }
+
+    unsafe {
+        configure_transparent_view(content_view, clear_color);
+    }
+    if ns_view != content_view {
+        unsafe {
+            configure_transparent_view(ns_view, clear_color);
+        }
+    }
+}
+
+unsafe fn configure_transparent_view(view: id, clear_color: id) {
+    if view == nil {
+        return;
+    }
+
+    let _: () = msg_send![view, setWantsLayer: YES];
+    let layer: id = msg_send![view, layer];
+    if layer == nil {
+        return;
+    }
+
+    let clear_cg_color: id = msg_send![clear_color, CGColor];
+    let _: () = msg_send![layer, setOpaque: NO];
+    let _: () = msg_send![layer, setBackgroundColor: clear_cg_color];
 }
 
 fn raw_ns_view(window: &mut Window) -> Option<id> {
@@ -83,7 +121,7 @@ unsafe fn create_glass_view(bounds: NSRect) -> id {
         let glass: id = msg_send![glass, initWithFrame: bounds];
         unsafe {
             configure_common_view(glass);
-            set_i64_property(glass, "variant", GLASS_VARIANT_CONTROL);
+            set_i64_property(glass, "variant", GLASS_VARIANT_CLEAR);
         }
         return glass;
     }

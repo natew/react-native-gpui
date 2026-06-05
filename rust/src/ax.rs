@@ -801,7 +801,11 @@ mod tests {
 
     #[test]
     fn unlabeled_svg_is_decorative_for_accessibility() {
-        let svg = element("svg", Some("<svg><path /></svg>"), AccessibilityInfo::default());
+        let svg = element(
+            "svg",
+            Some("<svg><path /></svg>"),
+            AccessibilityInfo::default(),
+        );
 
         assert!(!ax_is_element(&svg));
         assert_eq!(ax_label(&svg), None);

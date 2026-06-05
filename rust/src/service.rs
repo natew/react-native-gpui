@@ -8,8 +8,9 @@ use std::rc::Rc;
 
 use gpui::{
     App, AppContext, Bounds, Context, Entity, InteractiveElement as _, IntoElement, KeyBinding,
-    Menu, MenuItem, ParentElement, Render, Styled, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, actions, point, px, size,
+    Menu, MenuItem, ModifiersChangedEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement, Render, Styled, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
+    point, px, size,
 };
 use gpui_component::input::{Enter, InputEvent, InputState, Position};
 use gpui_component::theme::{Theme, ThemeMode};
@@ -28,6 +29,7 @@ mod ax;
 mod bridge;
 mod elements;
 mod icons;
+mod inspector;
 #[cfg(target_os = "macos")]
 mod liquid_glass;
 mod style;
@@ -254,6 +256,7 @@ struct ServiceApp {
     suppressed_input_changes: HashMap<u64, VecDeque<String>>,
     // persistent native WebView, one per <WebView> id.
     webviews: HashMap<u64, Rc<wry::WebView>>,
+    inspector: inspector::InspectorState,
 }
 
 type InputSpec = (u64, String, Option<String>, bool, bool);
@@ -545,18 +548,27 @@ impl Render for ServiceApp {
             );
             let view = self.webviews.entry(id).or_insert_with(|| {
                 let dbg = std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok();
+                let inspector_enabled = self.inspector.enabled();
+                let initialization_script = if inspector_enabled {
+                    format!("{RN_WEBVIEW_SHIM}\n{}", inspector::WEBVIEW_INSPECTOR_SCRIPT)
+                } else {
+                    RN_WEBVIEW_SHIM.to_string()
+                };
                 let window_handle = window.window_handle().expect("No window handle");
                 let wv = wry::WebViewBuilder::new()
                     .with_transparent(false)
                     // RN-compatible bridge so page code can talk to the host:
                     // window.ReactNativeWebView.postMessage(d) → the node's onMessage.
-                    .with_initialization_script(RN_WEBVIEW_SHIM)
+                    .with_initialization_script(initialization_script)
                     // page → host: forward every posted message to the JS side, where
                     // it's dispatched to the node's onMessage handler by id.
                     .with_ipc_handler(move |req| {
                         let body = req.body();
                         if dbg {
                             eprintln!("[webview {id}] message: {body}");
+                        }
+                        if inspector_enabled && inspector::handle_webview_ipc(id, body) {
+                            return;
                         }
                         bridge::webview_message(id, body);
                     })
@@ -578,6 +590,9 @@ impl Render for ServiceApp {
             let _ = view.set_visible(true);
         }
         elements::webview::set_webviews(self.webviews.clone(), webview_content);
+        if self.inspector.enabled() {
+            inspector::refresh_snapshot_cache(&self.root);
+        }
 
         // GC layout-dedup state for nodes that left the tree.
         let mut node_ids = HashSet::new();
@@ -595,15 +610,58 @@ impl Render for ServiceApp {
         ax::sync_tree(window, &self.root);
 
         let root = create_element(self.root.clone(), 0, None);
-        gpui::div()
+        let mut frame = gpui::div()
             .size_full()
             .flex()
             .flex_col()
             .on_action(|action: &InvokeCommand, _window, _cx| {
                 bridge::command(&action.id);
             })
-            .child(root)
-            .into_any_element()
+            .child(root);
+
+        if self.inspector.enabled() {
+            frame = frame
+                .on_modifiers_changed(cx.listener(
+                    |this, event: &ModifiersChangedEvent, window, cx| {
+                        let root = this.root.clone();
+                        if this.inspector.handle_modifiers(
+                            &root,
+                            window.mouse_position(),
+                            event.modifiers,
+                        ) {
+                            cx.notify();
+                            window.refresh();
+                        }
+                    },
+                ))
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                    let root = this.root.clone();
+                    if this.inspector.handle_mouse_move(&root, event) {
+                        cx.notify();
+                        window.refresh();
+                    }
+                }))
+                .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    let root = this.root.clone();
+                    if this.inspector.handle_mouse_down(&root, event, cx) {
+                        cx.stop_propagation();
+                        cx.notify();
+                        window.refresh();
+                    }
+                }))
+                .capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    if this.inspector.handle_mouse_up(event) {
+                        cx.stop_propagation();
+                        cx.notify();
+                        window.refresh();
+                    }
+                }));
+            if let Some(overlay) = self.inspector.overlay() {
+                frame = frame.child(overlay);
+            }
+        }
+
+        frame.into_any_element()
     }
 }
 
@@ -875,6 +933,7 @@ fn main() {
             input_secure: HashMap::new(),
             suppressed_input_changes: HashMap::new(),
             webviews: HashMap::new(),
+            inspector: inspector::InspectorState::from_env(),
         });
 
         let options = WindowOptions {

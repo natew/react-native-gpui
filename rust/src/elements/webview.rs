@@ -132,6 +132,13 @@ impl Element for ReactWebViewElement {
         #[cfg(target_os = "macos")]
         crate::ax::update_frame(window, &self.element, bounds);
         report_layout(&self.element, bounds);
+        crate::inspector::refresh_layout_snapshot(
+            self.element.global_id,
+            bounds.origin.x.into(),
+            bounds.origin.y.into(),
+            bounds.size.width.into(),
+            bounds.size.height.into(),
+        );
 
         // reserve the webview's rect for gpui hit-testing. insert_hitbox must run in
         // prepaint (gpui asserts the phase — in release the assert is compiled out,

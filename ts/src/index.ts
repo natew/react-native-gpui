@@ -7,7 +7,7 @@
 import "./raf";
 
 // render entry points
-export { createRoot, render, AppRegistry, type Root, type RootOptions } from "./render";
+export { createRoot, render, AppRegistry, type Root, type RootOptions, type DevtoolsOptions } from "./render";
 
 // components
 export {
@@ -127,4 +127,4 @@ export {
 } from "./portal";
 
 // low-level bridge (escape hatch)
-export { startBridge, type Bridge, type BridgeEvent, type SerializedNode } from "./runtime";
+export { startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type SerializedNode } from "./runtime";

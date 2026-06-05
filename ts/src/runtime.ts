@@ -82,6 +82,11 @@ export interface Bridge {
     close(): void;
 }
 
+export interface BridgeOptions {
+    /** Enables the native Option-key element inspector in the service process. */
+    inspector?: boolean;
+}
+
 function findServiceBinary(): string {
     // explicit override wins
     const env = process.env.RNGPUI_SERVICE;
@@ -100,13 +105,15 @@ function findServiceBinary(): string {
     return candidates[0];
 }
 
-export function startBridge(initial: SerializedNode): Bridge {
+export function startBridge(initial: SerializedNode, options: BridgeOptions = {}): Bridge {
     const bin = findServiceBinary();
     if (!existsSync(bin)) {
         throw new Error(`rngpui-service not found at ${bin}. Build: cd rust && cargo build --release --bin rngpui-service`);
     }
 
-    const proc: ChildProcess = spawn(bin, [], { stdio: ["pipe", "pipe", "pipe"] });
+    const env = { ...process.env };
+    if (options.inspector) env.RNGPUI_INSPECTOR = "1";
+    const proc: ChildProcess = spawn(bin, [], { stdio: ["pipe", "pipe", "pipe"], env });
     const listeners: Array<(e: BridgeEvent) => void> = [];
 
     if (proc.stdout) {

@@ -5,14 +5,21 @@
  */
 import { createElement, type ReactElement, type ComponentType } from "react";
 import Reconciler, { setCommitSink, serializeContainer, dispatchEvent, type Container } from "./reconciler";
-import { startBridge, type Bridge, type BridgeEvent, type SerializedNode } from "./runtime";
+import { startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type SerializedNode } from "./runtime";
 import { AppCommands, setCommandSink } from "./commands";
 import { Dimensions } from "./Dimensions";
+
+export type DevtoolsOptions = {
+    /** hold Option to inspect native GPUI nodes; Option-click copies a node snapshot. */
+    inspector?: boolean;
+};
 
 export interface RootOptions {
     /** initial window size; defaults to the current Dimensions window */
     width?: number;
     height?: number;
+    /** optional native development tools for this root */
+    devtools?: boolean | DevtoolsOptions;
 }
 
 export interface Root {
@@ -35,6 +42,9 @@ export function createRoot(options: RootOptions = {}): Root {
     };
 
     let bridge: Bridge | null = null;
+    const bridgeOptions: BridgeOptions = {
+        inspector: options.devtools === true || (typeof options.devtools === "object" && options.devtools.inspector === true),
+    };
 
     const handleEvent = (e: BridgeEvent) => {
         if (e.type === "ready" || e.type === "resize") {
@@ -70,7 +80,7 @@ export function createRoot(options: RootOptions = {}): Root {
     // The reconciler calls this after every commit with the serialized tree.
     setCommitSink((tree: SerializedNode) => {
         if (!bridge) {
-            bridge = startBridge(tree);
+            bridge = startBridge(tree, bridgeOptions);
             bridge.onEvent(handleEvent);
         } else {
             bridge.update(tree);

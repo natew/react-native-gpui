@@ -63,6 +63,19 @@ APIs: `StyleSheet`, `Dimensions`, `useWindowDimensions`, `Platform`, `PixelRatio
 - **Styling** matches RN: flexbox (Yoga semantics — `flex:1`, `%`, `auto`), `backgroundColor`, gradients via `backgroundImage`, `boxShadow` / iOS `shadow*` / `elevation`, `borderRadius`, `overflow: scroll`, `opacity`.
 - **`Svg`** renders a monochrome icon tinted by `style.color`.
 
+## Native inspector
+
+Enable the GPUI node inspector for any root:
+
+```tsx
+render(<App />, { devtools: { inspector: true } })
+```
+
+or set `RNGPUI_INSPECTOR=1` before launching. Hold Option while the window is
+focused to highlight the native node under the pointer. Option-click copies a
+compact snapshot with node id/type, bounds, event names, accessibility metadata,
+text/value snippets, style facts, and the ancestor chain.
+
 ## The WebView hybrid
 
 ```tsx
@@ -115,6 +128,7 @@ npm run typecheck
 Point the runtime at a specific binary with `RNGPUI_SERVICE=/path/to/rngpui-service`.
 Set `RNGPUI_DUMP_TREE=/tmp/tree.json` to write the latest serialized native tree
 for conformance debugging.
+Set `RNGPUI_INSPECTOR=1` to force-enable the native inspector for any app.
 
 ## Examples
 

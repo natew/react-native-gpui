@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Bounds, Element, ElementId, Entity, GlobalElementId, InteractiveElement as _,
-    IntoElement, KeyDownEvent, LayoutId, ParentElement as _, Pixels, Styled, Window, div,
+    AnyElement, App, Bounds, Display, Element, ElementId, Entity, GlobalElementId,
+    InteractiveElement as _, IntoElement, KeyDownEvent, LayoutId, ParentElement as _, Pixels,
+    Styled, Window, div,
 };
 use gpui_component::input::{Input, InputState};
 
@@ -138,13 +139,16 @@ impl Element for ReactInputElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, LayoutId) {
+        let style = self.element.build_gpui_style(None);
+        if style.display == Display::None {
+            self.child = None;
+            let layout_id = window.request_layout(style, [], cx);
+            return (layout_id, layout_id);
+        }
+
         let mut child = self.build_child();
         let child_layout_id = child.request_layout(window, cx);
-        let layout_id = window.request_layout(
-            self.element.build_gpui_style(None),
-            std::iter::once(child_layout_id),
-            cx,
-        );
+        let layout_id = window.request_layout(style, std::iter::once(child_layout_id), cx);
         self.child = Some(child);
         (layout_id, child_layout_id)
     }
@@ -158,6 +162,10 @@ impl Element for ReactInputElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        if self.element.style.is_display_none() {
+            return;
+        }
+
         #[cfg(target_os = "macos")]
         crate::ax::update_frame(window, &self.element, bounds);
         report_layout(&self.element, bounds);
@@ -177,6 +185,10 @@ impl Element for ReactInputElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        if self.element.style.is_display_none() {
+            return;
+        }
+
         if let Some(child) = self.child.as_mut() {
             child.paint(window, cx);
         }

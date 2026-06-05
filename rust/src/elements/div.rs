@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    AnyElement, App, Bounds, ContentMask, DispatchPhase, Element, ElementId, GlobalElementId,
-    Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, Modifiers, MouseButton, MouseDownEvent,
-    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent,
-    Window, div, point, prelude::*, px,
+    AnyElement, App, Bounds, ContentMask, DispatchPhase, Display, Element, ElementId,
+    GlobalElementId, Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, Modifiers, MouseButton,
+    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta,
+    ScrollWheelEvent, Window, div, point, prelude::*, px,
 };
 use once_cell::sync::Lazy;
 
@@ -164,6 +164,12 @@ impl Element for ReactDivElement {
         let style = self.element.build_gpui_style(None);
         let inherited = self.element.style.clone();
 
+        if style.display == Display::None {
+            self.children.clear();
+            let layout_id = window.request_layout(style, [], cx);
+            return (layout_id, Vec::new());
+        }
+
         // Build children
         self.children = self
             .element
@@ -216,6 +222,10 @@ impl Element for ReactDivElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        if self.element.style.is_display_none() {
+            return DivPrepaintState::default();
+        }
+
         #[cfg(target_os = "macos")]
         crate::ax::update_frame(window, &self.element, bounds);
 
@@ -315,6 +325,10 @@ impl Element for ReactDivElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        if self.element.style.is_display_none() {
+            return;
+        }
+
         let style = self.element.build_gpui_style(None);
         let (clip, scroll) = overflow_mode(&self.element.style);
 

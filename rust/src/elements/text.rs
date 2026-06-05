@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Bounds, DefiniteLength, Element, ElementId, FontStyle, GlobalElementId,
-    HighlightStyle, Hsla, IntoElement, LayoutId, Length, ParentElement, Pixels, Styled, StyledText,
-    Window, div, px,
+    AnyElement, App, Bounds, DefiniteLength, Display, Element, ElementId, FontStyle,
+    GlobalElementId, HighlightStyle, Hsla, IntoElement, LayoutId, Length, ParentElement, Pixels,
+    Styled, StyledText, Window, div, px,
 };
 
 use crate::elements::{ReactElement, report_layout};
@@ -173,6 +173,12 @@ impl Element for ReactTextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
+        let style = self.element.build_gpui_style(None);
+        if style.display == Display::None {
+            self.child = None;
+            return (window.request_layout(style, [], cx), ());
+        }
+
         let mut child = self.build_child(window);
         let layout_id = child.request_layout(window, cx);
         self.child = Some(child);
@@ -188,6 +194,10 @@ impl Element for ReactTextElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        if self.element.style.is_display_none() {
+            return;
+        }
+
         #[cfg(target_os = "macos")]
         crate::ax::update_frame(window, &self.element, bounds);
         report_layout(&self.element, bounds);
@@ -207,6 +217,10 @@ impl Element for ReactTextElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        if self.element.style.is_display_none() {
+            return;
+        }
+
         if let Some(child) = self.child.as_mut() {
             child.paint(window, cx);
         }

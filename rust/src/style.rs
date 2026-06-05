@@ -154,6 +154,10 @@ pub struct ElementStyle {
 }
 
 impl ElementStyle {
+    pub fn is_display_none(&self) -> bool {
+        self.display.as_deref() == Some("none")
+    }
+
     pub fn from_json(obj: &Value) -> Self {
         let mut s = Self::default();
         if !obj.is_object() {

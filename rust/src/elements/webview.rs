@@ -76,6 +76,13 @@ impl Element for ReactWebViewElement {
         window: &mut Window,
         _cx: &mut App,
     ) {
+        if self.element.style.is_display_none() {
+            if let Some(view) = webview(self.element.global_id) {
+                let _ = view.set_visible(false);
+            }
+            return;
+        }
+
         #[cfg(target_os = "macos")]
         crate::ax::update_frame(window, &self.element, bounds);
         report_layout(&self.element, bounds);
@@ -88,6 +95,7 @@ impl Element for ReactWebViewElement {
         window.insert_hitbox(bounds, HitboxBehavior::Normal);
 
         if let Some(view) = webview(self.element.global_id) {
+            let _ = view.set_visible(true);
             let _ = view.set_bounds(wry::Rect {
                 position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(
                     bounds.origin.x.into(),

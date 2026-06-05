@@ -2,6 +2,7 @@
  * Non-component RN APIs: Platform, PixelRatio, useWindowDimensions, useColorScheme.
  */
 import { useEffect, useState } from "react";
+import { spawn } from "child_process";
 import { Dimensions, type ScaledSize } from "./Dimensions";
 import {
     findHostNodeId,
@@ -184,6 +185,21 @@ export const UIManager = {
 
 export const NativeModules: Record<string, unknown> = {};
 
+export type FilePickerOptions = {
+    multiple?: boolean;
+    files?: boolean;
+    directories?: boolean;
+    prompt?: string;
+};
+
+export const FilePicker = {
+    async pickPaths(options: FilePickerOptions = {}): Promise<string[]> {
+        return runFilePickerScript(filePickerScript(options));
+    },
+    _script: filePickerScript,
+    _parse: parseFilePickerOutput,
+};
+
 export function findNodeHandle(ref: unknown): number | null {
     return findHostNodeId(ref);
 }
@@ -234,3 +250,64 @@ export const AccessibilityInfo = {
     announceForAccessibility(_message: string): void {},
     setAccessibilityFocus(_reactTag: number): void {},
 };
+
+function filePickerScript(options: FilePickerOptions) {
+    const files = options.files !== false;
+    const directories = !!options.directories;
+    const multiple = !!options.multiple;
+    const prompt = options.prompt || "Choose file";
+    return `
+ObjC.import('AppKit')
+const panel = $.NSOpenPanel.openPanel
+panel.canChooseFiles = ${files ? "true" : "false"}
+panel.canChooseDirectories = ${directories ? "true" : "false"}
+panel.allowsMultipleSelection = ${multiple ? "true" : "false"}
+panel.message = ${JSON.stringify(prompt)}
+const result = panel.runModal()
+if (result !== $.NSModalResponseOK) {
+  JSON.stringify([])
+} else {
+  const urls = panel.URLs
+  const paths = []
+  for (let index = 0; index < urls.count; index++) {
+    paths.push(ObjC.unwrap(urls.objectAtIndex(index).path))
+  }
+  JSON.stringify(paths)
+}
+`.trim();
+}
+
+function runFilePickerScript(script: string): Promise<string[]> {
+    return new Promise((resolve, reject) => {
+        const child = spawn("osascript", ["-l", "JavaScript", "-e", script], {
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+        let output = "";
+        let error = "";
+        child.stdout.on("data", (chunk: Buffer) => {
+            output += chunk.toString();
+        });
+        child.stderr.on("data", (chunk: Buffer) => {
+            error += chunk.toString();
+        });
+        child.on("error", reject);
+        child.on("exit", (code) => {
+            if (code === 0) {
+                resolve(parseFilePickerOutput(output));
+                return;
+            }
+            if (/User canceled/i.test(error)) {
+                resolve([]);
+                return;
+            }
+            reject(new Error(error.trim() || `file picker exited with code ${code}`));
+        });
+    });
+}
+
+function parseFilePickerOutput(output: string) {
+    const trimmed = output.trim();
+    if (!trimmed) return [];
+    const parsed = JSON.parse(trimmed) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((path): path is string => typeof path === "string" && path.length > 0) : [];
+}

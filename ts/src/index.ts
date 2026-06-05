@@ -99,6 +99,8 @@ export {
     DeviceEventEmitter,
     NativeEventEmitter,
     AccessibilityInfo,
+    FilePicker,
+    type FilePickerOptions,
 } from "./apis";
 export { Animated, AnimatedValue, Easing } from "./Animated";
 export {

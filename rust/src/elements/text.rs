@@ -6,7 +6,7 @@ use gpui::{
     Styled, StyledText, Window, div, px,
 };
 
-use crate::elements::{ReactElement, report_layout};
+use crate::elements::{ReactElement, bounds_have_drawable_area, report_layout};
 use crate::style::ElementStyle;
 
 pub struct ReactTextElement {
@@ -204,6 +204,9 @@ impl Element for ReactTextElement {
         #[cfg(target_os = "macos")]
         crate::ax::update_frame(window, &self.element, bounds);
         report_layout(&self.element, bounds);
+        if !bounds_have_drawable_area(bounds) {
+            return;
+        }
 
         if let Some(child) = self.child.as_mut() {
             child.prepaint(window, cx);
@@ -214,13 +217,16 @@ impl Element for ReactTextElement {
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
-        _: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _: &mut (),
         _: &mut (),
         window: &mut Window,
         cx: &mut App,
     ) {
         if self.element.style.is_display_none() {
+            return;
+        }
+        if !bounds_have_drawable_area(bounds) {
             return;
         }
 

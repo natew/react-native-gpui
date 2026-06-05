@@ -10,7 +10,9 @@ use gpui::{
 };
 use once_cell::sync::Lazy;
 
-use crate::elements::{NativeResizeEdge, ReactElement, create_element, report_layout};
+use crate::elements::{
+    NativeResizeEdge, ReactElement, bounds_have_drawable_area, create_element, report_layout,
+};
 use crate::style::ElementStyle;
 
 // Scroll offset per scroll-container id, persisted across the continuous
@@ -552,6 +554,13 @@ impl Element for ReactDivElement {
 
         let mut max_scroll_x = 0.0;
         let mut max_scroll_y = 0.0;
+        if !bounds_have_drawable_area(bounds) {
+            return DivPrepaintState {
+                hitbox,
+                max_scroll_x,
+                max_scroll_y,
+            };
+        }
         if scroll {
             // clamp the stored offset to the scrollable range, then shift children up
             // by it (in prepaint, so hit-testing matches what's painted).
@@ -601,6 +610,10 @@ impl Element for ReactDivElement {
         cx: &mut App,
     ) {
         if self.element.style.is_display_none() {
+            return;
+        }
+        if !bounds_have_drawable_area(bounds) {
+            report_layout(&self.element, bounds);
             return;
         }
 

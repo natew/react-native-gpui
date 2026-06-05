@@ -15,7 +15,7 @@ pub use svg::ReactSvgElement;
 pub use text::ReactTextElement;
 pub use webview::ReactWebViewElement;
 
-use gpui::{AnyElement, Bounds, Hsla, IntoElement, Pixels};
+use gpui::{AnyElement, Bounds, Hsla, IntoElement, Pixels, px};
 use std::sync::Arc;
 
 use crate::style::ElementStyle;
@@ -136,6 +136,10 @@ pub fn report_layout(element: &ReactElement, bounds: Bounds<Pixels>) {
             bounds.size.height.into(),
         );
     }
+}
+
+pub fn bounds_have_drawable_area(bounds: Bounds<Pixels>) -> bool {
+    bounds.size.width > px(0.0) && bounds.size.height > px(0.0)
 }
 
 /// Create a GPUI element from a ReactElement.

@@ -44,6 +44,7 @@ function App() {
     const [enterKeyCount, setEnterKeyCount] = useState(0);
     const [submitCount, setSubmitCount] = useState(0);
     const [submitted, setSubmitted] = useState("");
+    const [submitEventText, setSubmitEventText] = useState("");
     const draftRef = useRef("");
     const enterKeyCountRef = useRef(0);
     const submitCountRef = useRef(0);
@@ -82,10 +83,11 @@ function App() {
         console.log(`CONFORMANCE input change value=${JSON.stringify(text)}`);
     }
 
-    function submit(source: string) {
-        const text = draftRef.current;
+    function submit(source: string, eventText?: string) {
+        const text = eventText ?? draftRef.current;
         if (!text.trim()) return;
         submitCountRef.current += 1;
+        setSubmitEventText(eventText ?? "");
         setSubmitted(`${source}:${text}`);
         setSubmitCount((count) => count + 1);
         updateDraft("");
@@ -93,6 +95,7 @@ function App() {
         if (expected) {
             if (
                 text === expected &&
+                eventText === expected &&
                 enterKeyCountRef.current === 2 &&
                 submitCountRef.current === 1 &&
                 keyPressCountRef.current > enterKeyCountRef.current &&
@@ -135,7 +138,7 @@ function App() {
                         value={draft}
                         onChangeText={updateDraft}
                         onKeyPress={onKeyPress}
-                        onSubmitEditing={() => submit("submitEditing")}
+                        onSubmitEditing={(event) => submit("submitEditing", event.nativeEvent.text)}
                         multiline
                         returnKeyType="send"
                         placeholder="Message conformance"
@@ -156,6 +159,9 @@ function App() {
                 </Text>
                 <Text style={s.submitted} numberOfLines={3}>
                     submitted={JSON.stringify(submitted)}
+                </Text>
+                <Text style={s.submitted} numberOfLines={3}>
+                    submitEventText={JSON.stringify(submitEventText)}
                 </Text>
             </View>
         </View>

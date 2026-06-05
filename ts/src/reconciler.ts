@@ -182,6 +182,7 @@ export function dispatchEvent(
     else if (event === "message") result = fn({ nativeEvent: { data: payload.value ?? "" } });
     else if (event === "layout") result = fn({ nativeEvent: { layout: payload.layout } });
     else if (event === "keyPress") result = fn(createKeyPressEvent(payload));
+    else if (event === "submit") result = fn(createSubmitEvent(payload.value ?? ""));
     else result = fn(createEvent(event, payload));
 
     if (result && typeof (result as Promise<unknown>).catch === "function") {
@@ -383,6 +384,13 @@ function createKeyPressEvent(payload: {
     event.nativeEvent.ctrlKey = !!payload.ctrlKey;
     event.nativeEvent.altKey = !!payload.altKey;
     event.nativeEvent.metaKey = !!payload.metaKey;
+    return event;
+}
+
+function createSubmitEvent(text: string) {
+    const event = createEvent("submit", { value: text });
+    event.nativeEvent.text = text;
+    event.nativeEvent.value = text;
     return event;
 }
 

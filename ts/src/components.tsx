@@ -62,7 +62,7 @@ export interface TextInputProps extends AccessibilityProps {
     onResponderMove?: (event: MouseResponderEvent) => void;
     onResponderRelease?: (event: MouseResponderEvent) => void;
     onResponderTerminate?: (event: MouseResponderEvent) => void;
-    onSubmitEditing?: (event: unknown) => void;
+    onSubmitEditing?: (event: { nativeEvent: { text: string; value: string } }) => void;
     onKeyPress?: (event: unknown) => void;
     onFocus?: (event: unknown) => void;
     onBlur?: (event: unknown) => void;

@@ -461,6 +461,7 @@ impl Render for ServiceApp {
                                 }
                                 let next = value_without_submit_newline(input.read(cx));
                                 if let Some((next, cursor_position)) = next {
+                                    let submitted = next.clone();
                                     bridge::change_text(id, next.as_ref());
                                     bridge::change(id, next.as_ref());
                                     suppress_next_input_change(
@@ -472,10 +473,14 @@ impl Render for ServiceApp {
                                         input.set_value(next, window, cx);
                                         input.set_cursor_position(cursor_position, window, cx);
                                     });
+                                    bridge::submit(id, submitted.as_ref());
+                                    return;
                                 }
-                                bridge::event(id, "submit");
+                                let value = input.read(cx).value().to_string();
+                                bridge::submit(id, value.as_ref());
                             } else {
-                                bridge::event(id, "submit");
+                                let value = input.read(cx).value().to_string();
+                                bridge::submit(id, value.as_ref());
                             }
                         }
                         InputEvent::Focus => bridge::event(id, "focus"),

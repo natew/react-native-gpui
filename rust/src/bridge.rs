@@ -49,9 +49,13 @@ pub fn command(id: &str) {
     emit_value(json!({ "type": "command", "id": id }));
 }
 
-/// A gesture event with no payload (press / pressIn / pressOut / longPress / focus / blur / submit).
+/// A gesture event with no payload (press / pressIn / pressOut / longPress / focus / blur).
 pub fn event(id: u64, name: &str) {
     emit_value(json!({ "type": "event", "id": id, "event": name }));
+}
+
+pub fn submit(id: u64, value: &str) {
+    emit_value(json!({ "type": "event", "id": id, "event": "submit", "value": value }));
 }
 
 pub fn mouse_event(

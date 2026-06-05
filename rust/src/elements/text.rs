@@ -149,7 +149,7 @@ fn apply_layout_style(mut el: gpui::Div, style: &ElementStyle) -> gpui::Div {
 fn apply_line_limit(el: gpui::Div, number_of_lines: Option<usize>) -> gpui::Div {
     match number_of_lines {
         Some(1) => el.truncate(),
-        Some(lines) => el.overflow_hidden().line_clamp(lines).text_ellipsis(),
+        Some(lines) => el.overflow_hidden().line_clamp(lines),
         None => el,
     }
 }

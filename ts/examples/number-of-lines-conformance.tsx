@@ -41,6 +41,18 @@ function measured(name: string, expectedHeight: number) {
     };
 }
 
+function measuredText(name: string, maxHeight: number, minWidth: number, maxWidth: number) {
+    return (event: LayoutChangeEvent) => {
+        const { width, height } = event.nativeEvent.layout;
+        const heightPass = height <= maxHeight + 1.5;
+        const widthPass = width >= minWidth - 1.5 && width <= maxWidth + 1.5;
+        const pass = heightPass && widthPass;
+        console.log(
+            `CONFORMANCE numberOfLines ${name} width=${minWidth}-${maxWidth} maxHeight=${maxHeight} got=${width.toFixed(1)}x${height.toFixed(1)} ${pass ? "PASS" : "FAIL"}`,
+        );
+    };
+}
+
 function BranchRow({
     name,
     subtitle,
@@ -62,8 +74,19 @@ function BranchRow({
             <View style={[s.status, { backgroundColor: active ? C.green : C.warning }]} />
             <View style={s.copy}>
                 <View style={s.titleLine}>
-                    <Text style={s.icon}>branch</Text>
-                    <Text style={s.title} numberOfLines={numberOfLines}>
+                    <Text style={s.icon} numberOfLines={1}>
+                        branch
+                    </Text>
+                    <Text
+                        style={s.title}
+                        numberOfLines={numberOfLines}
+                        onLayout={measuredText(
+                            active ? "clamped-active-title" : "reference-title",
+                            (numberOfLines ?? 1) * 18,
+                            300,
+                            337,
+                        )}
+                    >
                         {name}
                     </Text>
                 </View>
@@ -157,7 +180,7 @@ const s = StyleSheet.create({
         minWidth: 0,
     },
     icon: {
-        width: 38,
+        width: 48,
         color: C.accent,
         fontSize: 10,
         fontWeight: "800",

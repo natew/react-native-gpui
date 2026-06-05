@@ -12,7 +12,14 @@ const serviceTarget = join(nativeDir, "rngpui-service");
 mkdirSync(nativeDir, { recursive: true });
 copyFileSync(serviceSource, serviceTarget);
 
-for (const dylib of findNativeDylibs(join(releaseDir, "build"))) {
+const linkedDylibs = linkedLibraries(serviceTarget);
+const needsGhostty = linkedDylibs.some((line) => line.includes("libghostty-vt"));
+const ghosttyDylibs = findNativeDylibs(join(releaseDir, "build"));
+if (needsGhostty && ghosttyDylibs.length === 0) {
+    throw new Error(`rngpui-service links libghostty-vt, but no libghostty-vt dylib was found under ${join(releaseDir, "build")}`);
+}
+
+for (const dylib of ghosttyDylibs) {
     copyFileSync(dylib, join(nativeDir, dylib.split("/").pop()));
 }
 
@@ -39,6 +46,17 @@ function findNativeDylibs(dir) {
 }
 
 function hasRpath(binary, rpath) {
-    const output = execFileSync("otool", ["-l", binary], { encoding: "utf8" });
+    const output = linkedLoadCommands(binary);
     return output.includes(`path ${rpath} `);
+}
+
+function linkedLibraries(binary) {
+    return execFileSync("otool", ["-L", binary], { encoding: "utf8" })
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+}
+
+function linkedLoadCommands(binary) {
+    return execFileSync("otool", ["-l", binary], { encoding: "utf8" });
 }

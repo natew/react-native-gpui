@@ -6,11 +6,12 @@ use std::sync::Arc;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use gpui::{
-    App, Bounds, Display, Element, ElementId, GlobalElementId, HighlightStyle, Hsla, IntoElement,
-    LayoutId, ParentElement as _, Pixels, Styled as _, StyledText, Window, div, px, rgba,
+    App, Bounds, Display, Element, ElementId, FontStyle, FontWeight, GlobalElementId,
+    HighlightStyle, Hsla, IntoElement, LayoutId, ParentElement as _, Pixels, StrikethroughStyle,
+    Styled as _, StyledText, UnderlineStyle, Window, div, px, rgba,
 };
 use libghostty_vt::render::{CellIterator, RowIterator};
-use libghostty_vt::style::RgbColor;
+use libghostty_vt::style::{RgbColor, Underline};
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 
 use crate::elements::{
@@ -79,6 +80,18 @@ impl ReactGhosttyTerminalElement {
                         HighlightStyle {
                             color: highlight.fg,
                             background_color: highlight.bg,
+                            font_weight: highlight.bold.then_some(FontWeight::BOLD),
+                            font_style: highlight.italic.then_some(FontStyle::Italic),
+                            underline: highlight.underline.then_some(UnderlineStyle {
+                                thickness: px(1.0),
+                                color: highlight.fg,
+                                ..Default::default()
+                            }),
+                            strikethrough: highlight.strikethrough.then_some(StrikethroughStyle {
+                                thickness: px(1.0),
+                                color: highlight.fg,
+                            }),
+                            fade_out: highlight.faint.then_some(0.58),
                             ..Default::default()
                         },
                     )
@@ -205,6 +218,11 @@ struct RowHighlight {
     range: Range<usize>,
     fg: Option<Hsla>,
     bg: Option<Hsla>,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strikethrough: bool,
+    faint: bool,
 }
 
 fn terminal_rows(element: &ReactElement) -> Vec<RenderedRow> {
@@ -312,37 +330,77 @@ impl TerminalState {
         let snapshot = self.render.update(&self.terminal)?;
         let colors = snapshot.colors()?;
         let default_fg = rgb_color(colors.foreground);
+        let default_bg = rgb_color(colors.background);
+        let cursor = if snapshot.cursor_visible()? {
+            snapshot.cursor_viewport()?
+        } else {
+            None
+        };
+        let cursor_color = colors.cursor.map(rgb_color).unwrap_or(default_fg);
         let mut rows = RowIterator::new()?;
         let mut cells = CellIterator::new()?;
         let mut row_iter = rows.update(&snapshot)?;
         let mut rendered = Vec::new();
+        let mut row_index = 0u16;
 
         while let Some(row) = row_iter.next() {
             let mut text = String::new();
             let mut highlights = Vec::new();
             let mut cell_iter = cells.update(row)?;
+            let mut col_index = 0u16;
             while let Some(cell) = cell_iter.next() {
+                let is_cursor =
+                    cursor.is_some_and(|cursor| cursor.x == col_index && cursor.y == row_index);
                 let graphemes = cell.graphemes()?;
+                let style = cell.style()?;
+                let mut fg = cell.fg_color()?.map(rgb_color).unwrap_or(default_fg);
+                let mut bg = cell.bg_color()?.map(rgb_color);
+                if style.inverse {
+                    let previous_fg = fg;
+                    fg = bg.unwrap_or(default_bg);
+                    bg = Some(previous_fg);
+                }
+                if style.invisible {
+                    fg = bg.unwrap_or(default_bg);
+                }
+                if is_cursor {
+                    fg = default_bg;
+                    bg = Some(cursor_color);
+                }
+
+                let start = text.len();
                 if graphemes.is_empty() {
                     text.push(' ');
-                    continue;
-                }
-                let start = text.len();
-                for grapheme in graphemes {
-                    text.push(grapheme);
+                } else {
+                    for grapheme in graphemes {
+                        text.push(grapheme);
+                    }
                 }
                 let end = text.len();
-                let fg = cell.fg_color()?.map(rgb_color);
-                let bg = cell.bg_color()?.map(rgb_color);
-                if fg.is_some() || bg.is_some() {
+                if fg != default_fg
+                    || bg.is_some()
+                    || style.bold
+                    || style.italic
+                    || style.underline != Underline::None
+                    || style.strikethrough
+                    || style.faint
+                    || is_cursor
+                {
                     highlights.push(RowHighlight {
                         range: start..end,
-                        fg: fg.or(Some(default_fg)),
+                        fg: Some(fg),
                         bg,
+                        bold: style.bold,
+                        italic: style.italic,
+                        underline: style.underline != Underline::None,
+                        strikethrough: style.strikethrough,
+                        faint: style.faint,
                     });
                 }
+                col_index = col_index.saturating_add(1);
             }
             rendered.push(RenderedRow { text, highlights });
+            row_index = row_index.saturating_add(1);
         }
 
         Ok(rendered)

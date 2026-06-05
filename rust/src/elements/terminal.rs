@@ -8,11 +8,12 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use gpui::{
     App, Bounds, Display, Element, ElementId, FontStyle, FontWeight, GlobalElementId,
     HighlightStyle, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, LayoutId,
-    MouseButton, MouseDownEvent, ParentElement as _, Pixels, StrikethroughStyle, Styled as _,
-    StyledText, UnderlineStyle, Window, div, px, rgba,
+    MouseButton, MouseDownEvent, ParentElement as _, Pixels, ScrollDelta, ScrollWheelEvent,
+    StrikethroughStyle, Styled as _, StyledText, UnderlineStyle, Window, div, px, rgba,
 };
 use libghostty_vt::render::{CellIterator, RowIterator};
 use libghostty_vt::style::{RgbColor, Underline};
+use libghostty_vt::terminal::ScrollViewport;
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 
 use crate::elements::{
@@ -71,6 +72,16 @@ impl ReactGhosttyTerminalElement {
                     if listens_press {
                         crate::bridge::event(press_element_id, "press");
                     }
+                },
+            )
+            .on_scroll_wheel(
+                move |event: &ScrollWheelEvent, window: &mut Window, cx: &mut App| {
+                    let rows = scroll_delta_rows(&event.delta, line_height);
+                    if rows.abs() < 0.01 || !scroll_terminal_viewport(element_id, rows) {
+                        return;
+                    }
+                    window.refresh();
+                    cx.stop_propagation();
                 },
             )
             .on_key_down(move |event: &KeyDownEvent, _: &mut Window, cx: &mut App| {
@@ -239,6 +250,7 @@ struct TerminalState {
     last_seq: u64,
     cols: u16,
     rows: u16,
+    scroll_remainder: f32,
 }
 
 struct RenderedRow {
@@ -316,6 +328,7 @@ impl TerminalState {
             last_seq: 0,
             cols,
             rows,
+            scroll_remainder: 0.0,
         })
     }
 
@@ -439,6 +452,45 @@ impl TerminalState {
     }
 }
 
+fn scroll_terminal_viewport(id: u64, rows: f32) -> bool {
+    TERMINALS.with(|terminals| {
+        let mut terminals = terminals.borrow_mut();
+        let Some(state) = terminals.get_mut(&id) else {
+            return false;
+        };
+        state.scroll_viewport(rows)
+    })
+}
+
+fn scroll_delta_rows(delta: &ScrollDelta, line_height: f32) -> f32 {
+    let line_height = line_height.max(1.0);
+    match delta {
+        ScrollDelta::Lines(point) => -point.y,
+        ScrollDelta::Pixels(point) => {
+            let pixels: f32 = point.y.into();
+            -pixels / line_height
+        }
+    }
+}
+
+impl TerminalState {
+    fn scroll_viewport(&mut self, rows: f32) -> bool {
+        self.scroll_remainder += rows;
+        let whole = if self.scroll_remainder > 0.0 {
+            self.scroll_remainder.floor()
+        } else {
+            self.scroll_remainder.ceil()
+        };
+        if whole == 0.0 {
+            return false;
+        }
+        self.terminal
+            .scroll_viewport(ScrollViewport::Delta(whole as isize));
+        self.scroll_remainder -= whole;
+        true
+    }
+}
+
 fn terminal_focus_handle(id: u64, cx: &mut App) -> gpui::FocusHandle {
     TERMINAL_FOCUS.with(|handles| {
         let mut handles = handles.borrow_mut();
@@ -498,7 +550,8 @@ fn color_from_hex(color: u32) -> Hsla {
 
 #[cfg(test)]
 mod tests {
-    use super::js_named_key;
+    use super::{js_named_key, scroll_delta_rows};
+    use gpui::{ScrollDelta, point, px};
 
     #[test]
     fn maps_gpui_navigation_keys_to_js_names() {
@@ -514,5 +567,17 @@ mod tests {
         assert_eq!(js_named_key("end"), "End");
         assert_eq!(js_named_key("pageup"), "PageUp");
         assert_eq!(js_named_key("pagedown"), "PageDown");
+    }
+
+    #[test]
+    fn maps_scroll_wheel_delta_to_terminal_rows() {
+        assert_eq!(
+            scroll_delta_rows(&ScrollDelta::Lines(point(0.0, -3.0)), 18.0),
+            3.0
+        );
+        assert_eq!(
+            scroll_delta_rows(&ScrollDelta::Pixels(point(px(0.0), px(36.0))), 18.0),
+            -2.0
+        );
     }
 }

@@ -119,7 +119,7 @@ export function startBridge(initial: SerializedNode): Bridge {
     proc.on("exit", () => process.exit(0));
 
     const writeLine = (obj: object) => {
-        if (process.env.RNGPUI_DUMP_TREE) {
+        if (process.env.RNGPUI_DUMP_TREE && isSerializedNode(obj)) {
             writeFileSync(process.env.RNGPUI_DUMP_TREE, JSON.stringify(obj, null, 2));
         }
         if (proc.stdin && proc.stdin.writable) proc.stdin.write(JSON.stringify(obj) + "\n");
@@ -135,4 +135,9 @@ export function startBridge(initial: SerializedNode): Bridge {
             proc.kill();
         },
     };
+}
+
+function isSerializedNode(obj: object): obj is SerializedNode {
+    const node = obj as Partial<SerializedNode>;
+    return typeof node.globalId === "number" && typeof node.type === "string";
 }

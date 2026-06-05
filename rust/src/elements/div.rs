@@ -186,7 +186,12 @@ fn take_scroll_to_end(id: u64) -> bool {
 }
 
 fn native_layout_override(key: &str) -> NativeLayoutOverride {
-    if let Some(animation) = NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().get(key).copied() {
+    let animation = {
+        let animations = NATIVE_LAYOUT_ANIMATIONS.lock().unwrap();
+        animations.get(key).copied()
+    };
+
+    if let Some(animation) = animation {
         let now = Instant::now();
         let (next, done) = native_layout_animation_value(animation, now);
         if done {
@@ -1194,6 +1199,32 @@ mod tests {
         assert_eq!(final_size.width, Some(200.0));
         assert_eq!(final_size.height, Some(120.0));
         assert!(done);
+    }
+
+    #[test]
+    fn completed_native_layout_animation_commits_without_relocking_animation_state() {
+        let _guard = native_layout_test_guard();
+        clear_native_layout_override("pane-complete");
+        NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().insert(
+            "pane-complete".to_string(),
+            NativeLayoutAnimation {
+                from_width: Some(100.0),
+                to_width: Some(0.0),
+                from_height: None,
+                to_height: None,
+                start: Instant::now() - Duration::from_millis(200),
+                duration: Duration::from_millis(100),
+            },
+        );
+
+        assert_eq!(native_layout_override("pane-complete").width, Some(0.0));
+        assert!(
+            !NATIVE_LAYOUT_ANIMATIONS
+                .lock()
+                .unwrap()
+                .contains_key("pane-complete")
+        );
+        clear_native_layout_override("pane-complete");
     }
 
     #[test]

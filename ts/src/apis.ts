@@ -3,6 +3,12 @@
  */
 import { useEffect, useState } from "react";
 import { Dimensions, type ScaledSize } from "./Dimensions";
+import {
+    findHostNodeId,
+    measureHostNode,
+    measureHostNodeInWindow,
+    measureHostNodeLayout,
+} from "./reconciler";
 
 export function useWindowDimensions(): ScaledSize {
     const [dims, setDims] = useState<ScaledSize>(() => Dimensions.get("window"));
@@ -153,11 +159,19 @@ export const LayoutAnimation = {
 };
 
 export const UIManager = {
-    measure(_node: unknown, callback: (x: number, y: number, w: number, h: number, px: number, py: number) => void): void {
-        callback(0, 0, 0, 0, 0, 0);
+    measure(node: unknown, callback: (x: number, y: number, w: number, h: number, px: number, py: number) => void): void {
+        measureHostNode(node as never, callback);
     },
-    measureInWindow(_node: unknown, callback: (x: number, y: number, w: number, h: number) => void): void {
-        callback(0, 0, 0, 0);
+    measureInWindow(node: unknown, callback: (x: number, y: number, w: number, h: number) => void): void {
+        measureHostNodeInWindow(node as never, callback);
+    },
+    measureLayout(
+        node: unknown,
+        relativeToNativeNode: unknown,
+        onFail: () => void,
+        onSuccess: (left: number, top: number, width: number, height: number) => void,
+    ): void {
+        measureHostNodeLayout(node as never, relativeToNativeNode as never, onSuccess, onFail);
     },
     getViewManagerConfig(_name: string): unknown {
         return null;
@@ -170,8 +184,8 @@ export const UIManager = {
 
 export const NativeModules: Record<string, unknown> = {};
 
-export function findNodeHandle(_ref: unknown): number | null {
-    return null;
+export function findNodeHandle(ref: unknown): number | null {
+    return findHostNodeId(ref);
 }
 
 /** gpui consumes color strings directly; pass them through unchanged. */

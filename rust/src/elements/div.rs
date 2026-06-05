@@ -733,6 +733,14 @@ impl Element for ReactDivElement {
             }
         }
 
+        crate::bridge::remember_layout(
+            id,
+            bounds.origin.x.into(),
+            bounds.origin.y.into(),
+            bounds.size.width.into(),
+            bounds.size.height.into(),
+        );
+
         // onLayout: report the measured rect (deduped per id across frames).
         if self.element.listens("layout") {
             crate::bridge::layout_if_changed(

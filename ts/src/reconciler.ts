@@ -15,10 +15,10 @@ export interface Instance {
     children: Array<Instance | TextInstance>;
     measure: (callback: MeasureCallback) => void;
     measureInWindow: (callback: MeasureInWindowCallback) => void;
-        measureLayout: (
-            relativeToNativeNode: Instance | number | null,
-            onSuccess: (left: number, top: number, width: number, height: number) => void,
-            onFail?: () => void,
+    measureLayout: (
+        relativeToNativeNode: Instance | number | null,
+        onSuccess: (left: number, top: number, width: number, height: number) => void,
+        onFail?: () => void,
     ) => void;
 }
 export interface TextInstance {
@@ -38,6 +38,8 @@ const hoveredIds = new Set<number>();
 const pressedIds = new Set<number>();
 const measuredIds = new Set<number>();
 const layouts = new Map<number, LayoutRect>();
+const instances = new Map<number, Instance>();
+const pendingMeasures = new Map<number, Array<() => void>>();
 const PORTAL_HOST_TYPE = "RNTPortalHostView";
 const PORTAL_VIEW_TYPE = "RNTPortalView";
 
@@ -166,6 +168,7 @@ export function dispatchEvent(
             typeof layout.height === "number"
         ) {
             layouts.set(id, { x: layout.x, y: layout.y, width: layout.width, height: layout.height });
+            flushPendingMeasures(id);
         }
     }
     const fn = handlers.get(id)?.[event];
@@ -189,44 +192,140 @@ function layoutFor(id: number): LayoutRect {
     return layouts.get(id) ?? { x: 0, y: 0, width: 0, height: 0 };
 }
 
-function requestMeasuredLayout(id: number) {
+function requestMeasuredLayout(id: number): boolean {
     if (!measuredIds.has(id)) {
         measuredIds.add(id);
         requestPseudoCommit();
     }
+    return layouts.has(id);
+}
+
+function afterMeasuredLayout(id: number, callback: () => void) {
+    if (requestMeasuredLayout(id)) {
+        callback();
+        return;
+    }
+    const callbacks = pendingMeasures.get(id) ?? [];
+    callbacks.push(callback);
+    pendingMeasures.set(id, callbacks);
+}
+
+function flushPendingMeasures(id: number) {
+    const callbacks = pendingMeasures.get(id);
+    if (!callbacks?.length) return;
+    pendingMeasures.delete(id);
+    for (const callback of callbacks) callback();
+}
+
+function cleanupInstance(node: Instance | TextInstance) {
+    if (isTextLike(node)) return;
+    handlers.delete(node.id);
+    hoveredIds.delete(node.id);
+    pressedIds.delete(node.id);
+    measuredIds.delete(node.id);
+    layouts.delete(node.id);
+    instances.delete(node.id);
+    pendingMeasures.delete(node.id);
+    for (const child of node.children) cleanupInstance(child);
+}
+
+function unwrapRef(node: unknown): unknown {
+    if (node && typeof node === "object" && "current" in node) {
+        return (node as { current?: unknown }).current;
+    }
+    return node;
+}
+
+function resolveInstance(node: Instance | number | null | undefined): Instance | undefined {
+    node = unwrapRef(node) as Instance | number | null | undefined;
+    if (typeof node === "number") return instances.get(node);
+    if (node && typeof node.id === "number") return node;
+    return undefined;
+}
+
+export function findHostNodeId(ref: unknown): number | null {
+    const node = resolveInstance(ref as Instance | number | null | undefined);
+    return node?.id ?? null;
+}
+
+export function measureHostNode(
+    node: Instance | number | null | undefined,
+    callback: MeasureCallback,
+) {
+    const inst = resolveInstance(node);
+    if (!inst) return;
+    inst.measure(callback);
+}
+
+export function measureHostNodeInWindow(
+    node: Instance | number | null | undefined,
+    callback: MeasureInWindowCallback,
+) {
+    const inst = resolveInstance(node);
+    if (!inst) return;
+    inst.measureInWindow(callback);
+}
+
+export function measureHostNodeLayout(
+    node: Instance | number | null | undefined,
+    relativeToNativeNode: Instance | number | null | undefined,
+    onSuccess: (left: number, top: number, width: number, height: number) => void,
+    onFail?: () => void,
+) {
+    const inst = resolveInstance(node);
+    if (!inst) {
+        onFail?.();
+        return;
+    }
+    inst.measureLayout(relativeToNativeNode ?? null, onSuccess, onFail);
 }
 
 function createPublicInstance(type: string, props: Record<string, unknown>): Instance {
     const id = genId();
-    return {
+    const instance: Instance = {
         id,
         type,
         props,
         children: [],
         measure(callback) {
-            requestMeasuredLayout(id);
-            const layout = layoutFor(id);
-            callback(0, 0, layout.width, layout.height, layout.x, layout.y);
+            afterMeasuredLayout(id, () => {
+                const layout = layoutFor(id);
+                callback(0, 0, layout.width, layout.height, layout.x, layout.y);
+            });
         },
         measureInWindow(callback) {
-            requestMeasuredLayout(id);
-            const layout = layoutFor(id);
-            callback(layout.x, layout.y, layout.width, layout.height);
+            afterMeasuredLayout(id, () => {
+                const layout = layoutFor(id);
+                callback(layout.x, layout.y, layout.width, layout.height);
+            });
         },
-        measureLayout(relativeToNativeNode, onSuccess, _onFail) {
-            requestMeasuredLayout(id);
+        measureLayout(relativeToNativeNode, onSuccess, onFail) {
             const relativeId =
                 typeof relativeToNativeNode === "number"
                     ? relativeToNativeNode
                     : relativeToNativeNode && typeof relativeToNativeNode.id === "number"
                       ? relativeToNativeNode.id
                       : null;
-            if (relativeId != null) requestMeasuredLayout(relativeId);
-            const layout = layoutFor(id);
-            const relative = relativeId == null ? { x: 0, y: 0 } : layouts.get(relativeId);
-            onSuccess(layout.x - (relative?.x ?? 0), layout.y - (relative?.y ?? 0), layout.width, layout.height);
+            const run = () => {
+                const layout = layoutFor(id);
+                const relative = relativeId == null ? { x: 0, y: 0 } : layouts.get(relativeId);
+                if (relativeId != null && !relative) {
+                    onFail?.();
+                    return;
+                }
+                onSuccess(layout.x - (relative?.x ?? 0), layout.y - (relative?.y ?? 0), layout.width, layout.height);
+            };
+            afterMeasuredLayout(id, () => {
+                if (relativeId == null) {
+                    run();
+                    return;
+                }
+                afterMeasuredLayout(relativeId, run);
+            });
         },
     };
+    instances.set(id, instance);
+    return instance;
 }
 
 function createValueEvent(type: string, value: string) {
@@ -624,11 +723,17 @@ const hostConfig: any = {
     },
     removeChild(parent: Instance, child: Instance | TextInstance) {
         const i = parent.children.indexOf(child);
-        if (i !== -1) parent.children.splice(i, 1);
+        if (i !== -1) {
+            parent.children.splice(i, 1);
+            cleanupInstance(child);
+        }
     },
     removeChildFromContainer(container: Container, child: Instance | TextInstance) {
         const i = container.children.indexOf(child);
-        if (i !== -1) container.children.splice(i, 1);
+        if (i !== -1) {
+            container.children.splice(i, 1);
+            cleanupInstance(child);
+        }
     },
     insertBefore(parent: Instance, child: Instance | TextInstance, before: Instance | TextInstance) {
         const i = parent.children.indexOf(before);
@@ -658,16 +763,11 @@ const hostConfig: any = {
     },
     preparePortalMount: () => {},
     clearContainer(container: Container) {
+        for (const child of container.children) cleanupInstance(child);
         container.children = [];
     },
     detachDeletedInstance(inst: Instance) {
-        if (inst && inst.id != null) {
-            handlers.delete(inst.id);
-            hoveredIds.delete(inst.id);
-            pressedIds.delete(inst.id);
-            measuredIds.delete(inst.id);
-            layouts.delete(inst.id);
-        }
+        cleanupInstance(inst);
     },
     getInstanceFromNode: () => null,
     beforeActiveInstanceBlur: () => {},

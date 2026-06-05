@@ -30,6 +30,7 @@
         "conformance:animation": "bun run examples/animation-conformance.tsx",
         "conformance:animation:diff": "bun run scripts/animation-frame-diff.mjs",
         "conformance:input": "bun run examples/input-conformance.tsx",
+        "conformance:measure": "bun run examples/measure-conformance.tsx",
         "conformance:portal": "bun run examples/portal-conformance.tsx",
         "conformance:text-lines": "bun run examples/number-of-lines-conformance.tsx",
         "pixel-diff": "bun run scripts/pixel-diff.mjs",

@@ -325,6 +325,13 @@ fn collect_layout_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
     }
 }
 
+fn collect_node_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
+    out.insert(el.global_id);
+    for c in &el.children {
+        collect_node_ids(c, out);
+    }
+}
+
 impl Render for ServiceApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         // The tree is applied (and a re-render scheduled) by the stdin pump task in
@@ -510,9 +517,13 @@ impl Render for ServiceApp {
         elements::webview::set_webviews(self.webviews.clone());
 
         // GC layout-dedup state for nodes that left the tree.
+        let mut node_ids = HashSet::new();
+        collect_node_ids(&self.root, &mut node_ids);
+        bridge::retain_layout(&node_ids);
+
         let mut layout_ids = HashSet::new();
         collect_layout_ids(&self.root, &mut layout_ids);
-        bridge::retain_layout(&layout_ids);
+        bridge::emit_cached_layout_for_new_subscribers(&layout_ids);
 
         #[cfg(target_os = "macos")]
         ax::sync_tree(window, &self.root);
@@ -797,13 +808,8 @@ fn main() {
             tabbing_identifier: None,
         };
 
-        let pump = content.clone();
         let window_handle = cx
-            .open_window(options, move |window, cx| {
-                // gpui-component needs the window root to be a `Root` (owns the
-                // focused-input / dialog / notification layers the Input uses).
-                cx.new(|cx| gpui_component::Root::new(content, window, cx))
-            })
+            .open_window(options, move |_window, _cx| content.clone())
             .expect("open window");
         // bring the app to the front so keystrokes reach the focused input
         // (skipped in background mode so it doesn't pop over your work).
@@ -818,12 +824,10 @@ fn main() {
             while let Ok(msg) = tree_rx.recv_async().await {
                 match msg {
                     Incoming::FocusInput { id } => {
-                        let applied = window_handle.update(cx, |_root, window, cx| {
-                            pump.update(cx, |this, cx| {
-                                if let Some(state) = this.inputs.get(&id) {
-                                    state.update(cx, |input, cx| input.focus(window, cx));
-                                }
-                            })
+                        let applied = window_handle.update(cx, |this, window, cx| {
+                            if let Some(state) = this.inputs.get(&id) {
+                                state.update(cx, |input, cx| input.focus(window, cx));
+                            }
                         });
                         if applied.is_err() {
                             break;
@@ -843,35 +847,49 @@ fn main() {
                         }
                     }
                     msg => {
-                        let applied = pump.update(cx, |this, cx| match msg {
-                            Incoming::Tree(t) => {
-                                this.root = fill_root(t);
-                                cx.notify();
-                            }
-                            Incoming::Eval { id, js } => {
-                                if let Some(view) = this.webviews.get(&id) {
-                                    let _ = view.evaluate_script(&js);
+                        let applied = window_handle.update(cx, |this, window, root_cx| {
+                            match msg {
+                                Incoming::Tree(t) => {
+                                    let next_root = fill_root(t);
+                                    let mut node_ids = HashSet::new();
+                                    collect_node_ids(&next_root, &mut node_ids);
+                                    bridge::retain_layout(&node_ids);
+                                    let mut layout_ids = HashSet::new();
+                                    collect_layout_ids(&next_root, &mut layout_ids);
+                                    bridge::emit_cached_layout_for_new_subscribers(&layout_ids);
+                                    this.root = next_root;
+                                    root_cx.notify();
                                 }
-                            }
-                            Incoming::Reload { id } => {
-                                if let Some(view) = this.webviews.get(&id) {
-                                    let _ = view.reload();
+                                Incoming::Eval { id, js } => {
+                                    if let Some(view) = this.webviews.get(&id) {
+                                        let _ = view.evaluate_script(&js);
+                                    }
                                 }
+                                Incoming::Reload { id } => {
+                                    if let Some(view) = this.webviews.get(&id) {
+                                        let _ = view.reload();
+                                    }
+                                }
+                                Incoming::ScrollTo { id, x, y } => {
+                                    elements::scroll_to(id, x, y);
+                                    root_cx.notify();
+                                }
+                                Incoming::ScrollToEnd { id } => {
+                                    elements::scroll_to_end(id);
+                                    root_cx.notify();
+                                }
+                                Incoming::FocusInput { .. }
+                                | Incoming::BlurInput
+                                | Incoming::AppCommands(_) => unreachable!(),
                             }
-                            Incoming::ScrollTo { id, x, y } => {
-                                elements::scroll_to(id, x, y);
-                                cx.notify();
-                            }
-                            Incoming::ScrollToEnd { id } => {
-                                elements::scroll_to_end(id);
-                                cx.notify();
-                            }
-                            Incoming::FocusInput { .. }
-                            | Incoming::BlurInput
-                            | Incoming::AppCommands(_) => unreachable!(),
+                            root_cx.notify();
+                            window.refresh();
                         });
                         if applied.is_err() {
                             break; // view dropped
+                        }
+                        if cx.update(|cx| cx.refresh_windows()).is_err() {
+                            break;
                         }
                     }
                 }

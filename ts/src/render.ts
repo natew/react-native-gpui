@@ -59,6 +59,10 @@ export function createRoot(options: RootOptions = {}): Root {
             ctrlKey: e.ctrlKey,
             altKey: e.altKey,
             metaKey: e.metaKey,
+            pageX: e.pageX,
+            pageY: e.pageY,
+            locationX: e.locationX,
+            locationY: e.locationY,
             layout: e.layout,
         });
     };

@@ -16,6 +16,7 @@ export type SerializedNode = {
     numberOfLines?: number;
     value?: string;
     editable?: boolean;
+    secureTextEntry?: boolean;
     src?: string;
     name?: string;
     placeholder?: string;
@@ -53,6 +54,10 @@ export type BridgeEvent =
           ctrlKey?: boolean;
           altKey?: boolean;
           metaKey?: boolean;
+          pageX?: number;
+          pageY?: number;
+          locationX?: number;
+          locationY?: number;
           layout?: { x: number; y: number; width: number; height: number };
       };
 

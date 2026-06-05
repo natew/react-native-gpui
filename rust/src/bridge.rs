@@ -47,6 +47,33 @@ pub fn event(id: u64, name: &str) {
     emit_value(json!({ "type": "event", "id": id, "event": name }));
 }
 
+pub fn mouse_event(
+    id: u64,
+    name: &str,
+    page_x: f32,
+    page_y: f32,
+    location_x: f32,
+    location_y: f32,
+    shift_key: bool,
+    ctrl_key: bool,
+    alt_key: bool,
+    meta_key: bool,
+) {
+    emit_value(json!({
+        "type": "event",
+        "id": id,
+        "event": name,
+        "pageX": page_x,
+        "pageY": page_y,
+        "locationX": location_x,
+        "locationY": location_y,
+        "shiftKey": shift_key,
+        "ctrlKey": ctrl_key,
+        "altKey": alt_key,
+        "metaKey": meta_key
+    }));
+}
+
 pub fn change_text(id: u64, value: &str) {
     emit_value(json!({ "type": "event", "id": id, "event": "changeText", "value": value }));
 }

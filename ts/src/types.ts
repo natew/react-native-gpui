@@ -97,6 +97,30 @@ export interface ViewStyle extends FlexStyle, ShadowStyleIOS {
     borderBottomRightRadius?: number;
     borderStyle?: "solid" | "dotted" | "dashed";
     borderWidth?: number;
+    cursor?:
+        | "auto"
+        | "default"
+        | "none"
+        | "pointer"
+        | "text"
+        | "vertical-text"
+        | "crosshair"
+        | "grab"
+        | "grabbing"
+        | "w-resize"
+        | "e-resize"
+        | "ew-resize"
+        | "n-resize"
+        | "s-resize"
+        | "ns-resize"
+        | "nwse-resize"
+        | "nesw-resize"
+        | "col-resize"
+        | "row-resize"
+        | "not-allowed"
+        | "alias"
+        | "copy"
+        | "context-menu";
     elevation?: number;
     opacity?: number;
 }
@@ -137,7 +161,16 @@ export interface LayoutChangeEvent {
     nativeEvent: { layout: LayoutRectangle };
 }
 export interface GestureResponderEvent {
-    nativeEvent: { locationX: number; locationY: number; pageX: number; pageY: number };
+    nativeEvent: {
+        locationX: number;
+        locationY: number;
+        pageX: number;
+        pageY: number;
+        shiftKey?: boolean;
+        ctrlKey?: boolean;
+        altKey?: boolean;
+        metaKey?: boolean;
+    };
 }
 export interface MouseResponderEvent extends GestureResponderEvent {
     type?: string;

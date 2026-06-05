@@ -56,6 +56,8 @@ pub struct ReactElement {
     pub src: Option<String>,
     /// text input value from react props.
     pub value: Option<String>,
+    /// whether text input values render as password/secret text.
+    pub secure_text_entry: bool,
     /// whether text input nodes accept editing. RN TextInput defaults to editable.
     pub editable: bool,
     /// event names this node listens to: "press", "changeText", "layout", …

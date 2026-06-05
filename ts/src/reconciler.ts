@@ -135,6 +135,10 @@ export function dispatchEvent(
         ctrlKey?: boolean;
         altKey?: boolean;
         metaKey?: boolean;
+        pageX?: number;
+        pageY?: number;
+        locationX?: number;
+        locationY?: number;
         layout?: unknown;
     },
 ) {
@@ -187,6 +191,10 @@ function createEvent(
         ctrlKey?: boolean;
         altKey?: boolean;
         metaKey?: boolean;
+        pageX?: number;
+        pageY?: number;
+        locationX?: number;
+        locationY?: number;
         layout?: unknown;
     },
 ) {
@@ -211,11 +219,15 @@ function createEvent(
             altKey: !!payload.altKey,
             metaKey: !!payload.metaKey,
             layout: payload.layout,
-            locationX: 0,
-            locationY: 0,
-            pageX: 0,
-            pageY: 0,
+            locationX: payload.locationX ?? 0,
+            locationY: payload.locationY ?? 0,
+            pageX: payload.pageX ?? 0,
+            pageY: payload.pageY ?? 0,
         },
+        locationX: payload.locationX ?? 0,
+        locationY: payload.locationY ?? 0,
+        pageX: payload.pageX ?? 0,
+        pageY: payload.pageY ?? 0,
         shiftKey: !!payload.shiftKey,
         target: {},
         timeStamp: Date.now(),
@@ -380,6 +392,7 @@ function serialize(inst: Instance | TextInstance): SerializedNode {
             node.type = props.multiline ? "textarea" : "textinput";
             node.placeholder = (props.placeholder as string) ?? "";
             if (props.editable === false) node.editable = false;
+            if (props.secureTextEntry === true) node.secureTextEntry = true;
             if (props.value != null) node.value = String(props.value);
             else if (props.defaultValue != null) node.value = String(props.defaultValue);
             break;

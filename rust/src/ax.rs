@@ -317,11 +317,18 @@ fn ax_label(element: &ReactElement) -> Option<String> {
 }
 
 fn ax_value(element: &ReactElement) -> Option<String> {
-    element
+    let value = element
         .accessibility
         .value
         .clone()
-        .or_else(|| element.value.clone())
+        .or_else(|| element.value.clone())?;
+    if element.secure_text_entry
+        && (element.element_type == "textinput" || element.element_type == "textarea")
+    {
+        Some("*".repeat(value.chars().count()))
+    } else {
+        Some(value)
+    }
 }
 
 fn subtree_text(element: &ReactElement) -> String {

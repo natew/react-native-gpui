@@ -1,6 +1,6 @@
 use gpui::{
-    AbsoluteLength, BoxShadow, DefiniteLength, FontWeight, Hsla, Length, Rgba, linear_color_stop,
-    linear_gradient, point, px,
+    AbsoluteLength, BoxShadow, CursorStyle, DefiniteLength, FontWeight, Hsla, Length, Rgba,
+    linear_color_stop, linear_gradient, point, px,
 };
 use serde_json::Value;
 
@@ -549,6 +549,10 @@ impl ElementStyle {
             }
         }
 
+        if let Some(ref cursor) = self.cursor {
+            style.mouse_cursor = parse_cursor_style(cursor);
+        }
+
         style
     }
 
@@ -596,6 +600,34 @@ pub fn parse_font_weight(s: &str) -> FontWeight {
         "800" | "extrabold" => FontWeight::EXTRA_BOLD,
         "900" | "black" | "heavy" => FontWeight::BLACK,
         _ => FontWeight::NORMAL,
+    }
+}
+
+fn parse_cursor_style(cursor: &str) -> Option<CursorStyle> {
+    match cursor.trim().to_ascii_lowercase().as_str() {
+        "auto" | "default" => Some(CursorStyle::Arrow),
+        "none" => Some(CursorStyle::None),
+        "pointer" => Some(CursorStyle::PointingHand),
+        "text" => Some(CursorStyle::IBeam),
+        "vertical-text" => Some(CursorStyle::IBeamCursorForVerticalLayout),
+        "crosshair" => Some(CursorStyle::Crosshair),
+        "grab" => Some(CursorStyle::OpenHand),
+        "grabbing" => Some(CursorStyle::ClosedHand),
+        "w-resize" => Some(CursorStyle::ResizeLeft),
+        "e-resize" => Some(CursorStyle::ResizeRight),
+        "ew-resize" => Some(CursorStyle::ResizeLeftRight),
+        "n-resize" => Some(CursorStyle::ResizeUp),
+        "s-resize" => Some(CursorStyle::ResizeDown),
+        "ns-resize" => Some(CursorStyle::ResizeUpDown),
+        "nwse-resize" => Some(CursorStyle::ResizeUpLeftDownRight),
+        "nesw-resize" => Some(CursorStyle::ResizeUpRightDownLeft),
+        "col-resize" => Some(CursorStyle::ResizeColumn),
+        "row-resize" => Some(CursorStyle::ResizeRow),
+        "not-allowed" => Some(CursorStyle::OperationNotAllowed),
+        "alias" => Some(CursorStyle::DragLink),
+        "copy" => Some(CursorStyle::DragCopy),
+        "context-menu" => Some(CursorStyle::ContextualMenu),
+        _ => None,
     }
 }
 

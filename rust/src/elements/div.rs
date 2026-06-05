@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use gpui::{
     AnyElement, App, Bounds, ContentMask, DispatchPhase, Element, ElementId, GlobalElementId,
-    Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta, ScrollWheelEvent, Window,
-    div, point, prelude::*, px,
+    Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, Modifiers, MouseButton, MouseDownEvent,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent,
+    Window, div, point, prelude::*, px,
 };
 use once_cell::sync::Lazy;
 
@@ -17,6 +17,7 @@ use crate::style::ElementStyle;
 static SCROLL: Lazy<Mutex<HashMap<u64, f32>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static SCROLL_TO_END: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static ACTIVE_MOUSE_TARGET: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
 
 #[derive(Clone, Default)]
 pub struct DivPrepaintState {
@@ -47,6 +48,31 @@ fn emit_if(id: u64, enabled: bool, name: &str) {
     if enabled {
         crate::bridge::event(id, name);
     }
+}
+
+fn emit_mouse_if(
+    id: u64,
+    enabled: bool,
+    name: &str,
+    position: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    modifiers: Modifiers,
+) {
+    if !enabled {
+        return;
+    }
+    crate::bridge::mouse_event(
+        id,
+        name,
+        position.x.into(),
+        position.y.into(),
+        (position.x - bounds.origin.x).into(),
+        (position.y - bounds.origin.y).into(),
+        modifiers.shift,
+        modifiers.control,
+        modifiers.alt,
+        modifiers.platform,
+    );
 }
 
 /// (clip, scroll) for an overflow value.
@@ -209,7 +235,8 @@ impl Element for ReactDivElement {
         ]
         .iter()
         .any(|name| self.element.listens(name));
-        let hitbox = if interactive || scroll {
+        let cursor = self.element.style.cursor.is_some();
+        let hitbox = if interactive || scroll || cursor {
             Some(window.insert_hitbox(bounds, HitboxBehavior::Normal))
         } else {
             None
@@ -356,23 +383,81 @@ impl Element for ReactDivElement {
                     || press_in
                 {
                     let event_bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
+                    let layout_bounds = bounds;
                     window.on_mouse_event(move |ev: &MouseDownEvent, phase, _window, _cx| {
                         if phase == DispatchPhase::Bubble
                             && ev.button == MouseButton::Left
                             && event_bounds.contains(&ev.position)
                         {
-                            emit_if(id, mouse_down, "mouseDown");
-                            emit_if(id, pointer_down, "pointerDown");
-                            emit_if(id, touch_start, "touchStart");
-                            emit_if(
+                            let mut active = ACTIVE_MOUSE_TARGET.lock().unwrap();
+                            if active.is_none() {
+                                *active = Some(id);
+                            }
+                            drop(active);
+                            emit_mouse_if(
+                                id,
+                                mouse_down,
+                                "mouseDown",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
+                            emit_mouse_if(
+                                id,
+                                pointer_down,
+                                "pointerDown",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
+                            emit_mouse_if(
+                                id,
+                                touch_start,
+                                "touchStart",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
+                            emit_mouse_if(
                                 id,
                                 start_responder_capture,
                                 "startShouldSetResponderCapture",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
                             );
-                            emit_if(id, start_responder, "startShouldSetResponder");
-                            emit_if(id, responder_start, "responderStart");
-                            emit_if(id, responder_grant, "responderGrant");
-                            emit_if(id, press_in, "pressIn");
+                            emit_mouse_if(
+                                id,
+                                start_responder,
+                                "startShouldSetResponder",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
+                            emit_mouse_if(
+                                id,
+                                responder_start,
+                                "responderStart",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
+                            emit_mouse_if(
+                                id,
+                                responder_grant,
+                                "responderGrant",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
+                            emit_mouse_if(
+                                id,
+                                press_in,
+                                "pressIn",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
                         }
                     });
                 }
@@ -386,19 +471,84 @@ impl Element for ReactDivElement {
                     || press_out
                 {
                     let event_bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
+                    let layout_bounds = bounds;
                     window.on_mouse_event(move |ev: &MouseUpEvent, phase, _window, _cx| {
-                        if phase == DispatchPhase::Bubble
-                            && ev.button == MouseButton::Left
-                            && event_bounds.contains(&ev.position)
-                        {
-                            emit_if(id, mouse_up, "mouseUp");
-                            emit_if(id, pointer_up, "pointerUp");
-                            emit_if(id, touch_end, "touchEnd");
-                            emit_if(id, responder_release, "responderRelease");
-                            emit_if(id, responder_end, "responderEnd");
-                            emit_if(id, press_out, "pressOut");
-                            emit_if(id, press, "press");
-                            emit_if(id, click, "click");
+                        if phase != DispatchPhase::Bubble || ev.button != MouseButton::Left {
+                            return;
+                        }
+                        let inside = event_bounds.contains(&ev.position);
+                        let captured = ACTIVE_MOUSE_TARGET.lock().unwrap().as_ref() == Some(&id);
+                        if !inside && !captured {
+                            return;
+                        }
+                        if captured {
+                            *ACTIVE_MOUSE_TARGET.lock().unwrap() = None;
+                        }
+                        emit_mouse_if(
+                            id,
+                            mouse_up,
+                            "mouseUp",
+                            ev.position,
+                            layout_bounds,
+                            ev.modifiers,
+                        );
+                        emit_mouse_if(
+                            id,
+                            pointer_up,
+                            "pointerUp",
+                            ev.position,
+                            layout_bounds,
+                            ev.modifiers,
+                        );
+                        emit_mouse_if(
+                            id,
+                            touch_end,
+                            "touchEnd",
+                            ev.position,
+                            layout_bounds,
+                            ev.modifiers,
+                        );
+                        emit_mouse_if(
+                            id,
+                            responder_release,
+                            "responderRelease",
+                            ev.position,
+                            layout_bounds,
+                            ev.modifiers,
+                        );
+                        emit_mouse_if(
+                            id,
+                            responder_end,
+                            "responderEnd",
+                            ev.position,
+                            layout_bounds,
+                            ev.modifiers,
+                        );
+                        emit_mouse_if(
+                            id,
+                            press_out,
+                            "pressOut",
+                            ev.position,
+                            layout_bounds,
+                            ev.modifiers,
+                        );
+                        if inside {
+                            emit_mouse_if(
+                                id,
+                                press,
+                                "press",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
+                            emit_mouse_if(
+                                id,
+                                click,
+                                "click",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
                         }
                     });
                 }
@@ -414,7 +564,8 @@ impl Element for ReactDivElement {
                     || responder_move
                 {
                     let hitbox_for_move = hitbox.clone();
-                    window.on_mouse_event(move |_ev: &MouseMoveEvent, phase, window, _cx| {
+                    let layout_bounds = bounds;
+                    window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, _cx| {
                         if phase != DispatchPhase::Bubble {
                             return;
                         }
@@ -424,23 +575,94 @@ impl Element for ReactDivElement {
                         if inside && !was_inside {
                             hover.insert(id);
                             drop(hover);
-                            emit_if(id, mouse_enter, "mouseEnter");
-                            emit_if(id, mouse_over, "mouseOver");
-                            emit_if(id, pointer_enter, "pointerEnter");
+                            emit_mouse_if(
+                                id,
+                                mouse_enter,
+                                "mouseEnter",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
+                            emit_mouse_if(
+                                id,
+                                mouse_over,
+                                "mouseOver",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
+                            emit_mouse_if(
+                                id,
+                                pointer_enter,
+                                "pointerEnter",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
                         } else if !inside && was_inside {
                             hover.remove(&id);
                             drop(hover);
-                            emit_if(id, mouse_leave, "mouseLeave");
-                            emit_if(id, mouse_out, "mouseOut");
-                            emit_if(id, pointer_leave, "pointerLeave");
+                            emit_mouse_if(
+                                id,
+                                mouse_leave,
+                                "mouseLeave",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
+                            emit_mouse_if(
+                                id,
+                                mouse_out,
+                                "mouseOut",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
+                            emit_mouse_if(
+                                id,
+                                pointer_leave,
+                                "pointerLeave",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
                         } else {
                             drop(hover);
                         }
-                        if inside {
-                            emit_if(id, mouse_move, "mouseMove");
-                            emit_if(id, pointer_move, "pointerMove");
-                            emit_if(id, touch_move, "touchMove");
-                            emit_if(id, responder_move, "responderMove");
+                        let captured = ACTIVE_MOUSE_TARGET.lock().unwrap().as_ref() == Some(&id);
+                        if inside || captured {
+                            emit_mouse_if(
+                                id,
+                                mouse_move,
+                                "mouseMove",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
+                            emit_mouse_if(
+                                id,
+                                pointer_move,
+                                "pointerMove",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
+                            emit_mouse_if(
+                                id,
+                                touch_move,
+                                "touchMove",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
+                            emit_mouse_if(
+                                id,
+                                responder_move,
+                                "responderMove",
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
                         }
                     });
                     window.on_mouse_event(move |_ev: &MouseExitEvent, phase, _w, _cx| {
@@ -475,6 +697,10 @@ impl Element for ReactDivElement {
                 bounds.size.width.into(),
                 bounds.size.height.into(),
             );
+        }
+
+        if let (Some(hitbox), Some(mouse_cursor)) = (prepaint.hitbox.as_ref(), style.mouse_cursor) {
+            window.set_cursor_style(mouse_cursor, hitbox);
         }
 
         style.paint(bounds, window, cx, |window, cx| {

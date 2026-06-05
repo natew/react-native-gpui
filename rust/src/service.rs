@@ -75,6 +75,10 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         .get("value")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let secure_text_entry = obj
+        .get("secureTextEntry")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let editable = obj
         .get("editable")
         .and_then(|v| v.as_bool())
@@ -137,6 +141,7 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         runs,
         src,
         value,
+        secure_text_entry,
         editable,
         events,
         accessibility,
@@ -211,22 +216,25 @@ struct ServiceApp {
     // persistent gpui-component input state, one per <TextInput>/<TextArea> id.
     inputs: HashMap<u64, Entity<InputState>>,
     input_values: HashMap<u64, Option<String>>,
+    input_secure: HashMap<u64, bool>,
     suppressed_input_changes: HashMap<u64, VecDeque<String>>,
     // persistent native WebView, one per <WebView> id, + its last-loaded content.
     webviews: HashMap<u64, Rc<wry::WebView>>,
     webview_content: HashMap<u64, String>,
 }
 
-type InputSpec = (u64, String, Option<String>, bool, bool);
+type InputSpec = (u64, String, Option<String>, bool, bool, bool);
 
-/// collect (id, placeholder, value, multiline, keypress listener) for every text-input node in the tree.
+/// collect (id, placeholder, value, multiline, secure, keypress listener) for every text-input node in the tree.
 fn collect_inputs(el: &Arc<ReactElement>, out: &mut Vec<InputSpec>) {
     if el.element_type == "textinput" || el.element_type == "textarea" {
+        let multiline = el.element_type == "textarea";
         out.push((
             el.global_id,
             el.text.clone().unwrap_or_default(),
             el.value.clone(),
-            el.element_type == "textarea",
+            multiline,
+            el.secure_text_entry && !multiline,
             el.listens("keyPress"),
         ));
     }
@@ -343,18 +351,22 @@ impl Render for ServiceApp {
         // it so this view re-renders (and the edit shows) when the input changes.
         let mut specs = Vec::new();
         collect_inputs(&self.root, &mut specs);
-        let present: HashSet<u64> = specs.iter().map(|(id, _, _, _, _)| *id).collect();
+        let present: HashSet<u64> = specs.iter().map(|(id, _, _, _, _, _)| *id).collect();
         self.inputs.retain(|id, _| present.contains(id));
         self.input_values.retain(|id, _| present.contains(id));
+        self.input_secure.retain(|id, _| present.contains(id));
         self.suppressed_input_changes
             .retain(|id, _| present.contains(id));
-        for (id, placeholder, value, multiline, listens_key_press) in specs {
+        for (id, placeholder, value, multiline, secure, listens_key_press) in specs {
             if !self.inputs.contains_key(&id) {
                 let initial_value = value.clone();
                 let state = cx.new(|cx| {
                     let mut s = InputState::new(window, cx).placeholder(placeholder.clone());
                     if multiline {
                         s = s.multi_line(true);
+                    }
+                    if secure {
+                        s = s.masked(true);
                     }
                     if let Some(value) = initial_value {
                         s = s.default_value(value);
@@ -410,6 +422,7 @@ impl Render for ServiceApp {
                 cx.observe(&state, |_this, _input, cx| cx.notify()).detach();
                 self.inputs.insert(id, state);
                 self.input_values.insert(id, value);
+                self.input_secure.insert(id, secure);
             } else if self.input_values.get(&id) != Some(&value) {
                 if let Some(next_value) = value.clone() {
                     if let Some(state) = self.inputs.get(&id) {
@@ -426,6 +439,14 @@ impl Render for ServiceApp {
                     }
                 }
                 self.input_values.insert(id, value);
+            }
+            if self.input_secure.get(&id).copied() != Some(secure) {
+                if let Some(state) = self.inputs.get(&id) {
+                    state.update(cx, |input, cx| {
+                        input.set_masked(secure, window, cx);
+                    });
+                }
+                self.input_secure.insert(id, secure);
             }
         }
         elements::input::set_entities(self.inputs.clone());
@@ -519,6 +540,7 @@ fn fallback_root() -> Arc<ReactElement> {
         runs: Vec::new(),
         src: None,
         value: None,
+        secure_text_entry: false,
         editable: true,
         events: Vec::new(),
         accessibility: AccessibilityInfo::default(),
@@ -731,6 +753,7 @@ fn main() {
             last_h: 0.0,
             inputs: HashMap::new(),
             input_values: HashMap::new(),
+            input_secure: HashMap::new(),
             suppressed_input_changes: HashMap::new(),
             webviews: HashMap::new(),
             webview_content: HashMap::new(),
@@ -753,7 +776,7 @@ fn main() {
             is_resizable: true,
             is_minimizable: true,
             display_id: None,
-            window_background: gpui::WindowBackgroundAppearance::default(),
+            window_background: gpui::WindowBackgroundAppearance::Blurred,
             app_id: None,
             window_min_size: None,
             window_decorations: None,

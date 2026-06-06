@@ -1,6 +1,6 @@
 {
     "name": "react-native-gpui",
-    "version": "0.1.14",
+    "version": "0.1.15",
     "private": true,
     "scripts": {
         "demo": "cd rust && cargo run --release --bin rngpui-demo",

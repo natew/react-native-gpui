@@ -1,6 +1,6 @@
 {
     "name": "react-native-gpui",
-    "version": "0.1.14",
+    "version": "0.1.15",
     "description": "Write React Native components, render them natively with GPUI (Zed's GPU UI framework).",
     "type": "module",
     "main": "dist/index.js",

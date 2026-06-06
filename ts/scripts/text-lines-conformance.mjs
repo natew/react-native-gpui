@@ -1,12 +1,14 @@
 #!/usr/bin/env bun
-import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdirSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { captureWindow, conformanceEnv, waitForServicePid, waitForWindow } from "./conformance-utils.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = process.argv[2] || "/tmp/rngpui-text-lines-conformance";
 const screenshotPath = `${outDir}/text-lines.png`;
+const pidPath = `${outDir}/service.pid`;
 const expectedWidth = 540;
 const expectedHeight = 300;
 const expectedPasses = [
@@ -21,10 +23,7 @@ mkdirSync(outDir, { recursive: true });
 
 const child = spawn("bun", ["examples/number-of-lines-conformance.tsx"], {
     cwd: root,
-    env: {
-        ...process.env,
-        RNGPUI_NO_ACTIVATE: "1",
-    },
+    env: conformanceEnv({ RNGPUI_SERVICE_PID_FILE: pidPath }),
     stdio: ["ignore", "pipe", "pipe"],
 });
 
@@ -46,7 +45,8 @@ const childExit = new Promise((resolve) => child.once("exit", resolve));
 
 try {
     await waitForPasses(5000);
-    const window = await waitForTextWindow(5000);
+    const pid = await waitForServicePid(pidPath, { timeoutMs: 5000, isFixtureExited: () => exited });
+    const window = await waitForTextWindow(pid, 5000);
     captureWindow(window, screenshotPath);
     console.log(
         `TEXT_LINES_CONFORMANCE_PASS checks=${expectedPasses.length} window=${window.window_id} screenshot=${screenshotPath}`,
@@ -77,80 +77,15 @@ function linePassed(name) {
         .some((line) => line.includes(`CONFORMANCE numberOfLines ${name}`) && /\bPASS\b/.test(line));
 }
 
-async function waitForTextWindow(timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-        const match = listWindows().find(
-            (window) =>
-                window.app_name === "rngpui-service" &&
-                window.title === "react-native-gpui" &&
-                window.is_on_screen &&
-                Math.abs(window.bounds.width - expectedWidth) <= 80 &&
-                Math.abs(window.bounds.height - expectedHeight) <= 80,
-        );
-        if (match) return match;
-        await sleep(100);
-    }
-    throw new Error("text-lines GPUI window was not found");
-}
-
-function listWindows() {
-    const swift = `
-import Foundation
-import CoreGraphics
-let list = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
-for window in list {
-    let owner = window[kCGWindowOwnerName as String] as? String ?? ""
-    let title = window[kCGWindowName as String] as? String ?? ""
-    let id = (window[kCGWindowNumber as String] as? NSNumber)?.intValue ?? 0
-    let pid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.intValue ?? 0
-    let bounds = window[kCGWindowBounds as String] as? [String: Any] ?? [:]
-    let width = (bounds["Width"] as? NSNumber)?.intValue ?? 0
-    let height = (bounds["Height"] as? NSNumber)?.intValue ?? 0
-    print("\\(id)\\t\\(pid)\\t\\(owner)\\t\\(title)\\t\\(width)\\t\\(height)")
-}
-`;
-    const raw = execFileSync("swift", ["-e", swift], {
-        encoding: "utf8",
-        stdio: "pipe",
-    });
-    return raw
-        .trim()
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => {
-            const [window_id, pid, app_name, title, width, height] = line.split("\t");
-            return {
-                window_id: Number(window_id),
-                pid: Number(pid),
-                app_name,
-                title,
-                is_on_screen: Number(width) > 0 && Number(height) > 0,
-                bounds: {
-                    width: Number(width),
-                    height: Number(height),
-                },
-            };
-        })
-        .filter((window) => Number.isFinite(window.window_id) && window.window_id > 0);
-}
-
-function captureWindow(window, path) {
-    execFileSync(
-        "cua-driver",
-        [
-            "call",
-            "get_window_state",
-            JSON.stringify({
-                pid: window.pid,
-                window_id: window.window_id,
-                capture_mode: "vision",
-                screenshot_out_file: path,
-            }),
-        ],
-        { encoding: "utf8", stdio: "pipe" },
+async function waitForTextWindow(pid, timeoutMs) {
+    return waitForWindow(
+        (window) =>
+            window.pid === pid &&
+            window.title === "react-native-gpui" &&
+            Math.abs(window.bounds.width - expectedWidth) <= 80 &&
+            Math.abs(window.bounds.height - expectedHeight) <= 80,
+        { timeoutMs, isFixtureExited: () => exited },
     );
-    if (!existsSync(path)) throw new Error(`screenshot was not written at ${path}`);
 }
 
 function sleep(ms) {

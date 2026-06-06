@@ -94,7 +94,7 @@ function uiMeasureLayout(handle: number, rootHandle: number, label: string): Pro
 function withTimeout<T>(label: string, promise: Promise<T>): Promise<T> {
     return Promise.race([
         promise,
-        new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label} timeout`)), 3000)),
+        new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label} timeout`)), 1500)),
     ]);
 }
 
@@ -107,7 +107,7 @@ function App() {
     useEffect(() => {
         let canceled = false;
         async function run() {
-            await wait(100);
+            await wait(50);
             const target = targetRef.current;
             const root = rootRef.current;
             const text = textRef.current;
@@ -127,7 +127,7 @@ function App() {
             await measureRef(text, "Text.ref.measure");
 
             setWide(true);
-            await wait(150);
+            await wait(70);
             const updated = await measureRef(target, "ref.measure after update");
             if (Math.round(updated.width) !== 220) {
                 throw new Error(`stale after update width=${updated.width}`);

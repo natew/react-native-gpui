@@ -28,6 +28,8 @@ struct ScrollOffset {
 struct NativeLayoutOverride {
     width: Option<f32>,
     height: Option<f32>,
+    x: Option<f32>,
+    y: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -42,6 +44,10 @@ struct NativeLayoutAnimation {
     to_width: Option<f32>,
     from_height: Option<f32>,
     to_height: Option<f32>,
+    from_x: Option<f32>,
+    to_x: Option<f32>,
+    from_y: Option<f32>,
+    to_y: Option<f32>,
     start: Instant,
     duration: Duration,
 }
@@ -57,11 +63,23 @@ struct ActiveNativeResize {
     start_value: f32,
 }
 
+#[derive(Clone, Debug)]
+struct ActivePressDrag {
+    start_id: u64,
+    group: Option<String>,
+    did_activate: bool,
+    left_start: bool,
+    start_events: Vec<String>,
+    start_bounds: Bounds<Pixels>,
+    start_cancelled: bool,
+}
+
 static SCROLL: Lazy<Mutex<HashMap<u64, ScrollOffset>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static SCROLL_TO_END: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static ACTIVE_MOUSE_TARGET: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
 static CAPTURED_MOUSE_UP_TARGET: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
+static ACTIVE_PRESS_DRAG: Lazy<Mutex<Option<ActivePressDrag>>> = Lazy::new(|| Mutex::new(None));
 static NATIVE_LAYOUT_OVERRIDES: Lazy<Mutex<HashMap<String, NativeLayoutOverride>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static NATIVE_LAYOUT_FRAMES: Lazy<Mutex<HashMap<String, NativeLayoutFrame>>> =
@@ -100,25 +118,33 @@ pub fn scroll_to_end(id: u64) {
     SCROLL_TO_END.lock().unwrap().insert(id);
 }
 
-pub fn set_native_layout_override(key: &str, width: Option<f32>, height: Option<f32>) {
+pub fn set_native_layout_override(
+    key: &str,
+    width: Option<f32>,
+    height: Option<f32>,
+    x: Option<f32>,
+    y: Option<f32>,
+) {
     if key.is_empty() {
         return;
     }
     NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().remove(key);
-    set_native_layout_override_now(key, width, height);
+    set_native_layout_override_now(key, width, height, x, y);
 }
 
 pub fn animate_native_layout_override(
     key: &str,
     width: Option<f32>,
     height: Option<f32>,
+    x: Option<f32>,
+    y: Option<f32>,
     duration_ms: f32,
 ) {
     if key.is_empty() {
         return;
     }
     if duration_ms <= 0.0 || (!duration_ms.is_finite()) {
-        set_native_layout_override(key, width, height);
+        set_native_layout_override(key, width, height, x, y);
         return;
     }
 
@@ -136,6 +162,8 @@ pub fn animate_native_layout_override(
             .or_else(|| frame.map(|frame| frame.height))
             .unwrap_or(0.0)
     });
+    let from_x = x.map(|_| current.x.unwrap_or(0.0));
+    let from_y = y.map(|_| current.y.unwrap_or(0.0));
     NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().insert(
         key.to_string(),
         NativeLayoutAnimation {
@@ -143,13 +171,23 @@ pub fn animate_native_layout_override(
             to_width: width,
             from_height,
             to_height: height,
+            from_x,
+            to_x: x,
+            from_y,
+            to_y: y,
             start: Instant::now(),
             duration: Duration::from_secs_f32((duration_ms / 1000.0).max(0.001)),
         },
     );
 }
 
-fn set_native_layout_override_now(key: &str, width: Option<f32>, height: Option<f32>) {
+fn set_native_layout_override_now(
+    key: &str,
+    width: Option<f32>,
+    height: Option<f32>,
+    x: Option<f32>,
+    y: Option<f32>,
+) {
     let mut overrides = NATIVE_LAYOUT_OVERRIDES.lock().unwrap();
     let mut next = overrides.get(key).copied().unwrap_or_default();
     if width.is_some() {
@@ -158,7 +196,13 @@ fn set_native_layout_override_now(key: &str, width: Option<f32>, height: Option<
     if height.is_some() {
         next.height = height;
     }
-    if next.width.is_none() && next.height.is_none() {
+    if x.is_some() {
+        next.x = x;
+    }
+    if y.is_some() {
+        next.y = y;
+    }
+    if next.width.is_none() && next.height.is_none() && next.x.is_none() && next.y.is_none() {
         overrides.remove(key);
     } else {
         overrides.insert(key.to_string(), next);
@@ -200,7 +244,13 @@ fn native_layout_override(key: &str) -> NativeLayoutOverride {
         let (next, done) = native_layout_animation_value(animation, now);
         if done {
             NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().remove(key);
-            set_native_layout_override_now(key, animation.to_width, animation.to_height);
+            set_native_layout_override_now(
+                key,
+                animation.to_width,
+                animation.to_height,
+                animation.to_x,
+                animation.to_y,
+            );
             return NATIVE_LAYOUT_OVERRIDES
                 .lock()
                 .unwrap()
@@ -218,8 +268,8 @@ fn native_layout_override(key: &str) -> NativeLayoutOverride {
         .unwrap_or_default()
 }
 
-fn native_layout_is_animating(key: &str) -> bool {
-    NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().contains_key(key)
+pub fn native_layout_has_animations() -> bool {
+    !NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().is_empty()
 }
 
 fn native_layout_animation_value(
@@ -238,6 +288,12 @@ fn native_layout_animation_value(
             height: animation
                 .to_height
                 .map(|to| lerp(animation.from_height.unwrap_or(to), to, progress)),
+            x: animation
+                .to_x
+                .map(|to| lerp(animation.from_x.unwrap_or(to), to, progress)),
+            y: animation
+                .to_y
+                .map(|to| lerp(animation.from_y.unwrap_or(to), to, progress)),
         },
         done,
     )
@@ -310,7 +366,7 @@ fn update_native_resize(active: &ActiveNativeResize, position: Point<Pixels>) ->
     if active.edge.is_horizontal() {
         let changed = current.width.is_none_or(|value| (value - next).abs() > 0.5);
         if changed {
-            set_native_layout_override(&active.target, Some(next), None);
+            set_native_layout_override(&active.target, Some(next), None, None, None);
         }
         changed
     } else {
@@ -318,7 +374,7 @@ fn update_native_resize(active: &ActiveNativeResize, position: Point<Pixels>) ->
             .height
             .is_none_or(|value| (value - next).abs() > 0.5);
         if changed {
-            set_native_layout_override(&active.target, None, Some(next));
+            set_native_layout_override(&active.target, None, Some(next), None, None);
         }
         changed
     }
@@ -353,6 +409,161 @@ fn emit_mouse_if(
         modifiers.alt,
         modifiers.platform,
     );
+}
+
+fn events_have_press_action(events: &[String]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event.as_str(),
+            "press" | "click" | "responderRelease" | "touchEnd" | "mouseUp" | "pointerUp"
+        )
+    })
+}
+
+fn press_drag_groups_match(active_group: &Option<String>, target_group: &Option<String>) -> bool {
+    match (active_group.as_deref(), target_group.as_deref()) {
+        (Some(active), Some(target)) => active == target,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn press_drag_should_activate(
+    active: &mut ActivePressDrag,
+    target_id: u64,
+    target_group: &Option<String>,
+) -> bool {
+    if target_id == active.start_id && !active.left_start {
+        return false;
+    }
+    if !press_drag_groups_match(&active.group, target_group) {
+        return false;
+    }
+    active.left_start = active.left_start || target_id != active.start_id;
+    active.did_activate = true;
+    true
+}
+
+fn press_drag_mark_left_start(id: u64) {
+    let mut guard = ACTIVE_PRESS_DRAG.lock().unwrap();
+    if let Some(active) = guard.as_mut()
+        && active.start_id == id
+    {
+        active.left_start = true;
+    }
+}
+
+fn emit_press_action_sequence(
+    id: u64,
+    events: &[String],
+    position: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    modifiers: Modifiers,
+) {
+    for name in [
+        "mouseDown",
+        "pointerDown",
+        "touchStart",
+        "startShouldSetResponderCapture",
+        "startShouldSetResponder",
+        "responderStart",
+        "responderGrant",
+        "pressIn",
+        "mouseUp",
+        "pointerUp",
+        "touchEnd",
+        "responderRelease",
+        "responderEnd",
+        "pressOut",
+        "press",
+        "click",
+    ] {
+        emit_mouse_if(
+            id,
+            events.iter().any(|event| event == name),
+            name,
+            position,
+            bounds,
+            modifiers,
+        );
+    }
+}
+
+fn emit_press_cancel_sequence(
+    id: u64,
+    events: &[String],
+    position: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    modifiers: Modifiers,
+) {
+    for name in [
+        "touchCancel",
+        "responderTerminationRequest",
+        "responderTerminate",
+        "pressOut",
+    ] {
+        emit_mouse_if(
+            id,
+            events.iter().any(|event| event == name),
+            name,
+            position,
+            bounds,
+            modifiers,
+        );
+    }
+}
+
+fn press_drag_should_suppress_captured_action(id: u64) -> bool {
+    ACTIVE_PRESS_DRAG
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|active| active.start_id == id && active.did_activate)
+}
+
+fn activate_drag_press_if_needed(
+    id: u64,
+    group: &Option<String>,
+    events: &[String],
+    position: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    modifiers: Modifiers,
+) -> bool {
+    let mut guard = ACTIVE_PRESS_DRAG.lock().unwrap();
+    let mut cancel_start: Option<(u64, Vec<String>, Bounds<Pixels>)> = None;
+    let should_activate = match guard.as_mut() {
+        Some(active) => {
+            if !press_drag_should_activate(active, id, group) {
+                false
+            } else {
+                if !active.start_cancelled {
+                    active.start_cancelled = true;
+                    cancel_start = Some((
+                        active.start_id,
+                        active.start_events.clone(),
+                        active.start_bounds,
+                    ));
+                }
+                true
+            }
+        }
+        None => false,
+    };
+    drop(guard);
+    if !should_activate {
+        return false;
+    };
+    if let Some((start_id, start_events, start_bounds)) = cancel_start {
+        emit_press_cancel_sequence(start_id, &start_events, position, start_bounds, modifiers);
+    }
+    emit_press_action_sequence(id, events, position, bounds, modifiers);
+    true
+}
+
+pub fn finish_pointer_gesture() {
+    *ACTIVE_MOUSE_TARGET.lock().unwrap() = None;
+    *CAPTURED_MOUSE_UP_TARGET.lock().unwrap() = None;
+    *ACTIVE_PRESS_DRAG.lock().unwrap() = None;
 }
 
 /// (clip, scroll) for an overflow value.
@@ -419,6 +630,11 @@ impl ReactDivElement {
 
 fn stacked_child_indices_for(z_indices: impl IntoIterator<Item = i32>) -> Vec<usize> {
     let mut indexed = z_indices.into_iter().enumerate().collect::<Vec<_>>();
+    // fast path: when no child overrides z-index (the overwhelmingly common case)
+    // document order already is stacking order — skip the comparison sort + remap.
+    if indexed.iter().all(|(_, z_index)| *z_index == 0) {
+        return (0..indexed.len()).collect();
+    }
     indexed.sort_by_key(|(index, z_index)| (*z_index, *index));
     indexed.into_iter().map(|(index, _)| index).collect()
 }
@@ -637,8 +853,11 @@ impl Element for ReactDivElement {
             if let Some(height) = native.height {
                 style.size.height = px(height).into();
             }
-            if native_layout_is_animating(key) {
-                window.refresh();
+            if let Some(x) = native.x {
+                style.inset.left = px(x).into();
+            }
+            if let Some(y) = native.y {
+                style.inset.top = px(y).into();
             }
         }
         let inherited = self.element.style.clone();
@@ -759,6 +978,25 @@ impl Element for ReactDivElement {
         } else {
             None
         };
+
+        // record this element as a hit-test occluder when it has a visible background or
+        // handles pointer input, so it blocks native webview passthrough wherever it
+        // paints over a webview (e.g. the floating composer / command palette over the
+        // timeline). see `crate::hit_passthrough`.
+        let has_visible_bg = self.element.style.background_image.is_some()
+            || self
+                .element
+                .style
+                .background_color
+                .is_some_and(|c| c.a > 0.0);
+        if interactive || has_visible_bg {
+            crate::hit_passthrough::record_occluder(
+                bounds.origin.x.into(),
+                bounds.origin.y.into(),
+                bounds.size.width.into(),
+                bounds.size.height.into(),
+            );
+        }
 
         let mut max_scroll_x = 0.0;
         let mut max_scroll_y = 0.0;
@@ -953,6 +1191,9 @@ impl Element for ReactDivElement {
         let press = self.element.listens("press") || self.element.listens("longPress");
         let press_in = self.element.listens("pressIn");
         let press_out = self.element.listens("pressOut");
+        let press_action = events_have_press_action(&self.element.events);
+        let press_group = self.element.native_list_group.clone();
+        let event_names = self.element.events.clone();
         let tracks_pointer = click
             || mouse_down
             || mouse_up
@@ -992,9 +1233,12 @@ impl Element for ReactDivElement {
                     || responder_grant
                     || responder_start
                     || press_in
+                    || press_action
                 {
                     let event_bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
                     let layout_bounds = bounds;
+                    let press_group_for_down = press_group.clone();
+                    let event_names_for_down = event_names.clone();
                     window.on_mouse_event(move |ev: &MouseDownEvent, phase, _window, _cx| {
                         if phase == DispatchPhase::Bubble
                             && ev.button == MouseButton::Left
@@ -1005,7 +1249,19 @@ impl Element for ReactDivElement {
                             if active.is_none() {
                                 *active = Some(id);
                             }
+                            let active_target = *active;
                             drop(active);
+                            if press_action && active_target == Some(id) {
+                                *ACTIVE_PRESS_DRAG.lock().unwrap() = Some(ActivePressDrag {
+                                    start_id: id,
+                                    group: press_group_for_down.clone(),
+                                    did_activate: false,
+                                    left_start: false,
+                                    start_events: event_names_for_down.clone(),
+                                    start_bounds: layout_bounds,
+                                    start_cancelled: false,
+                                });
+                            }
                             emit_mouse_if(
                                 id,
                                 mouse_down,
@@ -1092,6 +1348,8 @@ impl Element for ReactDivElement {
                         let active_target = *ACTIVE_MOUSE_TARGET.lock().unwrap();
                         let captured_up_target = *CAPTURED_MOUSE_UP_TARGET.lock().unwrap();
                         let captured = active_target == Some(id);
+                        let suppress_action =
+                            captured && press_drag_should_suppress_captured_action(id);
                         if !target_receives_pointer_up_event(
                             active_target,
                             captured_up_target,
@@ -1103,10 +1361,11 @@ impl Element for ReactDivElement {
                         if captured {
                             *ACTIVE_MOUSE_TARGET.lock().unwrap() = None;
                             *CAPTURED_MOUSE_UP_TARGET.lock().unwrap() = Some(id);
+                            *ACTIVE_PRESS_DRAG.lock().unwrap() = None;
                         }
                         emit_mouse_if(
                             id,
-                            mouse_up,
+                            mouse_up && !suppress_action,
                             "mouseUp",
                             ev.position,
                             layout_bounds,
@@ -1114,7 +1373,7 @@ impl Element for ReactDivElement {
                         );
                         emit_mouse_if(
                             id,
-                            pointer_up,
+                            pointer_up && !suppress_action,
                             "pointerUp",
                             ev.position,
                             layout_bounds,
@@ -1122,7 +1381,7 @@ impl Element for ReactDivElement {
                         );
                         emit_mouse_if(
                             id,
-                            touch_end,
+                            touch_end && !suppress_action,
                             "touchEnd",
                             ev.position,
                             layout_bounds,
@@ -1130,7 +1389,7 @@ impl Element for ReactDivElement {
                         );
                         emit_mouse_if(
                             id,
-                            responder_release,
+                            responder_release && !suppress_action,
                             "responderRelease",
                             ev.position,
                             layout_bounds,
@@ -1146,7 +1405,7 @@ impl Element for ReactDivElement {
                         );
                         emit_mouse_if(
                             id,
-                            press_out,
+                            press_out && !suppress_action,
                             "pressOut",
                             ev.position,
                             layout_bounds,
@@ -1155,7 +1414,7 @@ impl Element for ReactDivElement {
                         if inside {
                             emit_mouse_if(
                                 id,
-                                press,
+                                press && !suppress_action,
                                 "press",
                                 ev.position,
                                 layout_bounds,
@@ -1163,7 +1422,7 @@ impl Element for ReactDivElement {
                             );
                             emit_mouse_if(
                                 id,
-                                click,
+                                click && !suppress_action,
                                 "click",
                                 ev.position,
                                 layout_bounds,
@@ -1182,9 +1441,12 @@ impl Element for ReactDivElement {
                     || pointer_move
                     || touch_move
                     || responder_move
+                    || press_action
                 {
                     let hitbox_for_move = hitbox.clone();
                     let layout_bounds = bounds;
+                    let press_group_for_move = press_group.clone();
+                    let event_names_for_move = event_names.clone();
                     window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, _cx| {
                         if phase != DispatchPhase::Bubble {
                             return;
@@ -1219,9 +1481,22 @@ impl Element for ReactDivElement {
                                 layout_bounds,
                                 ev.modifiers,
                             );
+                            if ev.dragging() && press_action {
+                                activate_drag_press_if_needed(
+                                    id,
+                                    &press_group_for_move,
+                                    &event_names_for_move,
+                                    ev.position,
+                                    layout_bounds,
+                                    ev.modifiers,
+                                );
+                            }
                         } else if !inside && was_inside {
                             hover.remove(&id);
                             drop(hover);
+                            if ev.dragging() && press_action {
+                                press_drag_mark_left_start(id);
+                            }
                             emit_mouse_if(
                                 id,
                                 mouse_leave,
@@ -1248,6 +1523,9 @@ impl Element for ReactDivElement {
                             );
                         } else {
                             drop(hover);
+                            if !inside && ev.dragging() && press_action {
+                                press_drag_mark_left_start(id);
+                            }
                         }
                         let active_target = *ACTIVE_MOUSE_TARGET.lock().unwrap();
                         if target_receives_captured_pointer_event(active_target, id, inside) {
@@ -1302,6 +1580,11 @@ impl Element for ReactDivElement {
                                 "responderTerminationRequest",
                             );
                             emit_if(id, responder_terminate, "responderTerminate");
+                        }
+                        if *ACTIVE_MOUSE_TARGET.lock().unwrap() == Some(id) {
+                            *ACTIVE_MOUSE_TARGET.lock().unwrap() = None;
+                            *ACTIVE_PRESS_DRAG.lock().unwrap() = None;
+                            *CAPTURED_MOUSE_UP_TARGET.lock().unwrap() = None;
                         }
                     });
                 }
@@ -1368,13 +1651,14 @@ mod tests {
     use once_cell::sync::Lazy;
 
     use super::{
-        ActiveNativeResize, NATIVE_LAYOUT_ANIMATIONS, NATIVE_LAYOUT_FRAMES,
+        ActiveNativeResize, ActivePressDrag, NATIVE_LAYOUT_ANIMATIONS, NATIVE_LAYOUT_FRAMES,
         NATIVE_LAYOUT_OVERRIDES, NativeLayoutAnimation, NativeLayoutOverride, RoundedOverflowClip,
-        clear_native_layout_override, get_scroll, inner_corner_radius,
-        native_layout_animation_value, native_layout_override, remember_native_layout_frame,
-        rounded_clip_radii_for_bounds, scroll_to, set_native_layout_override,
-        stacked_child_indices_for, target_receives_captured_pointer_event,
-        target_receives_pointer_up_event, update_native_resize,
+        clear_native_layout_override, events_have_press_action, get_scroll, inner_corner_radius,
+        native_layout_animation_value, native_layout_override, press_drag_should_activate,
+        remember_native_layout_frame, rounded_clip_radii_for_bounds, scroll_to,
+        set_native_layout_override, stacked_child_indices_for,
+        target_receives_captured_pointer_event, target_receives_pointer_up_event,
+        update_native_resize,
     };
     use crate::elements::NativeResizeEdge;
 
@@ -1419,6 +1703,85 @@ mod tests {
         assert!(target_receives_pointer_up_event(Some(1), None, 1, true));
         assert!(!target_receives_pointer_up_event(None, Some(1), 2, true));
         assert!(target_receives_pointer_up_event(None, None, 2, true));
+    }
+
+    #[test]
+    fn press_action_includes_responder_and_mouse_release_events() {
+        let events = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert!(events_have_press_action(&events(&["press"])));
+        assert!(events_have_press_action(&events(&["click"])));
+        assert!(events_have_press_action(&events(&["responderRelease"])));
+        assert!(events_have_press_action(&events(&["touchEnd"])));
+        assert!(events_have_press_action(&events(&["mouseUp"])));
+        assert!(events_have_press_action(&events(&["pointerUp"])));
+        assert!(!events_have_press_action(&events(&[
+            "mouseEnter",
+            "responderGrant"
+        ])));
+    }
+
+    #[test]
+    fn press_drag_activation_repeats_on_hover_entry_and_stays_group_scoped() {
+        let mut active = ActivePressDrag {
+            start_id: 1,
+            group: Some("files".to_string()),
+            did_activate: false,
+            left_start: false,
+            start_events: Vec::new(),
+            start_bounds: Bounds::default(),
+            start_cancelled: false,
+        };
+        let files = Some("files".to_string());
+        let sessions = Some("sessions".to_string());
+
+        assert!(press_drag_should_activate(&mut active, 2, &files));
+        assert!(active.did_activate);
+        assert!(active.left_start);
+        assert!(press_drag_should_activate(&mut active, 2, &files));
+        assert!(press_drag_should_activate(&mut active, 1, &files));
+        assert!(!press_drag_should_activate(&mut active, 3, &sessions));
+        assert!(!press_drag_should_activate(&mut active, 4, &None));
+    }
+
+    #[test]
+    fn press_drag_start_target_waits_until_pointer_leaves() {
+        let mut active = ActivePressDrag {
+            start_id: 1,
+            group: Some("files".to_string()),
+            did_activate: false,
+            left_start: false,
+            start_events: Vec::new(),
+            start_bounds: Bounds::default(),
+            start_cancelled: false,
+        };
+        let files = Some("files".to_string());
+
+        assert!(!press_drag_should_activate(&mut active, 1, &files));
+        active.left_start = true;
+        assert!(press_drag_should_activate(&mut active, 1, &files));
+    }
+
+    #[test]
+    fn ungrouped_press_drag_stays_in_ungrouped_targets() {
+        let mut active = ActivePressDrag {
+            start_id: 1,
+            group: None,
+            did_activate: false,
+            left_start: true,
+            start_events: Vec::new(),
+            start_bounds: Bounds::default(),
+            start_cancelled: false,
+        };
+        let files = Some("files".to_string());
+
+        assert!(press_drag_should_activate(&mut active, 2, &None));
+        assert!(!press_drag_should_activate(&mut active, 3, &files));
     }
 
     #[test]
@@ -1468,11 +1831,12 @@ mod tests {
     fn native_layout_override_updates_axes_independently() {
         let _guard = native_layout_test_guard();
         clear_native_layout_override("pane-a");
-        set_native_layout_override("pane-a", Some(240.0), None);
-        set_native_layout_override("pane-a", None, Some(120.0));
+        set_native_layout_override("pane-a", Some(240.0), None, None, None);
+        set_native_layout_override("pane-a", None, Some(120.0), Some(-12.0), None);
         let next = native_layout_override("pane-a");
         assert_eq!(next.width, Some(240.0));
         assert_eq!(next.height, Some(120.0));
+        assert_eq!(next.x, Some(-12.0));
         clear_native_layout_override("pane-a");
         assert_eq!(
             native_layout_override("pane-a"),
@@ -1488,6 +1852,10 @@ mod tests {
             to_width: Some(200.0),
             from_height: Some(60.0),
             to_height: Some(120.0),
+            from_x: Some(0.0),
+            to_x: Some(-80.0),
+            from_y: None,
+            to_y: None,
             start,
             duration: Duration::from_millis(100),
         };
@@ -1495,6 +1863,7 @@ mod tests {
         let (initial, done) = native_layout_animation_value(animation, start);
         assert_eq!(initial.width, Some(100.0));
         assert_eq!(initial.height, Some(60.0));
+        assert_eq!(initial.x, Some(0.0));
         assert!(!done);
 
         let (mid, done) =
@@ -1503,12 +1872,15 @@ mod tests {
         assert!(mid.width.unwrap() < 200.0);
         assert!(mid.height.unwrap() > 60.0);
         assert!(mid.height.unwrap() < 120.0);
+        assert!(mid.x.unwrap() < 0.0);
+        assert!(mid.x.unwrap() > -80.0);
         assert!(!done);
 
         let (final_size, done) =
             native_layout_animation_value(animation, start + Duration::from_millis(100));
         assert_eq!(final_size.width, Some(200.0));
         assert_eq!(final_size.height, Some(120.0));
+        assert_eq!(final_size.x, Some(-80.0));
         assert!(done);
     }
 
@@ -1523,6 +1895,10 @@ mod tests {
                 to_width: Some(0.0),
                 from_height: None,
                 to_height: None,
+                from_x: None,
+                to_x: None,
+                from_y: None,
+                to_y: None,
                 start: Instant::now() - Duration::from_millis(200),
                 duration: Duration::from_millis(100),
             },
@@ -1587,8 +1963,8 @@ mod tests {
     #[test]
     fn retain_native_layout_keys_drops_stale_state() {
         let _guard = native_layout_test_guard();
-        set_native_layout_override("keep", Some(10.0), None);
-        set_native_layout_override("drop", Some(20.0), None);
+        set_native_layout_override("keep", Some(10.0), None, None, None);
+        set_native_layout_override("drop", Some(20.0), None, None, None);
         NATIVE_LAYOUT_FRAMES.lock().unwrap().insert(
             "drop".to_string(),
             super::NativeLayoutFrame {
@@ -1603,6 +1979,10 @@ mod tests {
                 to_width: Some(40.0),
                 from_height: None,
                 to_height: None,
+                from_x: None,
+                to_x: None,
+                from_y: None,
+                to_y: None,
                 start: Instant::now(),
                 duration: Duration::from_millis(100),
             },

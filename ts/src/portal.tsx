@@ -24,6 +24,8 @@ const ROOT_HOST_STYLE: ViewStyle = {
     right: 0,
     bottom: 0,
     left: 0,
+    width: "100%",
+    height: "100%",
 };
 
 export function PortalProvider({ children }: PortalProviderProps) {
@@ -36,12 +38,13 @@ export function PortalProvider({ children }: PortalProviderProps) {
 }
 
 export function PortalHost({ name = "root", style, children }: PortalHostProps) {
+    const hostStyle = name === "root" ? [ROOT_HOST_STYLE, style].filter(Boolean) : style;
     return createElement(
         "RNTPortalHostView",
         {
             name,
             pointerEvents: "box-none",
-            style,
+            style: hostStyle,
         },
         children ?? null,
     );

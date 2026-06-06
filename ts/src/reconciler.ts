@@ -612,18 +612,22 @@ function collectPortals(node: Instance | TextInstance, byHost: Map<string, Insta
     for (const child of node.children) collectPortals(child, byHost);
 }
 
-function serializeChildren(children: Array<Instance | TextInstance>, context: PortalContext): SerializedNode[] {
+function serializeChildren(
+    children: Array<Instance | TextInstance>,
+    context: PortalContext,
+    listGroup?: string,
+): SerializedNode[] {
     const out: SerializedNode[] = [];
     for (const child of children) {
-        const next = serialize(child, context);
+        const next = serialize(child, context, listGroup);
         if (next) out.push(next);
     }
     return out;
 }
 
-function serializePortalEntry(inst: Instance, context: PortalContext): SerializedNode[] {
+function serializePortalEntry(inst: Instance, context: PortalContext, listGroup?: string): SerializedNode[] {
     const style = (normalizeStyle(inst.props.style as never) ?? {}) as Record<string, unknown>;
-    const children = serializeChildren(inst.children, context);
+    const children = serializeChildren(inst.children, context, listGroup);
     if (Object.keys(style).length === 0) return children;
     return [
         {
@@ -635,11 +639,12 @@ function serializePortalEntry(inst: Instance, context: PortalContext): Serialize
     ];
 }
 
-function serialize(inst: Instance | TextInstance, context: PortalContext): SerializedNode | null {
+function serialize(inst: Instance | TextInstance, context: PortalContext, inheritedListGroup?: string): SerializedNode | null {
     if (isTextLike(inst)) return { globalId: inst.id, type: "text", text: inst.text };
     if (inst.type === PORTAL_VIEW_TYPE) return null;
 
     const props = inst.props;
+    const listGroup = stringProp(props, "nativeListGroup") ?? inheritedListGroup;
     const baseStyle = (normalizeStyle(props.style as never) ?? {}) as Record<string, unknown>;
     const hoverStyle =
         props.hoverStyle && hoveredIds.has(inst.id)
@@ -715,6 +720,7 @@ function serialize(inst: Instance | TextInstance, context: PortalContext): Seria
     if (nativeLayoutKey) node.nativeLayoutKey = nativeLayoutKey;
     const nativeResize = normalizeNativeResize(props.nativeResize);
     if (nativeResize) node.nativeResize = nativeResize;
+    if (listGroup) node.nativeListGroup = listGroup;
     const evts = handlers.get(inst.id);
     const eventNames = evts ? Object.keys(evts) : [];
     if (measuredIds.has(inst.id) && !eventNames.includes("layout")) eventNames.push("layout");
@@ -723,14 +729,14 @@ function serialize(inst: Instance | TextInstance, context: PortalContext): Seria
     if (accessibility) node.accessibility = accessibility;
 
     if (node.type === "div" || node.type === "svg" /* svg has no children but harmless */) {
-        const kids = serializeChildren(inst.children, context);
+        const kids = serializeChildren(inst.children, context, listGroup);
         if (inst.type === PORTAL_HOST_TYPE) {
             const hostName = portalHostName(props);
             if (!context.usedHosts.has(hostName)) {
                 context.usedHosts.add(hostName);
                 const portalEntries = context.byHost.get(hostName) ?? [];
                 for (const entry of portalEntries) {
-                    kids.push(...serializePortalEntry(entry, context));
+                    kids.push(...serializePortalEntry(entry, context, listGroup));
                 }
             }
         }
@@ -795,7 +801,7 @@ export function serializeContainer(c: Container): SerializedNode {
     return {
         globalId: 0,
         type: "div",
-        style: { width: c.width, height: c.height, flexDirection: "column" },
+        style: { width: c.width, height: c.height, flexDirection: "column", position: "relative" },
         children: serializeChildren(c.children, context),
     };
 }

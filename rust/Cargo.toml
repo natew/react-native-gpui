@@ -32,4 +32,6 @@ raw-window-handle = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
+core-foundation = "0.10"
+core-graphics = "0.24"
 objc = "0.2"

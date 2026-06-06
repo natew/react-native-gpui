@@ -62,7 +62,7 @@ function App() {
             focusAttempts += 1;
             inputRef.current?.focus();
             if (focusAttempts >= 10) clearInterval(focusTimer);
-        }, 150);
+        }, 50);
         let failTimer: ReturnType<typeof setTimeout> | undefined;
         if (expected) {
             failTimer = setTimeout(() => {
@@ -70,7 +70,7 @@ function App() {
                     `CONFORMANCE input FAIL timeout draft=${JSON.stringify(draftRef.current)} submitted=${JSON.stringify(submitted)}`,
                 );
                 process.exit(1);
-            }, 20000);
+            }, 5000);
         }
         return () => {
             clearInterval(focusTimer);

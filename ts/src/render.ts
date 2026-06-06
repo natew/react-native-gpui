@@ -8,7 +8,7 @@ import Reconciler, { setCommitSink, serializeContainer, dispatchEvent, type Cont
 import { startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type SerializedNode } from "./runtime";
 import { AppCommands, setCommandSink } from "./commands";
 import { Dimensions } from "./Dimensions";
-import { setAppearanceUpdateSink } from "./colors";
+import { applyNativeColorScheme, setAppearanceUpdateSink } from "./colors";
 
 export type DevtoolsOptions = {
     /** hold Option to inspect native GPUI nodes; Option-click copies a node snapshot. */
@@ -59,6 +59,13 @@ export function createRoot(options: RootOptions = {}): Root {
         }
         if (e.type === "command") {
             AppCommands._emit(e.id);
+            return;
+        }
+        if (e.type === "appearance") {
+            if (process.env.RNGPUI_DEBUG_APPEARANCE) {
+                console.error(`[appearance] native colorScheme=${e.colorScheme}`);
+            }
+            applyNativeColorScheme(e.colorScheme);
             return;
         }
         // a native UI event → route to the React handler; its setState (if any)

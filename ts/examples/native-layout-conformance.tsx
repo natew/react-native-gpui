@@ -23,7 +23,7 @@ function App() {
     const done = useRef(false);
 
     useEffect(() => {
-        const timer = setTimeout(() => NativeLayout.setWidth(KEY, 284), 350);
+        const timer = setTimeout(() => NativeLayout.setWidth(KEY, 284), 120);
         return () => clearTimeout(timer);
     }, []);
 
@@ -45,7 +45,7 @@ function App() {
                 console.error("NATIVE_LAYOUT_CONFORMANCE_FAIL timed out");
                 process.exit(1);
             }
-        }, 2600);
+        }, 1000);
         return () => clearTimeout(timer);
     }, []);
 

@@ -1,12 +1,10 @@
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
+import { conformanceEnv } from "./conformance-utils.mjs";
 
 const child = spawn("bun", ["run", "examples/display-none-conformance.tsx"], {
     cwd: fileURLToPath(new URL("..", import.meta.url)),
-    env: {
-        ...process.env,
-        RNGPUI_NO_ACTIVATE: "1",
-    },
+    env: conformanceEnv(),
     stdio: ["ignore", "pipe", "pipe"],
 });
 
@@ -36,7 +34,7 @@ setTimeout(() => {
     }
     child.kill("SIGTERM");
     console.log("DISPLAY_NONE_CONFORMANCE_PASS");
-}, 2200);
+}, Number(process.env.RNGPUI_DISPLAY_NONE_HOLD_MS ?? 650));
 
 function fail(message: string): never {
     if (stdout.trim()) console.error(stdout.trim());

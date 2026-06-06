@@ -3,11 +3,12 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { captureWindow, conformanceEnv, waitForServicePid, waitForWindow } from "./conformance-utils.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = process.argv[2] || "/tmp/rngpui-animation-conformance";
-const holdMs = 1800;
-const durationMs = 10000;
+const holdMs = 500;
+const durationMs = 2800;
 const expectedWidth = 404;
 const expectedHeight = 180;
 
@@ -17,19 +18,19 @@ const afterPath = `${outDir}/frame-after.png`;
 const beforeMidDiffPath = `${outDir}/frame-before-mid-diff.png`;
 const midAfterDiffPath = `${outDir}/frame-mid-after-diff.png`;
 const treeDumpPath = `${outDir}/animation-tree.json`;
+const pidPath = `${outDir}/service.pid`;
 
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
 const child = spawn("bun", ["examples/animation-conformance.tsx"], {
     cwd: root,
-    env: {
-        ...process.env,
-        RNGPUI_NO_ACTIVATE: "1",
+    env: conformanceEnv({
         RNGPUI_DUMP_TREE: treeDumpPath,
+        RNGPUI_SERVICE_PID_FILE: pidPath,
         RNGPUI_ANIMATION_HOLD_MS: String(holdMs),
         RNGPUI_ANIMATION_DURATION_MS: String(durationMs),
-    },
+    }),
     stdio: ["ignore", "pipe", "pipe"],
 });
 
@@ -50,15 +51,16 @@ child.on("exit", (code, signal) => {
 const childExit = new Promise((resolve) => child.once("exit", resolve));
 
 try {
-    const window = await waitForAnimationWindow();
-    await sleep(220);
+    const pid = await waitForServicePid(pidPath, { timeoutMs: 5000, isFixtureExited: () => exited });
+    const window = await waitForAnimationWindow(pid);
+    await sleep(80);
     captureWindow(window, beforePath);
 
-    const midFrame = await waitForTreeFrame({ minLeft: 90, maxLeft: 140, timeoutMs: 12000 });
+    const midFrame = await waitForTreeFrame({ minLeft: 90, maxLeft: 170, timeoutMs: 6500 });
     captureWindow(window, midPath);
 
-    await waitForOutput("CONFORMANCE animation PASS", 12000);
-    await sleep(160);
+    await waitForOutput("CONFORMANCE animation PASS", 6500);
+    await sleep(60);
     captureWindow(window, afterPath);
 
     await stopChild();
@@ -83,21 +85,15 @@ try {
     fail(error instanceof Error ? error.message : String(error));
 }
 
-async function waitForAnimationWindow() {
-    const deadline = Date.now() + 8000;
-    while (Date.now() < deadline) {
-        const windows = listWindows();
-        const match = windows.find(
-            (window) =>
-                window.owner === "rngpui-service" &&
-                window.title === "react-native-gpui" &&
-                Math.abs(window.width - expectedWidth) <= 60 &&
-                Math.abs(window.height - expectedHeight) <= 60,
-        );
-        if (match) return match;
-        await sleep(120);
-    }
-    throw new Error("animation GPUI window was not found");
+async function waitForAnimationWindow(pid) {
+    return waitForWindow(
+        (window) =>
+            window.pid === pid &&
+            window.title === "react-native-gpui" &&
+            Math.abs(window.width - expectedWidth) <= 60 &&
+            Math.abs(window.height - expectedHeight) <= 60,
+        { timeoutMs: 5000, isFixtureExited: () => exited },
+    );
 }
 
 async function waitForTreeFrame({ minLeft, maxLeft, timeoutMs }) {
@@ -117,42 +113,6 @@ async function waitForTreeFrame({ minLeft, maxLeft, timeoutMs }) {
     throw new Error(`timed out waiting for intermediate tree frame in [${minLeft}, ${maxLeft}]\n${output.trim()}`);
 }
 
-function listWindows() {
-    const swift = `
-import Foundation
-import CoreGraphics
-let opts = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)
-let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] ?? []
-for window in list {
-    let owner = window[kCGWindowOwnerName as String] as? String ?? ""
-    let title = window[kCGWindowName as String] as? String ?? ""
-    let number = (window[kCGWindowNumber as String] as? NSNumber)?.intValue ?? 0
-    let pid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.intValue ?? 0
-    let bounds = window[kCGWindowBounds as String] as? [String: Any] ?? [:]
-    let width = (bounds["Width"] as? NSNumber)?.intValue ?? 0
-    let height = (bounds["Height"] as? NSNumber)?.intValue ?? 0
-    print("\\(number)\\t\\(pid)\\t\\(owner)\\t\\(title)\\t\\(width)\\t\\(height)")
-}
-`;
-    const raw = execFileSync("swift", ["-e", swift], { encoding: "utf8" });
-    return raw
-        .trim()
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => {
-            const [id, pid, owner, title, width, height] = line.split("\t");
-            return {
-                id: Number(id),
-                pid: Number(pid),
-                owner,
-                title,
-                width: Number(width),
-                height: Number(height),
-            };
-        })
-        .filter((window) => Number.isFinite(window.id) && window.id > 0);
-}
-
 async function waitForOutput(needle, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -161,24 +121,6 @@ async function waitForOutput(needle, timeoutMs) {
         await sleep(40);
     }
     throw new Error(`timed out waiting for ${needle}\n${output.trim()}`);
-}
-
-function captureWindow(window, path) {
-    execFileSync(
-        "cua-driver",
-        [
-            "call",
-            "get_window_state",
-            JSON.stringify({
-                pid: window.pid,
-                window_id: window.id,
-                capture_mode: "vision",
-                screenshot_out_file: path,
-            }),
-        ],
-        { stdio: "pipe" },
-    );
-    if (!existsSync(path)) throw new Error(`window capture did not write ${path}`);
 }
 
 function pixelDiff(before, after, diffOut) {

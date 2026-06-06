@@ -2,6 +2,7 @@
 
 use std::io::{self, BufRead};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -9,9 +10,9 @@ use std::rc::Rc;
 
 use gpui::{
     App, AppContext, Bounds, Context, Entity, InteractiveElement as _, IntoElement, KeyBinding,
-    Menu, MenuItem, ModifiersChangedEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, Render, Styled, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, actions, point, px, size,
+    Menu, MenuItem, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, Render, Styled, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, actions, point, px, size,
 };
 use gpui_component::input::{Enter, InputEvent, InputState, Position};
 use gpui_component::theme::{Theme, ThemeMode};
@@ -29,6 +30,7 @@ struct InvokeCommand {
 mod ax;
 mod bridge;
 mod elements;
+mod hit_passthrough;
 mod icons;
 mod inspector;
 #[cfg(target_os = "macos")]
@@ -41,7 +43,6 @@ use elements::{NativeResizeEdge, NativeResizeSpec, TerminalFrame, TerminalFrameK
 use raw_window_handle::HasWindowHandle;
 use style::{Dim, ElementStyle};
 
-use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 fn next_id() -> u64 {
@@ -110,6 +111,11 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         .filter(|s| !s.is_empty())
         .map(String::from);
     let native_resize = obj.get("nativeResize").and_then(parse_native_resize);
+    let native_list_group = obj
+        .get("nativeListGroup")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     let terminal_session_id = obj
         .get("terminalSessionId")
         .and_then(|v| v.as_str())
@@ -157,6 +163,11 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         })
         .unwrap_or_default();
 
+    // precompute the GPUI style once per React commit. the element is an immutable
+    // Arc reused across every frame, and build_gpui_style is a pure function of the
+    // (also immutable) style — so caching it here turns the ~280-line per-frame
+    // rebuild (run in both request_layout and paint, for every element) into a clone.
+    let cached_gpui_style = Some(style.build_gpui_style(None));
     Some(Arc::new(ReactElement {
         global_id,
         element_type: element_type.to_string(),
@@ -170,12 +181,13 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         events,
         native_layout_key,
         native_resize,
+        native_list_group,
         terminal_session_id,
         terminal_frames,
         accessibility,
         children,
         style,
-        cached_gpui_style: None,
+        cached_gpui_style,
     }))
 }
 
@@ -456,6 +468,14 @@ fn collect_layout_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
     }
 }
 
+/// Map gpui's window appearance to the JS color-scheme name the bridge speaks.
+fn appearance_scheme(appearance: gpui::WindowAppearance) -> &'static str {
+    match appearance {
+        gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark => "dark",
+        gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight => "light",
+    }
+}
+
 fn emit_definite_cached_layouts(el: &Arc<ReactElement>) {
     if el.listens("layout") {
         if let Some((x, y, cached_w, cached_h)) = bridge::cached_layout(el.global_id) {
@@ -490,6 +510,9 @@ fn collect_native_layout_keys(el: &Arc<ReactElement>, out: &mut HashSet<String>)
 
 impl Render for ServiceApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        // reset the per-frame hit-test passthrough registry before this frame's prepaint
+        // pass repopulates it (webview rects + occluder rects, for native webview events).
+        hit_passthrough::begin_frame();
         // The tree is applied (and a re-render scheduled) by the stdin pump task in
         // `main`, not polled here — rendering is fully on-demand: this runs only on a
         // new tree, input, scroll, or resize, so the app idles at ~0fps.
@@ -650,8 +673,7 @@ impl Render for ServiceApp {
                 } else {
                     RN_WEBVIEW_SHIM.to_string()
                 };
-                let window_handle = window.window_handle().expect("No window handle");
-                let wv = wry::WebViewBuilder::new()
+                let builder = wry::WebViewBuilder::new()
                     .with_transparent(false)
                     // RN-compatible bridge so page code can talk to the host:
                     // window.ReactNativeWebView.postMessage(d) → the node's onMessage.
@@ -677,9 +699,20 @@ impl Render for ServiceApp {
                             }
                             bridge::event(id, "load");
                         }
-                    })
-                    .build_as_child(&window_handle)
-                    .expect("failed to create webview");
+                    });
+                #[cfg(target_os = "macos")]
+                let wv = {
+                    elements::webview::ensure_webview_host(window, id)
+                        .expect("failed to create webview host");
+                    let window_handle = window.window_handle().expect("No window handle");
+                    builder.build_as_child(&window_handle)
+                };
+                #[cfg(not(target_os = "macos"))]
+                let wv = {
+                    let window_handle = window.window_handle().expect("No window handle");
+                    builder.build_as_child(&window_handle)
+                };
+                let wv = wv.expect("failed to create webview");
                 let _ = wv.set_visible(true);
                 Rc::new(wv)
             });
@@ -712,6 +745,12 @@ impl Render for ServiceApp {
             .flex_col()
             .on_action(|action: &InvokeCommand, _window, _cx| {
                 bridge::command(&action.id);
+            })
+            .on_mouse_up(MouseButton::Left, |_event: &MouseUpEvent, _window, _cx| {
+                elements::finish_pointer_gesture();
+            })
+            .on_mouse_up_out(MouseButton::Left, |_event: &MouseUpEvent, _window, _cx| {
+                elements::finish_pointer_gesture();
             })
             .child(root);
 
@@ -784,6 +823,7 @@ fn fallback_root() -> Arc<ReactElement> {
         events: Vec::new(),
         native_layout_key: None,
         native_resize: None,
+        native_list_group: None,
         terminal_session_id: None,
         terminal_frames: Vec::new(),
         accessibility: AccessibilityInfo::default(),
@@ -858,6 +898,8 @@ enum Incoming {
         key: String,
         width: Option<f32>,
         height: Option<f32>,
+        x: Option<f32>,
+        y: Option<f32>,
         animate_ms: Option<f32>,
         clear: bool,
     },
@@ -894,6 +936,8 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
                     key: key.to_string(),
                     width: v.get("width").and_then(|x| x.as_f64()).map(|x| x as f32),
                     height: v.get("height").and_then(|x| x.as_f64()).map(|x| x as f32),
+                    x: v.get("x").and_then(|x| x.as_f64()).map(|x| x as f32),
+                    y: v.get("y").and_then(|x| x.as_f64()).map(|x| x as f32),
                     animate_ms: v
                         .get("animateMs")
                         .and_then(|x| x.as_f64())
@@ -990,17 +1034,30 @@ fn main() {
     // Window opens at the root's declared width/height; after that it fills.
     let win_w = initial.style.width.and_then(Dim::as_px).unwrap_or(720.0);
     let win_h = initial.style.height.and_then(Dim::as_px).unwrap_or(800.0);
-    let test_mode = std::env::var("RNGPUI_TEST_MODE").is_ok();
-    let test_onscreen = std::env::var("RNGPUI_TEST_ONSCREEN").is_ok();
-    let inspector_copy_at = parse_point_env("RNGPUI_INSPECTOR_COPY_AT");
-    let show_window = !test_mode || test_onscreen;
+    // debug override: RNGPUI_WINDOW_SIZE="w,h" forces a fixed window size — e.g. a
+    // small corner window for non-focus-stealing visual debugging (a backgrounded
+    // window must be unoccluded to render + be screenshotted on macOS).
+    let (win_w, win_h) = parse_point_env("RNGPUI_WINDOW_SIZE")
+        .map(|p| (f32::from(p.x), f32::from(p.y)))
+        .unwrap_or((win_w, win_h));
     let app_root = fill_root(initial);
 
     bridge::ready(win_w, win_h);
 
-    // when set, the window opens in the background without stealing focus — handy
-    // for screenshotting/iterating without it popping over whatever you're doing.
+    // test mode keeps conformance windows backgrounded and off the main screen.
+    let test_mode = std::env::var("RNGPUI_TEST_MODE").is_ok();
+    let test_onscreen = std::env::var("RNGPUI_TEST_ONSCREEN").is_ok();
     let background = test_mode || std::env::var("RNGPUI_NO_ACTIVATE").is_ok();
+    let inspector_copy_at = parse_point_env("RNGPUI_INSPECTOR_COPY_AT");
+    let offscreen_test_window = test_mode && !test_onscreen && inspector_copy_at.is_none();
+    let window_origin = if offscreen_test_window {
+        point(px(-10000.0), px(-10000.0))
+    } else {
+        // debug override: RNGPUI_WINDOW_ORIGIN="x,y" places the window (e.g. a small
+        // corner window for non-focus-stealing visual debugging).
+        parse_point_env("RNGPUI_WINDOW_ORIGIN").unwrap_or_else(|| point(px(120.0), px(120.0)))
+    };
+    let show_window = !test_mode || test_onscreen;
 
     let app = gpui::Application::new().with_assets(icons::Assets);
     app.run(move |cx: &mut App| {
@@ -1049,20 +1106,27 @@ fn main() {
 
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
-                origin: point(px(120.0), px(120.0)),
+                origin: window_origin,
                 size: size(px(win_w), px(win_h)),
             })),
-            titlebar: Some(TitlebarOptions {
-                title: Some("react-native-gpui".into()),
-                appears_transparent: true,
-                traffic_light_position: Some(point(px(14.0), px(18.0))),
-            }),
+            titlebar: if test_mode {
+                None
+            } else {
+                Some(TitlebarOptions {
+                    title: Some("react-native-gpui".into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(14.0), px(18.0))),
+                })
+            },
             focus: !background,
             show: show_window,
+            // test windows must still be normal windows: popup panels raise
+            // above user work. the offscreen test path starts hidden, moves the
+            // NSWindow, verifies it stayed offscreen, then reveals it.
             kind: gpui::WindowKind::Normal,
             is_movable: true,
-            is_resizable: true,
-            is_minimizable: true,
+            is_resizable: !test_mode,
+            is_minimizable: !test_mode,
             display_id: None,
             window_background: {
                 #[cfg(target_os = "macos")]
@@ -1087,8 +1151,14 @@ fn main() {
         let pump = content.clone();
         let window_handle = cx
             .open_window(options, move |window, cx| {
+                window.set_window_title("react-native-gpui");
                 #[cfg(target_os = "macos")]
                 liquid_glass::install(window);
+                #[cfg(target_os = "macos")]
+                if offscreen_test_window && !liquid_glass::show_offscreen_test_window(window) {
+                    eprintln!("[rngpui test] window was clamped on-screen; refusing to show");
+                    cx.quit();
+                }
                 let content_for_activation = content.clone();
                 content_for_activation.update(cx, |_this, cx| {
                     cx.observe_window_activation(window, |this, window, cx| {
@@ -1102,6 +1172,16 @@ fn main() {
                     })
                     .detach();
                 });
+                // follow the system light/dark setting: gpui delivers an appearance
+                // change whenever macOS toggles theme. push it to JS so tamagui
+                // re-themes live, and emit the current value once so JS matches the
+                // real window appearance from the first frame.
+                bridge::appearance(appearance_scheme(window.appearance()));
+                window
+                    .observe_window_appearance(|window, _cx| {
+                        bridge::appearance(appearance_scheme(window.appearance()));
+                    })
+                    .detach();
                 cx.new(|cx| gpui_component::Root::new(content.clone(), window, cx))
             })
             .expect("open window");
@@ -1110,7 +1190,6 @@ fn main() {
         if !background {
             cx.activate(true);
         }
-
 
         if let Some(position) = inspector_copy_at {
             let inspector_pump = pump.clone();
@@ -1132,6 +1211,9 @@ fn main() {
             })
             .detach();
         }
+
+        let native_layout_driver_active = Arc::new(AtomicBool::new(false));
+
         // Foreground pump: apply each message on the main thread. A new tree re-renders
         // (cx.notify); a webview command runs straight against the live wry view (which
         // must be driven from the main thread). Both arrive on the same ordered channel.
@@ -1164,6 +1246,7 @@ fn main() {
                         }
                     }
                     msg => {
+                        let mut drive_native_layout_animation = false;
                         let applied = pump.update(cx, |this, cx| match msg {
                             Incoming::Tree(t) => {
                                 let next_root = fill_root(t);
@@ -1202,17 +1285,20 @@ fn main() {
                                 key,
                                 width,
                                 height,
+                                x,
+                                y,
                                 animate_ms,
                                 clear,
                             } => {
                                 if clear {
                                     elements::clear_native_layout_override(&key);
                                 } else if let Some(animate_ms) = animate_ms {
+                                    drive_native_layout_animation = true;
                                     elements::animate_native_layout_override(
-                                        &key, width, height, animate_ms,
+                                        &key, width, height, x, y, animate_ms,
                                     );
                                 } else {
-                                    elements::set_native_layout_override(&key, width, height);
+                                    elements::set_native_layout_override(&key, width, height, x, y);
                                 }
                                 cx.notify();
                             }
@@ -1235,6 +1321,54 @@ fn main() {
                         if cx.update(|cx| cx.refresh_windows()).is_err() {
                             break;
                         }
+                        if drive_native_layout_animation
+                            && !native_layout_driver_active.swap(true, Ordering::SeqCst)
+                        {
+                            let pump = pump.clone();
+                            let active = native_layout_driver_active.clone();
+                            cx.spawn(async move |cx| {
+                                let debug_native_layout =
+                                    std::env::var("RNGPUI_NATIVE_LAYOUT_DEBUG").is_ok();
+                                'driver: loop {
+                                    let mut ticks = 0;
+                                    while elements::native_layout_has_animations() {
+                                        cx.background_executor()
+                                            .timer(Duration::from_millis(4))
+                                            .await;
+                                        ticks += 1;
+                                        if debug_native_layout {
+                                            eprintln!("[native-layout] tick {ticks}");
+                                        }
+                                        if pump.update(cx, |_this, cx| cx.notify()).is_err() {
+                                            break 'driver;
+                                        }
+                                        if window_handle
+                                            .update(cx, |_root, window, root_cx| {
+                                                root_cx.notify();
+                                                window.refresh();
+                                            })
+                                            .is_err()
+                                        {
+                                            break 'driver;
+                                        }
+                                        if cx.update(|cx| cx.refresh_windows()).is_err() {
+                                            break 'driver;
+                                        }
+                                    }
+                                    if debug_native_layout {
+                                        eprintln!("[native-layout] done ticks={ticks}");
+                                    }
+                                    active.store(false, Ordering::SeqCst);
+                                    if !elements::native_layout_has_animations()
+                                        || active.swap(true, Ordering::SeqCst)
+                                    {
+                                        break;
+                                    }
+                                }
+                                active.store(false, Ordering::SeqCst);
+                            })
+                            .detach();
+                        }
                     }
                 }
             }
@@ -1247,6 +1381,16 @@ fn main() {
 mod tests {
     use super::{Incoming, parse_incoming, position_for_byte_offset};
     use serde_json::json;
+
+    #[test]
+    fn maps_window_appearance_to_scheme() {
+        use super::appearance_scheme;
+        use gpui::WindowAppearance::{Dark, Light, VibrantDark, VibrantLight};
+        assert_eq!(appearance_scheme(Light), "light");
+        assert_eq!(appearance_scheme(VibrantLight), "light");
+        assert_eq!(appearance_scheme(Dark), "dark");
+        assert_eq!(appearance_scheme(VibrantDark), "dark");
+    }
 
     #[test]
     fn parses_scroll_to_x_and_y_axes() {
@@ -1279,6 +1423,8 @@ mod tests {
             key,
             width,
             height,
+            x,
+            y,
             animate_ms,
             clear,
         }) = incoming
@@ -1286,6 +1432,8 @@ mod tests {
             assert_eq!(key, "left-pane");
             assert_eq!(width, Some(286.0));
             assert_eq!(height, None);
+            assert_eq!(x, None);
+            assert_eq!(y, None);
             assert_eq!(animate_ms, None);
             assert!(!clear);
         } else {
@@ -1300,6 +1448,7 @@ mod tests {
             "key": "right-pane",
             "width": 0,
             "height": 240,
+            "x": 18,
             "animateMs": 180
         }));
 
@@ -1307,6 +1456,8 @@ mod tests {
             key,
             width,
             height,
+            x,
+            y,
             animate_ms,
             clear,
         }) = incoming
@@ -1314,6 +1465,8 @@ mod tests {
             assert_eq!(key, "right-pane");
             assert_eq!(width, Some(0.0));
             assert_eq!(height, Some(240.0));
+            assert_eq!(x, Some(18.0));
+            assert_eq!(y, None);
             assert_eq!(animate_ms, Some(180.0));
             assert!(!clear);
         } else {
@@ -1341,6 +1494,7 @@ mod tests {
             "globalId": 1,
             "type": "div",
             "nativeLayoutKey": "left-pane",
+            "nativeListGroup": "files",
             "nativeResize": {
                 "target": "right-pane",
                 "edge": "left",
@@ -1351,6 +1505,7 @@ mod tests {
 
         if let Some(Incoming::Tree(root)) = incoming {
             assert_eq!(root.native_layout_key.as_deref(), Some("left-pane"));
+            assert_eq!(root.native_list_group.as_deref(), Some("files"));
             let resize = root.native_resize.as_ref().expect("native resize");
             assert_eq!(resize.target, "right-pane");
             assert_eq!(resize.edge, super::NativeResizeEdge::Left);

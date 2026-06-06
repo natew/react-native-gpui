@@ -1,12 +1,14 @@
 #!/usr/bin/env bun
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { captureWindow, conformanceEnv, waitForServicePid, waitForWindow } from "./conformance-utils.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = process.argv[2] || "/tmp/rngpui-rounded-overflow-conformance";
 const screenshotPath = `${outDir}/rounded-overflow.png`;
+const pidPath = `${outDir}/service.pid`;
 const expectedWindow = { width: 220, height: 180 };
 const frame = { x: 40, y: 30, width: 140, height: 110 };
 const rootColor = [0x10, 0x20, 0x30];
@@ -17,10 +19,7 @@ mkdirSync(outDir, { recursive: true });
 
 const child = spawn("bun", ["examples/rounded-overflow-conformance.tsx"], {
     cwd: root,
-    env: {
-        ...process.env,
-        RNGPUI_NO_ACTIVATE: "1",
-    },
+    env: conformanceEnv({ RNGPUI_SERVICE_PID_FILE: pidPath }),
     stdio: ["ignore", "pipe", "pipe"],
 });
 
@@ -40,7 +39,8 @@ child.on("exit", (code, signal) => {
 const childExit = new Promise((resolveExit) => child.once("exit", resolveExit));
 
 try {
-    const window = await waitForWindow(8000);
+    const pid = await waitForServicePid(pidPath, { timeoutMs: 5000, isFixtureExited: () => exited });
+    const window = await waitForRoundedWindow(pid, 5000);
     captureWindow(window, screenshotPath);
     const imageSize = readImageSize(screenshotPath);
     const scaleX = imageSize.width / window.width;
@@ -72,74 +72,21 @@ try {
     await stop();
 }
 
-async function waitForWindow(timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-        const match = listWindows().find(
-            (window) =>
-                window.owner === "rngpui-service" &&
-                window.title === "react-native-gpui" &&
-                Math.abs(window.width - expectedWindow.width) <= 80 &&
-                Math.abs(window.height - expectedWindow.height) <= 80,
-        );
-        if (match) return match;
-        if (exited) throw new Error(`fixture exited before window appeared: ${exitLabel}\n${output.trim()}`);
-        await sleep(100);
-    }
-    throw new Error("rounded overflow GPUI window was not found");
-}
-
-function listWindows() {
-    const swift = `
-import Foundation
-import CoreGraphics
-let opts = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)
-let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] ?? []
-for window in list {
-    let owner = window[kCGWindowOwnerName as String] as? String ?? ""
-    let title = window[kCGWindowName as String] as? String ?? ""
-    let id = (window[kCGWindowNumber as String] as? NSNumber)?.intValue ?? 0
-    let pid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.intValue ?? 0
-    let bounds = window[kCGWindowBounds as String] as? [String: Any] ?? [:]
-    let width = (bounds["Width"] as? NSNumber)?.intValue ?? 0
-    let height = (bounds["Height"] as? NSNumber)?.intValue ?? 0
-    print("\\(id)\\t\\(pid)\\t\\(owner)\\t\\(title)\\t\\(width)\\t\\(height)")
-}
-`;
-    return execFileSync("swift", ["-e", swift], { encoding: "utf8", stdio: "pipe" })
-        .trim()
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => {
-            const [id, pid, owner, title, width, height] = line.split("\t");
-            return {
-                id: Number(id),
-                pid: Number(pid),
-                owner,
-                title,
-                width: Number(width),
-                height: Number(height),
-            };
-        })
-        .filter((window) => Number.isFinite(window.id) && window.id > 0 && Number.isFinite(window.pid) && window.pid > 0);
-}
-
-function captureWindow(window, path) {
-    execFileSync(
-        "cua-driver",
-        [
-            "call",
-            "get_window_state",
-            JSON.stringify({
-                pid: window.pid,
-                window_id: window.id,
-                capture_mode: "vision",
-                screenshot_out_file: path,
-            }),
-        ],
-        { stdio: "pipe" },
+async function waitForRoundedWindow(pid, timeoutMs) {
+    return waitForWindow(
+        (window) =>
+            window.pid === pid &&
+            window.title === "react-native-gpui" &&
+            Math.abs(window.width - expectedWindow.width) <= 80 &&
+            Math.abs(window.height - expectedWindow.height) <= 80,
+        {
+            timeoutMs,
+            isFixtureExited: () => {
+                if (!exited) return false;
+                throw new Error(`fixture exited before window appeared: ${exitLabel}\n${output.trim()}`);
+            },
+        },
     );
-    if (!existsSync(path)) throw new Error(`screenshot was not written at ${path}`);
 }
 
 function readImageSize(path) {

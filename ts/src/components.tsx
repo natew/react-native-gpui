@@ -8,6 +8,7 @@ import {
     Fragment,
     forwardRef,
     useImperativeHandle,
+    useId,
     useRef,
     useState,
     type ReactNode,
@@ -244,6 +245,7 @@ export interface PressableProps extends AccessibilityProps {
     onLayout?: (event: LayoutChangeEvent) => void;
     disabled?: boolean;
     hitSlop?: number;
+    nativeListGroup?: string;
 }
 export const Pressable: FC<PressableProps> = ({
     children,
@@ -299,6 +301,18 @@ export const TouchableHighlight: FC<TouchableProps & { underlayColor?: ColorValu
     });
 };
 export const TouchableWithoutFeedback: FC<PressableProps> = (props) => createElement(Pressable, props);
+
+export interface ListGroupProps extends ViewProps {
+    id?: string;
+    disabled?: boolean;
+}
+export const ListGroup: FC<ListGroupProps> = ({ id, disabled, ...props }) => {
+    const generated = useId();
+    return createElement(View, {
+        ...props,
+        nativeListGroup: disabled ? undefined : (id ?? generated),
+    });
+};
 
 export interface ButtonProps extends AccessibilityProps {
     title: string;

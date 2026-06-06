@@ -1,23 +1,21 @@
-import { spawn, execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { conformanceEnv, cuaDriver, execFileText, listWindows, waitForServicePid } from "./conformance-utils.mjs";
 
 const expected = "alpha\nbeta";
-const servicePattern = "/react-native-gpui/ts/native/rngpui-service";
 const deadlineMs = 20_000;
 const here = dirname(fileURLToPath(import.meta.url));
 const root = dirname(here);
-const cuaDriver = "/Users/n8/.local/bin/cua-driver";
-const ignoredServicePids = new Set(await servicePids());
+const pidPath = `/tmp/rngpui-input-conformance-${process.pid}.pid`;
 let fixturePid = 0;
 
 const child = spawn("bun", ["run", "examples/input-conformance.tsx"], {
     cwd: root,
-    env: {
-        ...process.env,
+    env: conformanceEnv({
         RNGPUI_INPUT_EXPECT: expected,
-        RNGPUI_NO_ACTIVATE: "1",
-    },
+        RNGPUI_SERVICE_PID_FILE: pidPath,
+    }),
     stdio: ["ignore", "pipe", "pipe"],
 });
 
@@ -71,9 +69,12 @@ async function waitForInputWindow() {
     let lastError = "";
     while (Date.now() - started < deadlineMs) {
         try {
-            const pid = await servicePid();
+            const pid = await waitForServicePid(pidPath, {
+                timeoutMs: Math.max(50, deadlineMs - (Date.now() - started)),
+                isFixtureExited: () => child.exitCode != null,
+            });
             if (pid) {
-                const windows = await listGpuiWindows(pid);
+                const windows = listGpuiWindows(pid);
                 const window = [...windows]
                     .filter((item) => item.title === "react-native-gpui")
                     .sort((a, b) => b.width * b.height - a.width * a.height)[0];
@@ -100,58 +101,16 @@ async function waitForInputWindow() {
     throw new Error(`timed out waiting for input window: ${lastError}`);
 }
 
-async function servicePid() {
-    const pids = await servicePids();
-    const fresh = pids.filter((pid) => !ignoredServicePids.has(pid));
-    return fresh.sort((a, b) => b - a)[0] ?? 0;
-}
-
-async function listGpuiWindows(pid) {
-    const swift = `
-import Foundation
-import CoreGraphics
-let targetPid = Int(CommandLine.arguments[1])!
-let list = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
-for window in list {
-    let ownerPid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.intValue ?? 0
-    if ownerPid != targetPid { continue }
-    let id = (window[kCGWindowNumber as String] as? NSNumber)?.intValue ?? 0
-    let title = window[kCGWindowName as String] as? String ?? ""
-    let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
-    let bounds = window[kCGWindowBounds as String] as? [String: Any] ?? [:]
-    let width = (bounds["Width"] as? NSNumber)?.intValue ?? 0
-    let height = (bounds["Height"] as? NSNumber)?.intValue ?? 0
-    print("\\(id)\\t\\(title)\\t\\(layer)\\t\\(width)\\t\\(height)")
-}
-`;
-    const result = await execFileText("swift", ["-e", swift, String(pid)]);
-    return result.stdout
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => {
-            const [window_id, title, layer, width, height] = line.split("\t");
-            return {
-                window_id: Number(window_id),
-                title,
-                layer: Number(layer),
-                width: Number(width),
-                height: Number(height),
-            };
-        })
-        .filter((window) => Number.isFinite(window.window_id) && window.window_id > 0 && window.width > 0 && window.height > 0);
-}
-
-async function servicePids() {
-    const result = await execFileText("pgrep", ["-alf", servicePattern], { reject: false });
-    return result.stdout
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .map((line) => /^(\d+)\s+(.+)$/.exec(line))
-        .filter(Boolean)
-        .filter((match) => match?.[2].includes(servicePattern))
-        .map((match) => Number(match?.[1]))
-        .filter((pid) => Number.isFinite(pid) && pid > 0);
+function listGpuiWindows(pid) {
+    return listWindows()
+        .filter((window) => window.pid === pid)
+        .map((window) => ({
+            window_id: window.window_id,
+            title: window.title,
+            layer: window.layer,
+            width: window.width,
+            height: window.height,
+        }));
 }
 
 function elementIndex(tree, label) {
@@ -174,23 +133,9 @@ async function cuaJson(tool, args) {
     return JSON.parse(result.stdout.slice(start, end + 1));
 }
 
-function execFileText(command, args, options = {}) {
-    return new Promise((resolve, reject) => {
-        execFile(command, args, { encoding: "utf8" }, (error, stdout, stderr) => {
-            if (error && options.reject !== false) {
-                reject(new Error(`${command} ${args.join(" ")} failed: ${stderr || error.message}`));
-                return;
-            }
-            resolve({ stdout, stderr, error });
-        });
-    });
-}
-
 async function cleanupFixtureServices() {
-    const pids = new Set(await servicePids());
-    if (fixturePid) pids.add(fixturePid);
+    const pids = fixturePid ? [fixturePid] : [];
     for (const pid of pids) {
-        if (ignoredServicePids.has(pid)) continue;
         await execFileText("kill", [String(pid)], { reject: false });
     }
 }

@@ -43,6 +43,18 @@ export function setAppearanceUpdateSink(sink: (() => void) | undefined): void {
     appearanceUpdateSink = sink;
 }
 
+/**
+ * Native pushed the system color scheme — the initial value when the window opens,
+ * then again whenever macOS toggles light/dark. Updates the system value and
+ * re-themes, unless a manual `setColorScheme` override is currently masking it.
+ */
+export function applyNativeColorScheme(scheme: ColorSchemeName): void {
+    if (scheme !== "light" && scheme !== "dark") return;
+    if (systemColorScheme === scheme) return;
+    systemColorScheme = scheme;
+    if (colorSchemeOverride == null) emitAppearanceChange();
+}
+
 export const Appearance = {
     getColorScheme(): ColorSchemeName {
         return getEffectiveColorScheme();

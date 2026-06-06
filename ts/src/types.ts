@@ -295,6 +295,8 @@ export interface ViewProps extends AccessibilityProps {
     nativeLayoutKey?: string;
     /** gpui-only: drag this view to resize a keyed native layout target without React commits. */
     nativeResize?: NativeResizeSpec;
+    /** gpui-only: scope press-drag activation to descendants with the same group. */
+    nativeListGroup?: string;
 }
 
 export type NativeResizeEdge = "left" | "right" | "top" | "bottom";

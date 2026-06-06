@@ -32,6 +32,8 @@ export type Command =
           key: string;
           width?: number;
           height?: number;
+          x?: number;
+          y?: number;
           animateMs?: number;
           clear?: boolean;
       }
@@ -56,8 +58,12 @@ export type NativeLayoutAnimationOptions = {
 };
 
 export const NativeLayout = {
-    setSize(key: string, size: { width?: number; height?: number }, options?: NativeLayoutAnimationOptions) {
+    setSize(key: string, size: { width?: number; height?: number; x?: number; y?: number }, options?: NativeLayoutAnimationOptions) {
         sendCommand({ $cmd: "nativeLayout", key, ...size, ...options });
+    },
+
+    setFrame(key: string, frame: { width?: number; height?: number; x?: number; y?: number }, options?: NativeLayoutAnimationOptions) {
+        sendCommand({ $cmd: "nativeLayout", key, ...frame, ...options });
     },
 
     setWidth(key: string, width: number, options?: NativeLayoutAnimationOptions) {
@@ -68,8 +74,16 @@ export const NativeLayout = {
         sendCommand({ $cmd: "nativeLayout", key, height, ...options });
     },
 
-    animateSize(key: string, size: { width?: number; height?: number }, animateMs = 180) {
+    setX(key: string, x: number, options?: NativeLayoutAnimationOptions) {
+        sendCommand({ $cmd: "nativeLayout", key, x, ...options });
+    },
+
+    animateSize(key: string, size: { width?: number; height?: number; x?: number; y?: number }, animateMs = 180) {
         sendCommand({ $cmd: "nativeLayout", key, ...size, animateMs });
+    },
+
+    animateFrame(key: string, frame: { width?: number; height?: number; x?: number; y?: number }, animateMs = 180) {
+        sendCommand({ $cmd: "nativeLayout", key, ...frame, animateMs });
     },
 
     animateWidth(key: string, width: number, animateMs = 180) {
@@ -78,6 +92,10 @@ export const NativeLayout = {
 
     animateHeight(key: string, height: number, animateMs = 180) {
         sendCommand({ $cmd: "nativeLayout", key, height, animateMs });
+    },
+
+    animateX(key: string, x: number, animateMs = 180) {
+        sendCommand({ $cmd: "nativeLayout", key, x, animateMs });
     },
 
     clear(key: string) {

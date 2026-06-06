@@ -19,7 +19,9 @@ const HTML = `<!doctype html><meta charset="utf8">
   </div>
   <script>
     const t = document.getElementById('t');
-    setInterval(() => { t.textContent = new Date().toLocaleTimeString(); }, 250);
+    const tick = () => { t.textContent = new Date().toLocaleTimeString() + ' · ' + String(Date.now() % 100000); };
+    tick();
+    setInterval(tick, 100);
   </script>
 </body>`;
 

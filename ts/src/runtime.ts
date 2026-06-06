@@ -28,6 +28,8 @@ export type SerializedNode = {
     nativeLayoutKey?: string;
     /** native-only resize gesture, applied to a keyed native layout target */
     nativeResize?: SerializedNativeResize;
+    /** native-only press-drag selection group */
+    nativeListGroup?: string;
     /** native terminal session key; changing it resets the native Ghostty parser */
     terminalSessionId?: string;
     /** ordered terminal frames consumed by the native Ghostty terminal element */
@@ -71,6 +73,7 @@ export type BridgeEvent =
     | { type: "ready"; width: number; height: number }
     | { type: "resize"; width: number; height: number }
     | { type: "command"; id: string }
+    | { type: "appearance"; colorScheme: "light" | "dark" }
     | {
           type: "event";
           id: number;

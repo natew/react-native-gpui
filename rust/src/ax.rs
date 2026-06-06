@@ -777,6 +777,7 @@ mod tests {
             events: Vec::new(),
             native_layout_key: None,
             native_resize: None,
+            native_list_group: None,
             terminal_session_id: None,
             terminal_frames: Vec::new(),
             accessibility,

@@ -8,7 +8,8 @@ pub mod webview;
 
 pub use div::{
     ReactDivElement, animate_native_layout_override, clear_native_layout_override,
-    retain_native_layout_keys, scroll_to, scroll_to_end, set_native_layout_override,
+    finish_pointer_gesture, native_layout_has_animations, retain_native_layout_keys, scroll_to,
+    scroll_to_end, set_native_layout_override,
 };
 pub use image::ReactImageElement;
 pub use input::ReactInputElement;
@@ -121,6 +122,8 @@ pub struct ReactElement {
     pub native_layout_key: Option<String>,
     /// native-only resize gesture applied to a keyed layout target.
     pub native_resize: Option<NativeResizeSpec>,
+    /// native-only group that scopes drag selection across press-action descendants.
+    pub native_list_group: Option<String>,
     /// native terminal session key; changing it resets the Ghostty parser.
     pub terminal_session_id: Option<String>,
     /// ordered daemon terminal frames consumed by the native Ghostty parser.
@@ -138,8 +141,12 @@ impl ReactElement {
     }
 
     pub fn build_gpui_style(&self, default_bg: Option<u32>) -> gpui::Style {
-        if let Some(ref cached) = self.cached_gpui_style {
-            return cached.clone();
+        // cache holds the default_bg=None variant (the only one live callers use);
+        // recompute for the rare explicit-default case so the cache can't go stale.
+        if default_bg.is_none() {
+            if let Some(ref cached) = self.cached_gpui_style {
+                return cached.clone();
+            }
         }
         self.style.build_gpui_style(default_bg)
     }

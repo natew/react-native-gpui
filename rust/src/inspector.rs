@@ -414,12 +414,17 @@ impl InspectorState {
 
 #[cfg(target_os = "macos")]
 pub fn current_option_modifier_down() -> bool {
-    use cocoa::appkit::{NSEvent, NSEventModifierFlags};
-    use cocoa::base::{id, nil};
+    use cocoa::appkit::NSEventModifierFlags;
+    use cocoa::foundation::NSUInteger;
+    use objc::{class, msg_send, sel, sel_impl};
 
+    // AppKit's class-level "what modifiers are held right now" is `+[NSEvent
+    // modifierFlags]`. There is no `currentModifierFlags` selector — sending it
+    // throws NSInvalidArgumentException and crashes the app the first time the
+    // inspector activation timer fires.
     unsafe {
-        <id as NSEvent>::currentModifierFlags(nil)
-            .contains(NSEventModifierFlags::NSAlternateKeyMask)
+        let flags: NSUInteger = msg_send![class!(NSEvent), modifierFlags];
+        flags & NSEventModifierFlags::NSAlternateKeyMask.bits() != 0
     }
 }
 
@@ -861,6 +866,7 @@ mod tests {
             events: Vec::new(),
             native_layout_key: None,
             native_resize: None,
+            native_list_group: None,
             terminal_session_id: None,
             terminal_frames: Vec::new(),
             accessibility: AccessibilityInfo::default(),

@@ -18,92 +18,6 @@ const beforeMidDiffPath = `${outDir}/frame-before-mid-diff.png`;
 const midAfterDiffPath = `${outDir}/frame-mid-after-diff.png`;
 const treeDumpPath = `${outDir}/animation-tree.json`;
 
-const screenCaptureKitSwift = `
-import Foundation
-import AppKit
-import ScreenCaptureKit
-
-let _ = NSApplication.shared
-let windowID = CGWindowID(UInt32(CommandLine.arguments[1])!)
-let path = CommandLine.arguments[2]
-
-final class CaptureBox: @unchecked Sendable {
-    var code = 0
-    var done = false
-}
-
-func captureImage(contentFilter: SCContentFilter, configuration: SCStreamConfiguration) async throws -> CGImage {
-    do {
-        return try await SCScreenshotManager.captureImage(
-            contentFilter: contentFilter,
-            configuration: configuration
-        )
-    } catch {
-        let ns = error as NSError
-        if ns.domain == "com.apple.ScreenCaptureKit.SCStreamErrorDomain" && ns.code == -3801 {
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            return try await SCScreenshotManager.captureImage(
-                contentFilter: contentFilter,
-                configuration: configuration
-            )
-        }
-        throw error
-    }
-}
-
-let box = CaptureBox()
-Task { @MainActor in
-    do {
-        let content = try await SCShareableContent.current
-        guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
-            throw NSError(
-                domain: "AnimationFrameDiff",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "window not found"]
-            )
-        }
-
-        let filter = SCContentFilter(desktopIndependentWindow: window)
-        let config = SCStreamConfiguration()
-        let scale = NSScreen.screens.first(where: { !$0.frame.intersection(window.frame).isNull })?.backingScaleFactor
-            ?? NSScreen.main?.backingScaleFactor
-            ?? 1
-        config.width = max(1, Int(window.frame.width * scale))
-        config.height = max(1, Int(window.frame.height * scale))
-        config.showsCursor = false
-        config.scalesToFit = true
-        config.preservesAspectRatio = true
-        config.ignoreShadowsSingleWindow = true
-        config.ignoreGlobalClipSingleWindow = true
-
-        let image = try await captureImage(contentFilter: filter, configuration: config)
-        let rep = NSBitmapImageRep(cgImage: image)
-        guard let data = rep.representation(using: .png, properties: [:]) else {
-            throw NSError(
-                domain: "AnimationFrameDiff",
-                code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "png encode failed"]
-            )
-        }
-        try data.write(to: URL(fileURLWithPath: path))
-    } catch {
-        fputs("capture failed: \\(error)\\n", stderr)
-        box.code = 1
-    }
-    box.done = true
-}
-
-let deadline = Date().addingTimeInterval(8)
-while !box.done && Date() < deadline {
-    RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
-}
-if !box.done {
-    fputs("capture timed out\\n", stderr)
-    box.code = 1
-}
-exit(Int32(box.code))
-`;
-
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
@@ -136,16 +50,16 @@ child.on("exit", (code, signal) => {
 const childExit = new Promise((resolve) => child.once("exit", resolve));
 
 try {
-    const windowId = await waitForAnimationWindow();
+    const window = await waitForAnimationWindow();
     await sleep(220);
-    captureWindow(windowId, beforePath);
+    captureWindow(window, beforePath);
 
     const midFrame = await waitForTreeFrame({ minLeft: 90, maxLeft: 140, timeoutMs: 12000 });
-    captureWindow(windowId, midPath);
+    captureWindow(window, midPath);
 
     await waitForOutput("CONFORMANCE animation PASS", 12000);
     await sleep(160);
-    captureWindow(windowId, afterPath);
+    captureWindow(window, afterPath);
 
     await stopChild();
 
@@ -180,7 +94,7 @@ async function waitForAnimationWindow() {
                 Math.abs(window.width - expectedWidth) <= 60 &&
                 Math.abs(window.height - expectedHeight) <= 60,
         );
-        if (match) return match.id;
+        if (match) return match;
         await sleep(120);
     }
     throw new Error("animation GPUI window was not found");
@@ -249,12 +163,22 @@ async function waitForOutput(needle, timeoutMs) {
     throw new Error(`timed out waiting for ${needle}\n${output.trim()}`);
 }
 
-function captureWindow(windowId, path) {
-    execFileSync("swift", ["-e", screenCaptureKitSwift, String(windowId), path], {
-        encoding: "utf8",
-        stdio: "pipe",
-    });
-    if (!existsSync(path)) throw new Error(`screencapture did not write ${path}`);
+function captureWindow(window, path) {
+    execFileSync(
+        "cua-driver",
+        [
+            "call",
+            "get_window_state",
+            JSON.stringify({
+                pid: window.pid,
+                window_id: window.id,
+                capture_mode: "vision",
+                screenshot_out_file: path,
+            }),
+        ],
+        { stdio: "pipe" },
+    );
+    if (!existsSync(path)) throw new Error(`window capture did not write ${path}`);
 }
 
 function pixelDiff(before, after, diffOut) {

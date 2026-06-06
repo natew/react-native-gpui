@@ -11,11 +11,14 @@ import { useState } from "react";
 function App() {
     const [count, setCount] = useState(0);
     const [text, setText] = useState("");
+    const skipWebView = process.env.RNGPUI_INSPECTOR_NO_WEBVIEW === "1";
 
     return (
         <View style={s.root}>
             <View style={s.sidebar} accessibilityLabel="Inspector sidebar">
-                <Text style={s.title}>Inspector</Text>
+                <Text testID="inspector-title" style={s.title}>
+                    Inspector
+                </Text>
                 <Pressable style={s.button} onPress={() => setCount((value) => value + 1)}>
                     <Text style={s.buttonText}>Increment {count}</Text>
                 </Pressable>
@@ -36,12 +39,14 @@ function App() {
                     <Text style={s.rowLabel}>selected</Text>
                     <Text style={s.rowValue}>{text || "none"}</Text>
                 </View>
-                <WebView
-                    style={s.webview}
-                    source={{
-                        html: "<!doctype html><body style='margin:0;font-family:-apple-system,sans-serif;padding:18px'><strong>WebView region</strong><p>This is still reported as the host webview node.</p></body>",
-                    }}
-                />
+                {!skipWebView && (
+                    <WebView
+                        style={s.webview}
+                        source={{
+                            html: "<!doctype html><body style='margin:0;font-family:-apple-system,sans-serif;padding:18px'><strong>WebView region</strong><p>This is still reported as the host webview node.</p></body>",
+                        }}
+                    />
+                )}
             </View>
         </View>
     );

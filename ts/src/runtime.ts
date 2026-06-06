@@ -57,6 +57,10 @@ export type SerializedAccessibility = {
     hint?: string;
     value?: string;
     identifier?: string;
+    identifierSource?: "nativeID" | "testID" | "id";
+    nativeID?: string;
+    testID?: string;
+    propID?: string;
     disabled?: boolean;
     selected?: boolean;
     checked?: boolean | "mixed";
@@ -127,6 +131,9 @@ export function startBridge(initial: SerializedNode, options: BridgeOptions = {}
     if (options.inspector) env.RNGPUI_INSPECTOR = "1";
     const proc: ChildProcess = spawn(bin, [], { stdio: ["pipe", "pipe", "pipe"], env });
     const listeners: Array<(e: BridgeEvent) => void> = [];
+    if (process.env.RNGPUI_SERVICE_PID_FILE && proc.pid) {
+        writeFileSync(process.env.RNGPUI_SERVICE_PID_FILE, `${proc.pid}\n`);
+    }
 
     if (proc.stdout) {
         let buf = "";

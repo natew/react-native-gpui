@@ -529,6 +529,10 @@ function serializeAccessibility(inst: Instance, node: SerializedNode): Serialize
         (important === "no-hide-descendants" ? true : undefined) ??
         (node.type === "svg" && !svgHasExplicitAccessibility ? true : undefined);
 
+    const nativeID = stringProp(props, "nativeID");
+    const testID = stringProp(props, "testID");
+    const propID = stringProp(props, "id");
+    const identifier = nativeID ?? testID ?? propID;
     const info: SerializedAccessibility = {
         accessible:
             boolProp(props, "accessible") ??
@@ -538,7 +542,11 @@ function serializeAccessibility(inst: Instance, node: SerializedNode): Serialize
         role: stringProp(props, "accessibilityRole", "role"),
         hint: stringProp(props, "accessibilityHint", "aria-description"),
         value: accessibilityValueText(props.accessibilityValue),
-        identifier: stringProp(props, "nativeID", "testID", "id"),
+        identifier,
+        identifierSource: nativeID ? "nativeID" : testID ? "testID" : propID ? "id" : undefined,
+        nativeID,
+        testID,
+        propID,
         disabled: boolProp(state, "disabled"),
         selected: boolProp(state, "selected"),
         checked: typeof state.checked === "boolean" || state.checked === "mixed" ? state.checked : undefined,

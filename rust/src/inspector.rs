@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use gpui::{
     AnyElement, App, ClipboardItem, IntoElement, Modifiers, MouseButton, MouseDownEvent,
@@ -16,6 +17,11 @@ pub const WEBVIEW_INSPECTOR_SCRIPT: &str = r#"
   window.__rngpuiInspectorInstalled = true;
 
   const message = '{"__rngpuiInspector":true,"event":"copy"}';
+  const holdMs = 500;
+  let active = false;
+  let altDown = false;
+  let timer = 0;
+  let token = 0;
   let overlay;
 
   const getOverlay = () => {
@@ -39,17 +45,52 @@ pub const WEBVIEW_INSPECTOR_SCRIPT: &str = r#"
     getOverlay().style.display = active ? "block" : "none";
   };
 
+  const clearTimer = () => {
+    if (!timer) return;
+    clearTimeout(timer);
+    timer = 0;
+  };
+
+  const deactivate = () => {
+    token += 1;
+    altDown = false;
+    active = false;
+    clearTimer();
+    show(false);
+  };
+
+  const arm = () => {
+    if (active || timer) return;
+    const current = ++token;
+    timer = setTimeout(() => {
+      timer = 0;
+      if (!altDown || token !== current) return;
+      active = true;
+      show(true);
+    }, holdMs);
+  };
+
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Alt") show(true);
+    if (event.key !== "Alt") return;
+    altDown = true;
+    arm();
   }, true);
-  document.addEventListener("mousemove", (event) => show(event.altKey), true);
-  document.addEventListener("mouseleave", () => show(false), true);
+  document.addEventListener("mousemove", (event) => {
+    if (!event.altKey) {
+      deactivate();
+      return;
+    }
+    altDown = true;
+    if (active) show(true);
+    else arm();
+  }, true);
+  document.addEventListener("mouseleave", () => deactivate(), true);
   document.addEventListener("keyup", (event) => {
-    if (event.key === "Alt") show(false);
+    if (event.key === "Alt") deactivate();
   }, true);
-  window.addEventListener("blur", () => show(false), true);
+  window.addEventListener("blur", () => deactivate(), true);
   document.addEventListener("mousedown", (event) => {
-    if (!event.altKey || event.button !== 0) return;
+    if (!active || !event.altKey || event.button !== 0) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     show(true);
@@ -59,6 +100,7 @@ pub const WEBVIEW_INSPECTOR_SCRIPT: &str = r#"
 "#;
 
 const WEBVIEW_INSPECTOR_FLAG: &str = "__rngpuiInspector";
+pub const INSPECTOR_ACTIVATION_HOLD: Duration = Duration::from_millis(500);
 
 static SNAPSHOT_METADATA: Lazy<Mutex<HashMap<u64, SnapshotMetadata>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -106,6 +148,10 @@ struct NodeSummary {
     role: Option<String>,
     label: Option<String>,
     identifier: Option<String>,
+    identifier_source: Option<String>,
+    native_id: Option<String>,
+    test_id: Option<String>,
+    prop_id: Option<String>,
     text: Option<String>,
 }
 
@@ -137,6 +183,10 @@ struct SnapshotMetadata {
 pub struct InspectorState {
     enabled: bool,
     active: bool,
+    alt_down: bool,
+    hold_token: u64,
+    last_position: Option<Point<Pixels>>,
+    suppress_mouse_up: bool,
     hover: Option<InspectorHit>,
     copied_id: Option<u64>,
 }
@@ -146,6 +196,10 @@ impl InspectorState {
         Self {
             enabled,
             active: false,
+            alt_down: false,
+            hold_token: 0,
+            last_position: None,
+            suppress_mouse_up: false,
             hover: None,
             copied_id: None,
         }
@@ -164,18 +218,22 @@ impl InspectorState {
         root: &Arc<ReactElement>,
         position: Point<Pixels>,
         modifiers: Modifiers,
-    ) -> bool {
+    ) -> (bool, Option<u64>) {
         if !self.enabled {
-            return false;
+            return (false, None);
         }
-        self.set_hover(root, position, modifiers.alt)
+        self.update_alt_state(root, position, modifiers.alt)
     }
 
-    pub fn handle_mouse_move(&mut self, root: &Arc<ReactElement>, event: &MouseMoveEvent) -> bool {
+    pub fn handle_mouse_move(
+        &mut self,
+        root: &Arc<ReactElement>,
+        event: &MouseMoveEvent,
+    ) -> (bool, Option<u64>) {
         if !self.enabled {
-            return false;
+            return (false, None);
         }
-        self.set_hover(root, event.position, event.modifiers.alt)
+        self.update_alt_state(root, event.position, event.modifiers.alt)
     }
 
     pub fn handle_mouse_down(
@@ -187,16 +245,74 @@ impl InspectorState {
         if !self.enabled || event.button != MouseButton::Left || !event.modifiers.alt {
             return false;
         }
-        let changed = self.set_hover(root, event.position, true);
+        if !self.active {
+            return false;
+        }
+        self.suppress_mouse_up = true;
+        self.copy_active_at(root, event.position, cx);
+        true
+    }
+
+    pub fn copy_at(
+        &mut self,
+        root: &Arc<ReactElement>,
+        position: Point<Pixels>,
+        cx: &mut App,
+    ) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let previous_target = self.hover.as_ref().map(hit_key);
+        self.last_position = Some(position);
+        self.hover = hit_test(root, position);
         if let Some(hit) = self.hover.as_ref() {
             cx.write_to_clipboard(ClipboardItem::new_string(snapshot(hit)));
             self.copied_id = Some(hit.target.id);
         }
-        changed || self.hover.is_some()
+        previous_target != self.hover.as_ref().map(hit_key) || self.hover.is_some()
     }
 
-    pub fn handle_mouse_up(&self, event: &MouseUpEvent) -> bool {
-        self.enabled && (self.active || event.modifiers.alt)
+    pub fn handle_mouse_up(&mut self, event: &MouseUpEvent) -> bool {
+        if !self.enabled {
+            self.suppress_mouse_up = false;
+            return false;
+        }
+        let suppress = self.suppress_mouse_up || (self.active && event.modifiers.alt);
+        self.suppress_mouse_up = false;
+        suppress
+    }
+
+    pub fn activate_after_hold(
+        &mut self,
+        root: &Arc<ReactElement>,
+        token: u64,
+        alt_still_down: bool,
+    ) -> bool {
+        if !alt_still_down {
+            return self.deactivate();
+        }
+        if !self.enabled || !self.alt_down || self.hold_token != token {
+            return false;
+        }
+        let Some(position) = self.last_position else {
+            return false;
+        };
+        self.set_hover(root, position, true)
+    }
+
+    pub fn deactivate(&mut self) -> bool {
+        let previous_active = self.active;
+        let previous_target = self.hover.as_ref().map(hit_key);
+        let had_hold = self.alt_down;
+        self.active = false;
+        self.alt_down = false;
+        self.hover = None;
+        self.copied_id = None;
+        self.last_position = None;
+        if had_hold || previous_active {
+            self.hold_token = self.hold_token.wrapping_add(1);
+        }
+        previous_active || previous_target.is_some()
     }
 
     pub fn overlay(&self) -> Option<AnyElement> {
@@ -255,6 +371,61 @@ impl InspectorState {
         }
         previous_active != self.active || previous_target != self.hover.as_ref().map(hit_key)
     }
+
+    fn update_alt_state(
+        &mut self,
+        root: &Arc<ReactElement>,
+        position: Point<Pixels>,
+        alt: bool,
+    ) -> (bool, Option<u64>) {
+        if !alt {
+            return (self.deactivate(), None);
+        }
+        self.last_position = Some(position);
+        let activation_token = if self.alt_down {
+            None
+        } else {
+            self.alt_down = true;
+            self.hold_token = self.hold_token.wrapping_add(1);
+            Some(self.hold_token)
+        };
+        let changed = if self.active {
+            self.set_hover(root, position, true)
+        } else {
+            false
+        };
+        (changed, activation_token)
+    }
+
+    fn copy_active_at(
+        &mut self,
+        root: &Arc<ReactElement>,
+        position: Point<Pixels>,
+        cx: &mut App,
+    ) -> bool {
+        let changed = self.set_hover(root, position, true);
+        if let Some(hit) = self.hover.as_ref() {
+            cx.write_to_clipboard(ClipboardItem::new_string(snapshot(hit)));
+            self.copied_id = Some(hit.target.id);
+        }
+        changed || self.hover.is_some()
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn current_option_modifier_down() -> bool {
+    use cocoa::appkit::{NSEvent, NSEventModifierFlags};
+    use cocoa::base::{id, nil};
+
+    unsafe {
+        <id as NSEvent>::currentModifierFlags(nil)
+            .contains(NSEventModifierFlags::NSAlternateKeyMask)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn current_option_modifier_down() -> bool {
+    true
 }
 
 pub fn refresh_snapshot_cache(root: &Arc<ReactElement>) {
@@ -474,6 +645,12 @@ fn inspect_rank(element: &ReactElement) -> u8 {
     if element.accessibility.identifier.is_some() {
         return 70;
     }
+    if element.accessibility.test_id.is_some()
+        || element.accessibility.native_id.is_some()
+        || element.accessibility.prop_id.is_some()
+    {
+        return 70;
+    }
     if element.native_layout_key.is_some() {
         return 60;
     }
@@ -497,6 +674,10 @@ fn summary(element: &ReactElement) -> NodeSummary {
         role: element.accessibility.role.clone(),
         label: element.accessibility.label.clone(),
         identifier: element.accessibility.identifier.clone(),
+        identifier_source: element.accessibility.identifier_source.clone(),
+        native_id: element.accessibility.native_id.clone(),
+        test_id: element.accessibility.test_id.clone(),
+        prop_id: element.accessibility.prop_id.clone(),
         text: snippet(element.text.as_deref(), 80),
     }
 }
@@ -542,13 +723,17 @@ fn style_facts(element: &ReactElement) -> Vec<String> {
 }
 
 fn overlay_label(hit: &InspectorHit, copied: bool) -> String {
-    let base = hit
-        .target
-        .label
-        .as_ref()
-        .or(hit.target.text.as_ref())
-        .map(|label| format!("{}#{} {}", hit.target.element_type, hit.target.id, label))
-        .unwrap_or_else(|| format!("{}#{}", hit.target.element_type, hit.target.id));
+    let mut base = format!("{}#{}", hit.target.element_type, hit.target.id);
+    if let Some(test_id) = hit.target.test_id.as_ref() {
+        base.push_str(&format!(" testID={test_id}"));
+    } else if let Some(native_id) = hit.target.native_id.as_ref() {
+        base.push_str(&format!(" nativeID={native_id}"));
+    } else if let Some(identifier) = hit.target.identifier.as_ref() {
+        base.push_str(&format!(" identifier={identifier}"));
+    }
+    if let Some(label) = hit.target.label.as_ref().or(hit.target.text.as_ref()) {
+        base.push_str(&format!(" {label}"));
+    }
     if copied {
         format!("copied {base}")
     } else {
@@ -568,6 +753,14 @@ fn snapshot(hit: &InspectorHit) -> String {
     push_optional(&mut lines, "role", hit.target.role.as_deref());
     push_optional(&mut lines, "label", hit.target.label.as_deref());
     push_optional(&mut lines, "identifier", hit.target.identifier.as_deref());
+    push_optional(
+        &mut lines,
+        "identifierSource",
+        hit.target.identifier_source.as_deref(),
+    );
+    push_optional(&mut lines, "testID", hit.target.test_id.as_deref());
+    push_optional(&mut lines, "nativeID", hit.target.native_id.as_deref());
+    push_optional(&mut lines, "propID", hit.target.prop_id.as_deref());
     push_optional(&mut lines, "text", hit.target.text.as_deref());
     push_optional(&mut lines, "value", hit.value.as_deref());
     if !hit.events.is_empty() {
@@ -600,10 +793,19 @@ fn path_label(node: &NodeSummary) -> String {
     if let Some(role) = node.role.as_ref() {
         out.push_str(&format!("[{role}]"));
     }
+    if let Some(test_id) = node.test_id.as_ref() {
+        out.push_str(&format!("[testID={}]", escape_path_value(test_id)));
+    } else if let Some(identifier) = node.identifier.as_ref() {
+        out.push_str(&format!("[identifier={}]", escape_path_value(identifier)));
+    }
     if let Some(label) = node.label.as_ref().or(node.text.as_ref()) {
         out.push_str(&format!(" \"{}\"", label.replace('"', "\\\"")));
     }
     out
+}
+
+fn escape_path_value(value: &str) -> String {
+    value.replace(']', "\\]")
 }
 
 fn snippet(value: Option<&str>, limit: usize) -> Option<String> {
@@ -629,11 +831,11 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex, MutexGuard};
 
-    use gpui::{point, px};
+    use gpui::{Modifiers, point, px};
 
     use super::{
-        cached_snapshot, hit_test, is_webview_inspector_message, refresh_layout_snapshot,
-        refresh_snapshot_cache, snapshot,
+        InspectorState, cached_snapshot, hit_test, is_webview_inspector_message,
+        refresh_layout_snapshot, refresh_snapshot_cache, snapshot,
     };
     use crate::bridge;
     use crate::elements::{AccessibilityInfo, ReactElement};
@@ -730,6 +932,9 @@ mod tests {
         button.events.push("press".to_string());
         button.accessibility.label = Some("Run task".to_string());
         button.accessibility.role = Some("button".to_string());
+        button.accessibility.identifier = Some("run-task-button".to_string());
+        button.accessibility.identifier_source = Some("testID".to_string());
+        button.accessibility.test_id = Some("run-task-button".to_string());
         let button = Arc::new(button);
         let root = node(2001, "view", vec![button]);
         bridge::remember_layout(2001, 0.0, 0.0, 400.0, 300.0);
@@ -740,8 +945,136 @@ mod tests {
 
         assert!(copied.contains("id: 2002"));
         assert!(copied.contains("role: button"));
+        assert!(copied.contains("identifier: run-task-button"));
+        assert!(copied.contains("identifierSource: testID"));
+        assert!(copied.contains("testID: run-task-button"));
         assert!(copied.contains("events: press"));
-        assert!(copied.contains("path: view#2001 > view#2002[button] \"Run task\""));
+        assert!(
+            copied.contains(
+                "path: view#2001 > view#2002[button][testID=run-task-button] \"Run task\""
+            )
+        );
+        bridge::retain_layout(&HashSet::new());
+    }
+
+    #[test]
+    fn inspector_waits_for_hold_token_before_activating() {
+        let _guard = inspector_test_guard();
+        bridge::retain_layout(&HashSet::new());
+        let child = node(6002, "view", Vec::new());
+        let root = node(6001, "view", vec![child]);
+        bridge::remember_layout(6001, 0.0, 0.0, 400.0, 300.0);
+        bridge::remember_layout(6002, 12.0, 14.0, 80.0, 40.0);
+
+        let mut inspector = InspectorState::new(true);
+        let (changed, token) = inspector.handle_modifiers(
+            &root,
+            point(px(20.0), px(20.0)),
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+        );
+        let token = token.expect("alt hold should schedule activation");
+
+        assert!(!changed);
+        assert!(!inspector.active);
+        assert!(inspector.hover.is_none());
+        assert!(!inspector.activate_after_hold(&root, token + 1, true));
+        assert!(!inspector.active);
+
+        assert!(inspector.activate_after_hold(&root, token, true));
+        assert!(inspector.active);
+        assert_eq!(
+            inspector.hover.as_ref().map(|hit| hit.target.id),
+            Some(6002)
+        );
+        bridge::retain_layout(&HashSet::new());
+    }
+
+    #[test]
+    fn inspector_blur_invalidates_pending_hold() {
+        let _guard = inspector_test_guard();
+        bridge::retain_layout(&HashSet::new());
+        let child = node(7002, "view", Vec::new());
+        let root = node(7001, "view", vec![child]);
+        bridge::remember_layout(7001, 0.0, 0.0, 400.0, 300.0);
+        bridge::remember_layout(7002, 12.0, 14.0, 80.0, 40.0);
+
+        let mut inspector = InspectorState::new(true);
+        let (_, token) = inspector.handle_modifiers(
+            &root,
+            point(px(20.0), px(20.0)),
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+        );
+        let token = token.expect("alt hold should schedule activation");
+
+        assert!(!inspector.deactivate());
+        assert!(!inspector.activate_after_hold(&root, token, true));
+        assert!(!inspector.active);
+        assert!(inspector.hover.is_none());
+        bridge::retain_layout(&HashSet::new());
+    }
+
+    #[test]
+    fn inspector_activation_timer_cannot_show_after_modifier_release() {
+        let _guard = inspector_test_guard();
+        bridge::retain_layout(&HashSet::new());
+        let child = node(8002, "view", Vec::new());
+        let root = node(8001, "view", vec![child]);
+        bridge::remember_layout(8001, 0.0, 0.0, 400.0, 300.0);
+        bridge::remember_layout(8002, 12.0, 14.0, 80.0, 40.0);
+
+        let mut inspector = InspectorState::new(true);
+        let (_, token) = inspector.handle_modifiers(
+            &root,
+            point(px(20.0), px(20.0)),
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+        );
+        let token = token.expect("alt hold should schedule activation");
+
+        assert!(!inspector.activate_after_hold(&root, token, false));
+        assert!(!inspector.active);
+        assert!(inspector.hover.is_none());
+        bridge::retain_layout(&HashSet::new());
+    }
+
+    #[test]
+    fn inspector_release_hides_active_overlay_immediately() {
+        let _guard = inspector_test_guard();
+        bridge::retain_layout(&HashSet::new());
+        let child = node(9002, "view", Vec::new());
+        let root = node(9001, "view", vec![child]);
+        bridge::remember_layout(9001, 0.0, 0.0, 400.0, 300.0);
+        bridge::remember_layout(9002, 12.0, 14.0, 80.0, 40.0);
+
+        let mut inspector = InspectorState::new(true);
+        let (_, token) = inspector.handle_modifiers(
+            &root,
+            point(px(20.0), px(20.0)),
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+        );
+        let token = token.expect("alt hold should schedule activation");
+        assert!(inspector.activate_after_hold(&root, token, true));
+        assert!(inspector.active);
+        assert!(inspector.hover.is_some());
+
+        let (changed, activation_token) =
+            inspector.handle_modifiers(&root, point(px(20.0), px(20.0)), Modifiers::default());
+
+        assert!(changed);
+        assert!(activation_token.is_none());
+        assert!(!inspector.active);
+        assert!(inspector.hover.is_none());
         bridge::retain_layout(&HashSet::new());
     }
 

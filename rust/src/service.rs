@@ -2,6 +2,7 @@
 
 use std::io::{self, BufRead};
 use std::sync::Arc;
+use std::time::Duration;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
@@ -9,8 +10,8 @@ use std::rc::Rc;
 use gpui::{
     App, AppContext, Bounds, Context, Entity, InteractiveElement as _, IntoElement, KeyBinding,
     Menu, MenuItem, ModifiersChangedEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Render, Styled, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
-    point, px, size,
+    ParentElement, Pixels, Point, Render, Styled, TitlebarOptions, Window, WindowBounds,
+    WindowOptions, actions, point, px, size,
 };
 use gpui_component::input::{Enter, InputEvent, InputState, Position};
 use gpui_component::theme::{Theme, ThemeMode};
@@ -235,6 +236,17 @@ fn parse_native_resize(value: &serde_json::Value) -> Option<NativeResizeSpec> {
     })
 }
 
+fn parse_point_env(name: &str) -> Option<Point<Pixels>> {
+    let value = std::env::var(name).ok()?;
+    let mut parts = value.split(',').map(str::trim);
+    let x = parts.next()?.parse::<f32>().ok()?;
+    let y = parts.next()?.parse::<f32>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(point(px(x), px(y)))
+}
+
 fn parse_accessibility(value: &serde_json::Value) -> Option<AccessibilityInfo> {
     let obj = value.as_object()?;
     let checked = match obj.get("checked") {
@@ -253,6 +265,16 @@ fn parse_accessibility(value: &serde_json::Value) -> Option<AccessibilityInfo> {
             .get("identifier")
             .and_then(|v| v.as_str())
             .map(String::from),
+        identifier_source: obj
+            .get("identifierSource")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        native_id: obj
+            .get("nativeID")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        test_id: obj.get("testID").and_then(|v| v.as_str()).map(String::from),
+        prop_id: obj.get("propID").and_then(|v| v.as_str()).map(String::from),
         disabled: obj
             .get("disabled")
             .and_then(|v| v.as_bool())
@@ -308,6 +330,32 @@ struct ServiceApp {
 }
 
 type InputSpec = (u64, String, Option<String>, bool, bool);
+
+fn schedule_inspector_activation(cx: &mut Context<ServiceApp>, token: u64) {
+    cx.spawn(async move |this, cx| {
+        cx.background_executor()
+            .timer(inspector::INSPECTOR_ACTIVATION_HOLD)
+            .await;
+        let changed = this
+            .update(cx, |this, cx| {
+                let root = this.root.clone();
+                let changed = this.inspector.activate_after_hold(
+                    &root,
+                    token,
+                    inspector::current_option_modifier_down(),
+                );
+                if changed {
+                    cx.notify();
+                }
+                changed
+            })
+            .unwrap_or(false);
+        if changed {
+            let _ = cx.update(|cx| cx.refresh_windows());
+        }
+    })
+    .detach();
+}
 
 /// collect (id, placeholder, value, multiline, secure) for every text-input node in the tree.
 fn collect_inputs(el: &Arc<ReactElement>, out: &mut Vec<InputSpec>) {
@@ -672,11 +720,15 @@ impl Render for ServiceApp {
                 .on_modifiers_changed(cx.listener(
                     |this, event: &ModifiersChangedEvent, window, cx| {
                         let root = this.root.clone();
-                        if this.inspector.handle_modifiers(
+                        let (changed, activation_token) = this.inspector.handle_modifiers(
                             &root,
                             window.mouse_position(),
                             event.modifiers,
-                        ) {
+                        );
+                        if let Some(token) = activation_token {
+                            schedule_inspector_activation(cx, token);
+                        }
+                        if changed {
                             cx.notify();
                             window.refresh();
                         }
@@ -684,7 +736,12 @@ impl Render for ServiceApp {
                 ))
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                     let root = this.root.clone();
-                    if this.inspector.handle_mouse_move(&root, event) {
+                    let (changed, activation_token) =
+                        this.inspector.handle_mouse_move(&root, event);
+                    if let Some(token) = activation_token {
+                        schedule_inspector_activation(cx, token);
+                    }
+                    if changed {
                         cx.notify();
                         window.refresh();
                     }
@@ -933,13 +990,17 @@ fn main() {
     // Window opens at the root's declared width/height; after that it fills.
     let win_w = initial.style.width.and_then(Dim::as_px).unwrap_or(720.0);
     let win_h = initial.style.height.and_then(Dim::as_px).unwrap_or(800.0);
+    let test_mode = std::env::var("RNGPUI_TEST_MODE").is_ok();
+    let test_onscreen = std::env::var("RNGPUI_TEST_ONSCREEN").is_ok();
+    let inspector_copy_at = parse_point_env("RNGPUI_INSPECTOR_COPY_AT");
+    let show_window = !test_mode || test_onscreen;
     let app_root = fill_root(initial);
 
     bridge::ready(win_w, win_h);
 
     // when set, the window opens in the background without stealing focus — handy
     // for screenshotting/iterating without it popping over whatever you're doing.
-    let background = std::env::var("RNGPUI_NO_ACTIVATE").is_ok();
+    let background = test_mode || std::env::var("RNGPUI_NO_ACTIVATE").is_ok();
 
     let app = gpui::Application::new().with_assets(icons::Assets);
     app.run(move |cx: &mut App| {
@@ -997,7 +1058,7 @@ fn main() {
                 traffic_light_position: Some(point(px(14.0), px(18.0))),
             }),
             focus: !background,
-            show: true,
+            show: show_window,
             kind: gpui::WindowKind::Normal,
             is_movable: true,
             is_resizable: true,
@@ -1028,7 +1089,20 @@ fn main() {
             .open_window(options, move |window, cx| {
                 #[cfg(target_os = "macos")]
                 liquid_glass::install(window);
-                cx.new(|cx| gpui_component::Root::new(content, window, cx))
+                let content_for_activation = content.clone();
+                content_for_activation.update(cx, |_this, cx| {
+                    cx.observe_window_activation(window, |this, window, cx| {
+                        if window.is_window_active() {
+                            return;
+                        }
+                        if this.inspector.deactivate() {
+                            cx.notify();
+                            window.refresh();
+                        }
+                    })
+                    .detach();
+                });
+                cx.new(|cx| gpui_component::Root::new(content.clone(), window, cx))
             })
             .expect("open window");
         // bring the app to the front so keystrokes reach the focused input
@@ -1037,6 +1111,27 @@ fn main() {
             cx.activate(true);
         }
 
+
+        if let Some(position) = inspector_copy_at {
+            let inspector_pump = pump.clone();
+            cx.spawn(async move |cx| {
+                for _ in 0..80 {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(25))
+                        .await;
+                    let copied = inspector_pump
+                        .update(cx, |this, cx| {
+                            let root = this.root.clone();
+                            this.inspector.copy_at(&root, position, cx)
+                        })
+                        .unwrap_or(false);
+                    if copied {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         // Foreground pump: apply each message on the main thread. A new tree re-renders
         // (cx.notify); a webview command runs straight against the live wry view (which
         // must be driven from the main thread). Both arrive on the same ordered channel.

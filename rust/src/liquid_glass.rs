@@ -111,6 +111,37 @@ pub fn show_offscreen_test_window(window: &mut Window) -> bool {
     }
 }
 
+// Reveal the window ON-screen but invisible, for pixel capture. macOS only
+// composites a window's Metal surface while it is on a display, so the
+// fully-offscreen test path above yields a blank screenshot. Here the window stays
+// at its on-screen origin (so WindowServer composites it) but is made imperceptible:
+// a tiny non-zero alpha, click-through, non-key. The in-process PNG capture
+// (capture_png.rs) reads the WindowServer composite and divides this alpha back out
+// to recover full-opacity chrome — so the alpha must be non-zero (a fully
+// transparent alpha-0 window is occlusion-culled by macOS and never composites,
+// yielding a blank grab). 0.02 is imperceptible yet keeps the surface live.
+// RNGPUI_CAPTURE_ALPHA overrides it.
+pub fn show_onscreen_capture_window(window: &mut Window) {
+    let Some(ns_view) = raw_ns_view(window) else {
+        return;
+    };
+    let alpha = std::env::var("RNGPUI_CAPTURE_ALPHA")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| *value > 0.0)
+        .unwrap_or(0.02);
+    unsafe {
+        let ns_window: id = msg_send![ns_view, window];
+        if ns_window == nil {
+            return;
+        }
+        let _: () = msg_send![ns_window, setAlphaValue: alpha];
+        let _: () = msg_send![ns_window, setIgnoresMouseEvents: YES];
+        // order it in (so it composites) without making it the key/main window.
+        let _: () = msg_send![ns_window, orderFrontRegardless];
+    }
+}
+
 fn debug_offscreen_test(message: &str) {
     if std::env::var("RNGPUI_TEST_DEBUG").is_ok() {
         eprintln!("[rngpui test debug] {message}");
@@ -285,6 +316,14 @@ fn raw_ns_view(window: &mut Window) -> Option<id> {
         RawWindowHandle::AppKit(handle) => Some(handle.ns_view.as_ptr() as id),
         _ => None,
     }
+}
+
+/// The gpui Metal-backed NSView (its `makeBackingLayer` returns gpui's
+/// CAMetalLayer). Used by the RNGPUI_CAPTURE_PNG path to read full-opacity
+/// content via CARenderer. Returns the raw pointer as usize so it can be moved
+/// across the `'static` capture task boundary.
+pub fn gpui_ns_view_ptr(window: &mut Window) -> Option<usize> {
+    raw_ns_view(window).map(|view| view as usize)
 }
 
 fn remember_content_view(key: usize) -> bool {

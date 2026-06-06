@@ -29,6 +29,8 @@ struct InvokeCommand {
 #[cfg(target_os = "macos")]
 mod ax;
 mod bridge;
+#[cfg(target_os = "macos")]
+mod capture_png;
 mod elements;
 mod hit_passthrough;
 mod icons;
@@ -1055,7 +1057,15 @@ fn main() {
     let test_onscreen = std::env::var("RNGPUI_TEST_ONSCREEN").is_ok();
     let background = test_mode || std::env::var("RNGPUI_NO_ACTIVATE").is_ok();
     let inspector_copy_at = parse_point_env("RNGPUI_INSPECTOR_COPY_AT");
-    let offscreen_test_window = test_mode && !test_onscreen && inspector_copy_at.is_none();
+    // Pixel-capture mode: macOS never composites a fully-offscreen window's Metal
+    // surface (so a screenshot of the offscreen test window is blank). This mode
+    // instead keeps the window ON-screen — where WindowServer does composite it —
+    // but invisible: alpha ~0, click-through, non-activating, opened hidden so there
+    // is no flash. A screenshot tool reads the full-opacity backing surface. Used
+    // by gui/native-shell/scripts/check-web-parity.ts.
+    let capture_onscreen = std::env::var("RNGPUI_CAPTURE_ONSCREEN").is_ok();
+    let offscreen_test_window =
+        test_mode && !test_onscreen && !capture_onscreen && inspector_copy_at.is_none();
     let window_origin = if offscreen_test_window {
         point(px(-10000.0), px(-10000.0))
     } else {
@@ -1063,7 +1073,8 @@ fn main() {
         // corner window for non-focus-stealing visual debugging).
         parse_point_env("RNGPUI_WINDOW_ORIGIN").unwrap_or_else(|| point(px(120.0), px(120.0)))
     };
-    let show_window = !test_mode || test_onscreen;
+    // capture mode opens hidden too (no flash); liquid_glass reveals it invisibly.
+    let show_window = (!test_mode || test_onscreen) && !capture_onscreen;
 
     let app = gpui::Application::new().with_assets(icons::Assets);
     app.run(move |cx: &mut App| {
@@ -1165,6 +1176,10 @@ fn main() {
                     eprintln!("[rngpui test] window was clamped on-screen; refusing to show");
                     cx.quit();
                 }
+                #[cfg(target_os = "macos")]
+                if capture_onscreen {
+                    liquid_glass::show_onscreen_capture_window(window);
+                }
                 let content_for_activation = content.clone();
                 content_for_activation.update(cx, |_this, cx| {
                     cx.observe_window_activation(window, |this, window, cx| {
@@ -1211,6 +1226,41 @@ fn main() {
                         })
                         .unwrap_or(false);
                     if copied {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+
+        // Full-opacity PNG capture for the web<->desktop parity harness. Inert
+        // unless RNGPUI_CAPTURE_PNG is set. The window is on-screen-but-invisible
+        // (NSWindow alphaValue ~0.02) so its Metal surface keeps compositing;
+        // capture_png reads the WindowServer composite via CGWindowListCreateImage
+        // and divides the window alpha back out to recover full-opacity chrome (the
+        // gpui CAMetalLayer's presented frames can't be read in-process — see
+        // capture_png.rs). Runs on a repeating main-thread timer (the AppKit /
+        // CG window calls require the main thread), overwriting the file each time,
+        // so whenever the harness grabs it the latest frame is present. The harness
+        // waits ~3s after the window appears.
+        #[cfg(target_os = "macos")]
+        if let Ok(capture_path) = std::env::var("RNGPUI_CAPTURE_PNG") {
+            cx.spawn(async move |cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(250))
+                        .await;
+                    let still_open = window_handle
+                        .update(cx, |_root, window, _cx| {
+                            if let Some(view_ptr) = liquid_glass::gpui_ns_view_ptr(window) {
+                                capture_png::capture_layer_to_png(
+                                    view_ptr as *mut objc::runtime::Object,
+                                    &capture_path,
+                                );
+                            }
+                        })
+                        .is_ok();
+                    if !still_open {
                         break;
                     }
                 }

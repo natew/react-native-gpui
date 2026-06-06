@@ -19,8 +19,13 @@ const crop = parseCrop(args.crop, before, after);
 const threshold = numberArg(args.threshold, 24);
 const maxDiffRatio = optionalNumberArg(args["max-diff-ratio"]);
 const minDiffRatio = optionalNumberArg(args["min-diff-ratio"]);
+// excluded rects (semicolon-separated "x,y,w,h" in the same pixel space as crop) are
+// ignored entirely: not counted as changed and not counted in the total. Used to mask
+// regions that aren't a fair comparison — e.g. the desktop stage where the timeline is
+// a separate WKWebView (blank in a Metal-layer capture) but the web build draws it.
+const exclude = parseExclude(args.exclude);
 
-const result = diffImages(before, after, crop, threshold);
+const result = diffImages(before, after, crop, threshold, exclude);
 const ratio = result.changed / result.total;
 
 if (args["diff-out"]) {
@@ -35,6 +40,7 @@ console.log(
         `crop=${crop.x},${crop.y},${crop.width},${crop.height}`,
         `threshold=${threshold}`,
         `pixels=${result.total}`,
+        result.excluded ? `excluded=${result.excluded}` : "",
         `changed=${result.changed}`,
         `ratio=${ratio.toFixed(6)}`,
         `meanDelta=${result.meanDelta.toFixed(3)}`,
@@ -59,6 +65,7 @@ function printUsage() {
 
 options:
   --crop x,y,w,h             compare a screenshot region; defaults to common bounds
+  --exclude x,y,w,h[;...]    ignore region(s) entirely (not changed, not in total)
   --threshold n              per-channel change threshold, default 24
   --diff-out path.png        write a magenta-on-grayscale diff image
   --max-diff-ratio n         fail if changed pixel ratio is above n
@@ -118,16 +125,51 @@ function parseCrop(value, before, after) {
     return { x, y, width, height };
 }
 
-function diffImages(before, after, crop, threshold) {
+function parseExclude(value) {
+    if (!value) return [];
+    return String(value)
+        .split(";")
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .map((part) => {
+            const [x, y, width, height] = part.split(",").map((n) => Number(n.trim()));
+            if ([x, y, width, height].some((n) => !Number.isFinite(n))) {
+                throw new Error(`invalid exclude rect "${part}", expected x,y,w,h`);
+            }
+            return { x, y, width, height };
+        });
+}
+
+function inExclude(x, y, exclude) {
+    for (const rect of exclude) {
+        if (x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function diffImages(before, after, crop, threshold, exclude = []) {
     const diff = Buffer.alloc(crop.width * crop.height * 4);
     let changed = 0;
     let deltaSum = 0;
     let maxDelta = 0;
+    let excluded = 0;
 
     for (let y = 0; y < crop.height; y += 1) {
         for (let x = 0; x < crop.width; x += 1) {
             const srcX = crop.x + x;
             const srcY = crop.y + y;
+            const outIndexEarly = (y * crop.width + x) * 4;
+            if (inExclude(srcX, srcY, exclude)) {
+                // paint excluded regions a flat blue so the diff image shows the mask.
+                diff[outIndexEarly] = 40;
+                diff[outIndexEarly + 1] = 60;
+                diff[outIndexEarly + 2] = 120;
+                diff[outIndexEarly + 3] = 255;
+                excluded += 1;
+                continue;
+            }
             const beforeIndex = (srcY * before.width + srcX) * 4;
             const afterIndex = (srcY * after.width + srcX) * 4;
             const outIndex = (y * crop.width + x) * 4;
@@ -160,8 +202,8 @@ function diffImages(before, after, crop, threshold) {
         }
     }
 
-    const total = crop.width * crop.height;
-    return { changed, total, meanDelta: deltaSum / total, maxDelta, diff };
+    const total = crop.width * crop.height - excluded;
+    return { changed, total, excluded, meanDelta: total ? deltaSum / total : 0, maxDelta, diff };
 }
 
 function decodePng(buffer) {

@@ -56,6 +56,20 @@ impl ReactTextElement {
         }
         if let Some(lh) = style.line_height {
             el = el.line_height(px(lh));
+            // CSS centers the glyph in the line box with half-leading split from
+            // the *font-size* em box: top inset = (line_height - font_size)/2.
+            // gpui instead splits leading from the font's metric box
+            // (ascent + |descent|), so its top inset =
+            // (line_height - ascent - descent)/2 (descent is signed-negative in
+            // gpui's metrics). Those two insets differ by a per-font, size-scaled
+            // amount, which shows up as every label sitting a couple px too high
+            // vs the web render. Re-center the glyph the CSS way by nudging the
+            // text down by exactly that difference. This is a paint-only relative
+            // offset (no layout-flow impact, so wrapping/clamp height is intact).
+            let offset = baseline_correction(window, &family, size, lh);
+            if offset.abs() > 0.01 {
+                el = el.relative().top(px(offset));
+            }
         }
         el = apply_line_limit(el, self.element.number_of_lines);
 
@@ -109,6 +123,38 @@ impl ReactTextElement {
         el.child(StyledText::new(flat).with_default_highlights(&base, highlights))
             .into_any_element()
     }
+}
+
+/// Vertical nudge (px, positive = down) to make a glyph centered in its line box
+/// the gpui way line up with how CSS/Chrome centers it.
+///
+/// CSS half-leading above the glyph is `(line_height - font_size) / 2` (leading
+/// distributed from the font-size em box). gpui's `paint_line` instead uses
+/// `padding_top = (line_height - ascent - descent) / 2` where `descent` is the
+/// font's signed-negative descent metric. The two top insets differ by
+/// `gpui_top - css_top`; shifting the text down by that difference lands the
+/// baseline at the CSS position.
+fn baseline_correction(
+    window: &mut Window,
+    family: &Option<gpui::SharedString>,
+    font_size: f32,
+    line_height: f32,
+) -> f32 {
+    // `family` is already mapped to a real face by `gpui_font_family`. When it's
+    // absent the div inherits the window's default text font, so resolve metrics
+    // against that same font for an accurate correction.
+    let font = match family {
+        Some(fam) => gpui::font(fam.clone()),
+        None => window.text_style().font(),
+    };
+    let ts = window.text_system();
+    let font_id = ts.resolve_font(&font);
+    let size_px = px(font_size);
+    let ascent: f32 = ts.ascent(font_id, size_px).into();
+    let descent: f32 = ts.descent(font_id, size_px).into();
+    let css_top = (line_height - font_size) / 2.0;
+    let gpui_top = (line_height - ascent - descent) / 2.0;
+    gpui_top - css_top
 }
 
 fn apply_layout_style(mut el: gpui::Div, style: &ElementStyle) -> gpui::Div {

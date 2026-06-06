@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior,
+    App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
     IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta,
     ScrollWheelEvent, Window,
 };
@@ -41,6 +41,12 @@ thread_local! {
     static WEBVIEW_HOSTS: RefCell<HashMap<u64, id>> = RefCell::new(HashMap::new());
     #[cfg(target_os = "macos")]
     static WEBVIEW_BACKING_VIEWS: RefCell<HashMap<usize, id>> = RefCell::new(HashMap::new());
+    // last native geometry we actually applied per webview id, so we can skip the
+    // per-frame setFrame churn when nothing moved (see position_webview_host).
+    #[cfg(target_os = "macos")]
+    static WEBVIEW_LAST_BOUNDS: RefCell<HashMap<u64, (f64, f64, f64, f64)>> = RefCell::new(HashMap::new());
+    #[cfg(target_os = "macos")]
+    static WEBVIEW_LAST_HOST_STYLES: RefCell<HashMap<u64, WebViewHostStyle>> = RefCell::new(HashMap::new());
 }
 
 // Webviews composite *behind* gpui's Metal layer (see `ensure_host_view`), so the
@@ -55,6 +61,13 @@ thread_local! {
 // clickable width of the scrollbar gutter at the webview's right edge, in logical px.
 // kept a touch wider than the page's rendered scrollbar so the thumb is easy to grab.
 const WEBVIEW_SCROLLBAR_GUTTER: f32 = 16.0;
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WebViewHostStyle {
+    background_color: Option<(f32, f32, f32, f32)>,
+    bottom_radius: f32,
+}
 
 fn scrollbar_dragging(id: u64) -> bool {
     SCROLLBAR_DRAGS.with(|d| d.borrow().contains(&id))
@@ -82,6 +95,14 @@ pub fn set_webviews(map: HashMap<u64, Rc<wry::WebView>>, content: HashMap<u64, W
     WEBVIEW_CONTENT.with(|c| *c.borrow_mut() = content);
     WEBVIEW_LOADED_CONTENT.with(|loaded| {
         loaded.borrow_mut().retain(|id, _| live_ids.contains(id));
+    });
+    #[cfg(target_os = "macos")]
+    WEBVIEW_LAST_BOUNDS.with(|b| {
+        b.borrow_mut().retain(|id, _| live_ids.contains(id));
+    });
+    #[cfg(target_os = "macos")]
+    WEBVIEW_LAST_HOST_STYLES.with(|s| {
+        s.borrow_mut().retain(|id, _| live_ids.contains(id));
     });
     #[cfg(target_os = "macos")]
     WEBVIEW_HOSTS.with(|hosts| {
@@ -253,14 +274,38 @@ fn ensure_host_view(id: u64, parent_view: id, gpui_view: id) -> id {
 
         unsafe {
             let current_parent: id = msg_send![host, superview];
-            if current_parent != nil && current_parent != parent_view {
-                let _: () = msg_send![host, removeFromSuperview];
+            // Is the Metal view already the topmost subview (the invariant we want)?
+            let subviews: id = msg_send![parent_view, subviews];
+            let count: usize = msg_send![subviews, count];
+            let topmost: id = if count > 0 {
+                msg_send![subviews, objectAtIndex: count - 1]
+            } else {
+                nil
+            };
+            // Only (re)establish the underlay hierarchy + z-order when it's actually
+            // wrong. `addSubview:` on an existing subview removes-and-re-adds it, so
+            // doing this every prepaint tears the Metal view (the whole app UI) out of
+            // the window and re-inserts it on EVERY repaint — that's the "whole app
+            // flickers away on mousemove near the webview edge" report (mousemove drives
+            // repaints; idle has none, so it only flickers while moving). Once set up the
+            // order is stable, so the steady-state path here is a cheap no-op.
+            if current_parent != parent_view || topmost != gpui_view {
+                if std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok() {
+                    eprintln!(
+                        "[webview {id}] re-establishing underlay z-order (reparent={} topmost_wrong={})",
+                        current_parent != parent_view,
+                        topmost != gpui_view
+                    );
+                }
+                if current_parent != nil && current_parent != parent_view {
+                    let _: () = msg_send![host, removeFromSuperview];
+                }
+                if let Some(backing) = backing_view(parent_view) {
+                    let _: () = msg_send![parent_view, addSubview: backing];
+                }
+                let _: () = msg_send![parent_view, addSubview: host];
+                let _: () = msg_send![parent_view, addSubview: gpui_view];
             }
-            if let Some(backing) = backing_view(parent_view) {
-                let _: () = msg_send![parent_view, addSubview: backing];
-            }
-            let _: () = msg_send![parent_view, addSubview: host];
-            let _: () = msg_send![parent_view, addSubview: gpui_view];
         }
 
         host
@@ -298,25 +343,81 @@ fn position_webview_host(
     let width = f64::from(bounds.size.width);
     let height = f64::from(bounds.size.height);
 
+    let new_bounds = (x, y, width, height);
+    let new_host_style = webview_host_style(style);
+    // Re-applying the WKWebView's frame every prepaint is what causes the resize
+    // flicker + divider-drag lag: each setFrame on a layer-backed view kicks off an
+    // implicit CoreAnimation pass, and under continuous resize those stack so the web
+    // content stays perpetually mid-animation (it blanks out — "flickers invisible").
+    // It's also a full web reflow per frame. So only touch the native geometry when it
+    // actually changed (or we just had to reparent), and apply it with implicit actions
+    // disabled so the resize lands in one synchronous, flicker-free step.
+    let changed = WEBVIEW_LAST_BOUNDS.with(|b| match b.borrow().get(&id) {
+        Some(prev) => !bounds_close(*prev, new_bounds),
+        None => true,
+    });
+    let style_changed = WEBVIEW_LAST_HOST_STYLES.with(|s| match s.borrow().get(&id) {
+        Some(prev) => prev != &new_host_style,
+        None => true,
+    });
+
     unsafe {
         let current_parent: id = msg_send![webview, superview];
-        if current_parent != host {
-            if std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok() {
-                eprintln!("[webview {id}] reparenting native view into underlay host");
+        let reparented = current_parent != host;
+
+        if reparented || changed || style_changed {
+            let _: () = msg_send![class!(CATransaction), begin];
+            let _: () = msg_send![class!(CATransaction), setDisableActions: YES];
+
+            if reparented || changed {
+                if reparented {
+                    if std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok() {
+                        eprintln!("[webview {id}] reparenting native view into underlay host");
+                    }
+                    let _: id = msg_send![webview, retain];
+                    if current_parent != nil {
+                        let _: () = msg_send![webview, removeFromSuperview];
+                    }
+                    let _: () = msg_send![host, addSubview: webview];
+                    let _: () = msg_send![webview, release];
+                }
+
+                set_child_frame(parent_view, host, x, y, width, height);
+                set_child_frame(host, webview, 0.0, 0.0, width, height);
+                WEBVIEW_LAST_BOUNDS.with(|b| {
+                    b.borrow_mut().insert(id, new_bounds);
+                });
             }
-            let _: id = msg_send![webview, retain];
-            if current_parent != nil {
-                let _: () = msg_send![webview, removeFromSuperview];
-            }
-            let _: () = msg_send![host, addSubview: webview];
-            let _: () = msg_send![webview, release];
+
+            apply_host_layer_clip(host, style);
+
+            let _: () = msg_send![class!(CATransaction), commit];
+
+            WEBVIEW_LAST_HOST_STYLES.with(|s| {
+                s.borrow_mut().insert(id, new_host_style);
+            });
         }
 
-        set_child_frame(parent_view, host, x, y, width, height);
-        set_child_frame(host, webview, 0.0, 0.0, width, height);
-        apply_host_layer_clip(host, style);
+        // cheap + idempotent; keep asserting visibility every frame regardless.
         let _: () = msg_send![host, setHidden: NO];
         let _: () = msg_send![webview, setHidden: NO];
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn bounds_close(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
+    const EPS: f64 = 0.01;
+    (a.0 - b.0).abs() < EPS
+        && (a.1 - b.1).abs() < EPS
+        && (a.2 - b.2).abs() < EPS
+        && (a.3 - b.3).abs() < EPS
+}
+
+#[cfg(target_os = "macos")]
+fn webview_host_style(style: &ElementStyle) -> WebViewHostStyle {
+    WebViewHostStyle {
+        background_color: style.background_color.map(|c| (c.h, c.s, c.l, c.a)),
+        bottom_radius: webview_bottom_radius(style),
     }
 }
 
@@ -363,14 +464,27 @@ unsafe fn configure_backing_view(view: id) {
         return;
     }
 
-    let background_color: id = msg_send![class!(NSColor), windowBackgroundColor];
-    let background_cg_color: id = msg_send![background_color, CGColor];
-    let _: () = msg_send![layer, setOpaque: YES];
-    let _: () = msg_send![layer, setBackgroundColor: background_cg_color];
+    // keep this underlay backing CLEAR so the NSGlassEffectView behind the window shows
+    // through the chrome. an opaque `windowBackgroundColor` fill here is a full-window
+    // grey layer painted *above* the glass — it covers the glass entirely (the "grey bg,
+    // no glass" regression). the webview's own page body is opaque, so the underlay still
+    // has a solid base wherever a webview is actually mounted.
+    let clear_color: id = msg_send![class!(NSColor), clearColor];
+    let clear_cg_color: id = msg_send![clear_color, CGColor];
+    let _: () = msg_send![layer, setOpaque: NO];
+    let _: () = msg_send![layer, setBackgroundColor: clear_cg_color];
 }
 
 #[cfg(target_os = "macos")]
 fn hide_webview_host(id: u64) {
+    // drop the cached geometry so the next show re-applies the frame even if the
+    // layout bounds are unchanged from before it was hidden.
+    WEBVIEW_LAST_BOUNDS.with(|b| {
+        b.borrow_mut().remove(&id);
+    });
+    WEBVIEW_LAST_HOST_STYLES.with(|s| {
+        s.borrow_mut().remove(&id);
+    });
     WEBVIEW_HOSTS.with(|hosts| {
         let Some(host) = hosts.borrow().get(&id).copied() else {
             return;
@@ -392,6 +506,8 @@ fn apply_host_layer_clip(host: id, style: &ElementStyle) {
             return;
         }
 
+        apply_host_layer_background(layer, style.background_color);
+
         if radius > 0.0 {
             let bottom_corners = CA_LAYER_MIN_X_MIN_Y_CORNER | CA_LAYER_MAX_X_MIN_Y_CORNER;
             let _: () = msg_send![layer, setMasksToBounds: YES];
@@ -402,6 +518,67 @@ fn apply_host_layer_clip(host: id, style: &ElementStyle) {
             let _: () = msg_send![layer, setCornerRadius: 0.0f64];
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn apply_host_layer_background(layer: id, color: Option<Hsla>) {
+    let (red, green, blue, alpha) = color.map(hsla_to_srgb).unwrap_or((0.0, 0.0, 0.0, 0.0));
+    let ns_color: id = msg_send![
+        class!(NSColor),
+        colorWithSRGBRed: red
+        green: green
+        blue: blue
+        alpha: alpha
+    ];
+    let cg_color: id = msg_send![ns_color, CGColor];
+    let opaque = if alpha >= 1.0 { YES } else { NO };
+    let _: () = msg_send![layer, setOpaque: opaque];
+    let _: () = msg_send![layer, setBackgroundColor: cg_color];
+}
+
+#[cfg(target_os = "macos")]
+fn hsla_to_srgb(color: Hsla) -> (f64, f64, f64, f64) {
+    let h = f64::from(color.h.rem_euclid(1.0));
+    let s = f64::from(color.s.clamp(0.0, 1.0));
+    let l = f64::from(color.l.clamp(0.0, 1.0));
+    let a = f64::from(color.a.clamp(0.0, 1.0));
+
+    if s == 0.0 {
+        return (l, l, l, a);
+    }
+
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - (l * s)
+    };
+    let p = (2.0 * l) - q;
+    (
+        hue_to_srgb(p, q, h + (1.0 / 3.0)),
+        hue_to_srgb(p, q, h),
+        hue_to_srgb(p, q, h - (1.0 / 3.0)),
+        a,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn hue_to_srgb(p: f64, q: f64, mut t: f64) -> f64 {
+    if t < 0.0 {
+        t += 1.0;
+    }
+    if t > 1.0 {
+        t -= 1.0;
+    }
+    if t < 1.0 / 6.0 {
+        return p + ((q - p) * 6.0 * t);
+    }
+    if t < 1.0 / 2.0 {
+        return q;
+    }
+    if t < 2.0 / 3.0 {
+        return p + ((q - p) * ((2.0 / 3.0) - t) * 6.0);
+    }
+    p
 }
 
 #[cfg(not(target_os = "macos"))]

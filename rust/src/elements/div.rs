@@ -269,6 +269,37 @@ fn native_layout_override(key: &str) -> NativeLayoutOverride {
 }
 
 pub fn native_layout_has_animations() -> bool {
+    // Finalize any animation whose duration has fully elapsed, committing its end value
+    // as a static override — driven by wall-clock, independent of whether the element was
+    // laid out this frame. The 250fps native-layout driver (service.rs) gates its loop
+    // purely on this predicate; an animation is otherwise only cleared by request_layout's
+    // native_layout_override (div.rs), so an animated element that stops being laid out
+    // before it completes — e.g. a collapsed / `display:none` subtree whose key still
+    // lingers in the React tree, so retain_native_layout_keys keeps it — would never be
+    // removed, and the driver would spin at 250fps forever (CPU pegged + continuous
+    // repaint = the "slow + flicker at idle" report). Purging by time here guarantees the
+    // loop terminates while still preserving the animation's final committed position.
+    let now = Instant::now();
+    let expired: Vec<(String, NativeLayoutAnimation)> = {
+        let animations = NATIVE_LAYOUT_ANIMATIONS.lock().unwrap();
+        animations
+            .iter()
+            .filter(|(_, animation)| {
+                now.saturating_duration_since(animation.start) >= animation.duration
+            })
+            .map(|(key, animation)| (key.clone(), *animation))
+            .collect()
+    };
+    for (key, animation) in expired {
+        NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().remove(&key);
+        set_native_layout_override_now(
+            &key,
+            animation.to_width,
+            animation.to_height,
+            animation.to_x,
+            animation.to_y,
+        );
+    }
     !NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().is_empty()
 }
 
@@ -1654,9 +1685,9 @@ mod tests {
         ActiveNativeResize, ActivePressDrag, NATIVE_LAYOUT_ANIMATIONS, NATIVE_LAYOUT_FRAMES,
         NATIVE_LAYOUT_OVERRIDES, NativeLayoutAnimation, NativeLayoutOverride, RoundedOverflowClip,
         clear_native_layout_override, events_have_press_action, get_scroll, inner_corner_radius,
-        native_layout_animation_value, native_layout_override, press_drag_should_activate,
-        remember_native_layout_frame, rounded_clip_radii_for_bounds, scroll_to,
-        set_native_layout_override, stacked_child_indices_for,
+        native_layout_animation_value, native_layout_has_animations, native_layout_override,
+        press_drag_should_activate, remember_native_layout_frame, rounded_clip_radii_for_bounds,
+        scroll_to, set_native_layout_override, stacked_child_indices_for,
         target_receives_captured_pointer_event, target_receives_pointer_up_event,
         update_native_resize,
     };
@@ -1912,6 +1943,74 @@ mod tests {
                 .contains_key("pane-complete")
         );
         clear_native_layout_override("pane-complete");
+    }
+
+    #[test]
+    fn native_layout_has_animations_purges_expired_without_layout_pass() {
+        let _guard = native_layout_test_guard();
+        clear_native_layout_override("orphan-anim");
+        // an expired animation whose element is never laid out this frame, so
+        // native_layout_override (the only other finalizer) is never called for it.
+        NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().insert(
+            "orphan-anim".to_string(),
+            NativeLayoutAnimation {
+                from_width: Some(100.0),
+                to_width: Some(0.0),
+                from_height: None,
+                to_height: None,
+                from_x: None,
+                to_x: None,
+                from_y: None,
+                to_y: None,
+                start: Instant::now() - Duration::from_millis(500),
+                duration: Duration::from_millis(100),
+            },
+        );
+
+        // the 250fps driver only checks this predicate; once the animation has expired it
+        // MUST report "no animations" or the driver spins forever (the element is never
+        // laid out, so it can never be finalized via request_layout).
+        assert!(
+            !native_layout_has_animations(),
+            "expired animation must be purged so the driver loop can terminate"
+        );
+        // and its end value must be committed as a static override, not lost.
+        assert_eq!(native_layout_override("orphan-anim").width, Some(0.0));
+        clear_native_layout_override("orphan-anim");
+    }
+
+    #[test]
+    fn native_layout_has_animations_keeps_in_progress_animation() {
+        let _guard = native_layout_test_guard();
+        clear_native_layout_override("live-anim");
+        // a still-running animation must NOT be purged — the driver needs to keep ticking.
+        NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().insert(
+            "live-anim".to_string(),
+            NativeLayoutAnimation {
+                from_width: Some(0.0),
+                to_width: Some(200.0),
+                from_height: None,
+                to_height: None,
+                from_x: None,
+                to_x: None,
+                from_y: None,
+                to_y: None,
+                start: Instant::now(),
+                duration: Duration::from_secs(10),
+            },
+        );
+
+        assert!(
+            native_layout_has_animations(),
+            "in-progress animation must keep the driver alive"
+        );
+        assert!(
+            NATIVE_LAYOUT_ANIMATIONS
+                .lock()
+                .unwrap()
+                .contains_key("live-anim")
+        );
+        clear_native_layout_override("live-anim");
     }
 
     #[test]

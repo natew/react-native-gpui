@@ -108,6 +108,18 @@ export function PlatformColor(...names: string[]): PlatformColorValue {
 export function resolveColorValue(color: unknown): unknown {
     if (!color || typeof color !== "object") return color;
 
+    const variable = color as { isVar?: unknown; val?: unknown };
+    if (variable.isVar === true && "val" in variable) {
+        return resolveColorValue(variable.val);
+    }
+
+    const tuple = color as Partial<DynamicColorIOSTuple>;
+    if ("light" in tuple || "dark" in tuple) {
+        const scheme = Appearance.getColorScheme() ?? "light";
+        const next = scheme === "dark" ? tuple.dark ?? tuple.light : tuple.light ?? tuple.dark;
+        return resolveColorValue(next);
+    }
+
     const dynamic = (color as DynamicColorIOSValue).dynamic;
     if (dynamic && typeof dynamic === "object") {
         const scheme = Appearance.getColorScheme() ?? "light";

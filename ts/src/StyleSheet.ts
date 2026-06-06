@@ -41,6 +41,11 @@ export function normalizeStyle(style: StyleProp<ViewStyle | TextStyle | ImageSty
     for (const key of Object.keys(out)) {
         out[key] = resolveColorValue(out[key]);
     }
+    const backgroundImage = backgroundImageToCss(out.backgroundImage ?? out.experimental_backgroundImage);
+    if (backgroundImage) out.backgroundImage = backgroundImage;
+    delete out.experimental_backgroundImage;
+    const boxShadow = boxShadowToCss(out.boxShadow);
+    if (boxShadow) out.boxShadow = boxShadow;
 
     // axis shorthands → per-side
     const axis = (short: string, a: string, b: string) => {
@@ -67,7 +72,13 @@ export function normalizeStyle(style: StyleProp<ViewStyle | TextStyle | ImageSty
     alias("end", "right");
     alias("borderStartWidth", "borderLeftWidth");
     alias("borderEndWidth", "borderRightWidth");
-
+    if (out.inset !== undefined) {
+        if (out.top === undefined) out.top = out.inset;
+        if (out.right === undefined) out.right = out.inset;
+        if (out.bottom === undefined) out.bottom = out.inset;
+        if (out.left === undefined) out.left = out.inset;
+        delete out.inset;
+    }
     // RN iOS-style shadow props → CSS boxShadow (if not already set)
     if (out.boxShadow === undefined && (out.shadowColor || out.shadowOpacity || out.shadowRadius || out.shadowOffset)) {
         const off = (out.shadowOffset as { width?: number; height?: number }) || {};
@@ -99,4 +110,51 @@ function colorWithOpacity(color: string, opacity: number): string {
         return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${opacity})`;
     }
     return color;
+}
+
+function backgroundImageToCss(value: unknown): string | undefined {
+    if (typeof value === "string") return value;
+    const image = Array.isArray(value) ? value[0] : value;
+    if (!image || typeof image !== "object") return undefined;
+    if ((image as { type?: unknown }).type !== "linear-gradient") return undefined;
+    const stops = (image as { colorStops?: unknown }).colorStops;
+    if (!Array.isArray(stops) || stops.length < 2) return undefined;
+    const colors = stops
+        .map((stop) => {
+            if (!stop || typeof stop !== "object") return undefined;
+            return cssColorString(resolveColorValue((stop as { color?: unknown }).color));
+        })
+        .filter((color): color is string => !!color);
+    if (colors.length < 2) return undefined;
+    return `linear-gradient(180deg, ${colors[0]}, ${colors[colors.length - 1]})`;
+}
+
+function boxShadowToCss(value: unknown): string | undefined {
+    if (typeof value === "string") return value;
+    const entries = Array.isArray(value) ? value : value == null ? [] : [value];
+    const layers = entries
+        .map((entry) => {
+            if (!entry || typeof entry !== "object") return undefined;
+            const shadow = entry as Record<string, unknown>;
+            const x = cssNumber(shadow.offsetX);
+            const y = cssNumber(shadow.offsetY);
+            if (x == null || y == null) return undefined;
+            const blur = cssNumber(shadow.blurRadius) ?? 0;
+            const spread = cssNumber(shadow.spreadDistance) ?? cssNumber(shadow.spreadRadius) ?? 0;
+            const color = cssColorString(resolveColorValue(shadow.color)) ?? "rgba(0,0,0,0.3)";
+            return `${x}px ${y}px ${blur}px ${spread}px ${color}`;
+        })
+        .filter((layer): layer is string => !!layer);
+    return layers.length ? layers.join(", ") : undefined;
+}
+
+function cssNumber(value: unknown): number | undefined {
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function cssColorString(value: unknown): string | undefined {
+    if (typeof value !== "string") return undefined;
+    return value.replace(/\b(rgba?|hsla?)\(([^)]*)\)/gi, (_match, fn, inner) => {
+        return `${fn}(${String(inner).replace(/\s*,\s*/g, ",").replace(/\s+/g, " ").trim()})`;
+    });
 }

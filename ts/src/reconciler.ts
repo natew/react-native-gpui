@@ -225,7 +225,7 @@ function flushPendingMeasures(id: number) {
 }
 
 function layoutSignature(type: string, props: Record<string, unknown>): string {
-    const style = normalizeStyle(props.style as never) ?? {};
+    const style = normalizePropsStyle(props) ?? {};
     return JSON.stringify({
         type,
         style,
@@ -236,6 +236,113 @@ function layoutSignature(type: string, props: Record<string, unknown>): string {
         nativeLayoutKey: props.nativeLayoutKey,
         nativeResize: props.nativeResize,
     });
+}
+
+const TOP_LEVEL_STYLE_PROPS = [
+    "alignContent",
+    "alignItems",
+    "alignSelf",
+    "aspectRatio",
+    "backgroundColor",
+    "backgroundImage",
+    "borderBottomColor",
+    "borderBottomLeftRadius",
+    "borderBottomRightRadius",
+    "borderBottomWidth",
+    "borderColor",
+    "borderLeftColor",
+    "borderLeftWidth",
+    "borderRadius",
+    "borderRightColor",
+    "borderRightWidth",
+    "borderStartWidth",
+    "borderEndWidth",
+    "borderStyle",
+    "borderTopColor",
+    "borderTopLeftRadius",
+    "borderTopRightRadius",
+    "borderTopWidth",
+    "borderWidth",
+    "bottom",
+    "boxShadow",
+    "color",
+    "columnGap",
+    "cursor",
+    "display",
+    "elevation",
+    "end",
+    "experimental_backgroundImage",
+    "flex",
+    "flexBasis",
+    "flexDirection",
+    "flexGrow",
+    "flexShrink",
+    "flexWrap",
+    "fontFamily",
+    "fontSize",
+    "fontStyle",
+    "fontWeight",
+    "gap",
+    "height",
+    "inset",
+    "justifyContent",
+    "left",
+    "letterSpacing",
+    "lineHeight",
+    "margin",
+    "marginBottom",
+    "marginEnd",
+    "marginHorizontal",
+    "marginLeft",
+    "marginRight",
+    "marginStart",
+    "marginTop",
+    "marginVertical",
+    "maxHeight",
+    "maxWidth",
+    "minHeight",
+    "minWidth",
+    "opacity",
+    "overflow",
+    "padding",
+    "paddingBottom",
+    "paddingEnd",
+    "paddingHorizontal",
+    "paddingLeft",
+    "paddingRight",
+    "paddingStart",
+    "paddingTop",
+    "paddingVertical",
+    "position",
+    "right",
+    "rowGap",
+    "shadowColor",
+    "shadowOffset",
+    "shadowOpacity",
+    "shadowRadius",
+    "start",
+    "textAlign",
+    "textDecorationLine",
+    "textTransform",
+    "tintColor",
+    "top",
+    "transform",
+    "width",
+    "zIndex",
+] as const;
+
+function normalizePropsStyle(props: Record<string, unknown>): Record<string, unknown> | undefined {
+    const topLevelStyle: Record<string, unknown> = {};
+    for (const key of TOP_LEVEL_STYLE_PROPS) {
+        const value = props[key];
+        if (value !== undefined) topLevelStyle[key] = value;
+    }
+    if (Object.keys(topLevelStyle).length === 0) {
+        return (normalizeStyle(props.style as never) ?? undefined) as Record<string, unknown> | undefined;
+    }
+    return (normalizeStyle([props.style as never, topLevelStyle as never] as never) ?? undefined) as
+        | Record<string, unknown>
+        | undefined;
 }
 
 function invalidateLayout(node: Instance | TextInstance) {
@@ -571,7 +678,7 @@ type SerRun = { text: string; fontWeight?: string; color?: string; fontStyle?: s
 // Walk a <Text> tree into flowing styled runs, so a nested <Text bold> inside a
 // paragraph keeps its weight/color instead of being flattened to the parent's.
 function gatherRuns(inst: Instance, inherited: Omit<SerRun, "text">): SerRun[] {
-    const own = (normalizeStyle(inst.props.style as never) ?? {}) as Record<string, unknown>;
+    const own = (normalizePropsStyle(inst.props) ?? {}) as Record<string, unknown>;
     const cur: Omit<SerRun, "text"> = {
         fontWeight: (own.fontWeight as string) ?? inherited.fontWeight,
         color: (own.color as string) ?? inherited.color,
@@ -626,7 +733,7 @@ function serializeChildren(
 }
 
 function serializePortalEntry(inst: Instance, context: PortalContext, listGroup?: string): SerializedNode[] {
-    const style = (normalizeStyle(inst.props.style as never) ?? {}) as Record<string, unknown>;
+    const style = (normalizePropsStyle(inst.props) ?? {}) as Record<string, unknown>;
     const children = serializeChildren(inst.children, context, listGroup);
     if (Object.keys(style).length === 0) return children;
     return [
@@ -645,7 +752,7 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
 
     const props = inst.props;
     const listGroup = stringProp(props, "nativeListGroup") ?? inheritedListGroup;
-    const baseStyle = (normalizeStyle(props.style as never) ?? {}) as Record<string, unknown>;
+    const baseStyle = (normalizePropsStyle(props) ?? {}) as Record<string, unknown>;
     const hoverStyle =
         props.hoverStyle && hoveredIds.has(inst.id)
             ? ((normalizeStyle(props.hoverStyle as never) ?? {}) as Record<string, unknown>)

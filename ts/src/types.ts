@@ -46,6 +46,7 @@ export interface FlexStyle {
     flexWrap?: "wrap" | "nowrap" | "wrap-reverse";
     gap?: number;
     height?: DimensionValue;
+    inset?: DimensionValue;
     justifyContent?: "flex-start" | "flex-end" | "center" | "space-between" | "space-around" | "space-evenly";
     left?: DimensionValue;
     margin?: DimensionValue;
@@ -93,6 +94,8 @@ export interface ViewStyle extends FlexStyle, ShadowStyleIOS {
     backgroundColor?: ColorValue;
     /** CSS gradient string, e.g. "linear-gradient(135deg,#a,#b)" — gpui extension */
     backgroundImage?: string;
+    /** React Native/Tamagui gradient payload emitted by the native style layer. */
+    experimental_backgroundImage?: unknown;
     /** CSS box-shadow string (RN 0.76+) */
     boxShadow?: string;
     borderColor?: ColorValue;
@@ -256,7 +259,7 @@ export interface AccessibilityProps {
     nativeID?: string;
 }
 
-export interface ViewProps extends AccessibilityProps {
+export interface ViewProps extends AccessibilityProps, ViewStyle {
     children?: ReactNode;
     style?: StyleProp<ViewStyle>;
     hoverStyle?: StyleProp<ViewStyle>;

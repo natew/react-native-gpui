@@ -123,6 +123,7 @@ export interface WebViewMessageEvent {
 export interface WebViewProps extends AccessibilityProps {
     source: { uri: string } | { html: string };
     style?: StyleProp<ViewStyle>;
+    boxShadow?: ViewStyle["boxShadow"];
     /** the page finished loading */
     onLoad?: () => void;
     /** the page posted a message via `window.ReactNativeWebView.postMessage(data)` */
@@ -175,6 +176,7 @@ export type GhosttyTerminalFrame = SerializedTerminalFrame;
 
 export interface GhosttyTerminalProps extends AccessibilityProps {
     style?: StyleProp<ViewStyle>;
+    boxShadow?: ViewStyle["boxShadow"];
     sessionId?: string;
     frames?: GhosttyTerminalFrame[];
     onPress?: (event: unknown) => void;

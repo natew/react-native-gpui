@@ -27,6 +27,7 @@
         "build:ts": "npm run build:clean && npm run build:types && npm run build:bundle",
         "typecheck": "tsc --noEmit",
         "test": "bun run scripts/test-suite.mjs",
+        "test:animated-driver": "bun run scripts/animated-driver-unit.mjs",
         "kitchen": "bun run examples/kitchen-sink.tsx",
         "conformance:animation": "bun run examples/animation-conformance.tsx",
         "conformance:animation:diff": "bun run scripts/animation-frame-diff.mjs",

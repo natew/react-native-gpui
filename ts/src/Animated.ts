@@ -118,6 +118,11 @@ function animate(value: unknown, config: AnimationConfig, spring = false): Compo
     let delayTimer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
     let finish: EndCallback | undefined;
+    // remember where the first iteration started so loop() can rewind to it
+    // before each repeat (RN's resetBeforeIteration). without this, a looped
+    // timing would re-read its now-settled value as `from` and animate to==from
+    // (no motion) — which is what made the offscreen RepaintPump go stale.
+    let iterationStart: number | null = null;
 
     const stop = (finished: boolean) => {
         stopped = true;
@@ -137,6 +142,7 @@ function animate(value: unknown, config: AnimationConfig, spring = false): Compo
                 cb?.({ finished: true });
                 return;
             }
+            if (iterationStart === null) iterationStart = value.__getValue();
             const from = value.__getValue();
             const to = config.toValue;
             const duration = Math.max(1, config.duration ?? (spring ? 280 : 220));
@@ -166,6 +172,11 @@ function animate(value: unknown, config: AnimationConfig, spring = false): Compo
         },
         reset() {
             stop(false);
+            // rewind to the very first start value so a subsequent start() (e.g.
+            // a loop iteration) animates the full from→to range again.
+            if (iterationStart !== null && value instanceof AnimatedValue) {
+                value.setValue(iterationStart);
+            }
         },
     };
 }
@@ -247,18 +258,44 @@ export const Animated = {
     parallel: (anims: CompositeAnimation[]) => parallelGroup(anims),
     sequence: (anims: CompositeAnimation[]) => sequenceGroup(anims),
     stagger: (_ms: number, anims: CompositeAnimation[]) => parallelGroup(anims),
-    loop: (anim: CompositeAnimation): CompositeAnimation => ({
-        start(cb?: EndCallback) {
-            anim?.start?.();
-            cb?.({ finished: true });
-        },
-        stop() {
-            anim?.stop?.();
-        },
-        reset() {
+    loop: (anim: CompositeAnimation, config?: { iterations?: number }): CompositeAnimation => {
+        // -1 (or omitted) = infinite, matching RN's default.
+        const iterations = config?.iterations ?? -1;
+        let stopped = false;
+        let count = 0;
+        const runOnce = (cb?: EndCallback) => {
+            if (stopped) return;
             anim?.reset?.();
-        },
-    }),
+            anim?.start?.(({ finished }) => {
+                if (stopped || !finished) {
+                    cb?.({ finished });
+                    return;
+                }
+                count += 1;
+                if (iterations >= 0 && count >= iterations) {
+                    cb?.({ finished: true });
+                    return;
+                }
+                runOnce(cb);
+            });
+        };
+        return {
+            start(cb?: EndCallback) {
+                stopped = false;
+                count = 0;
+                runOnce(cb);
+            },
+            stop() {
+                stopped = true;
+                anim?.stop?.();
+            },
+            reset() {
+                stopped = true;
+                count = 0;
+                anim?.reset?.();
+            },
+        };
+    },
     delay: (ms: number): CompositeAnimation => ({
         start(cb?: EndCallback) {
             const id = setTimeout(() => cb?.({ finished: true }), ms);
@@ -278,22 +315,35 @@ export const Animated = {
 };
 
 const identity = (t: number) => t;
+// base curves operate as "ease-in" shapes (accelerate from 0); the in/out/inOut
+// wrappers below derive the symmetric variants from them, matching RN's Easing.
+const quad = (t: number) => t * t;
+const cubic = (t: number) => t * t * t;
+// ease() is the classic css ease (cubic-bezier(0.25, 0.1, 0.25, 1)); approximate
+// with a smoothstep-style curve so motion isn't linear.
+const ease = (t: number) => t * t * (3 - 2 * t);
+
+// out(f) = mirror of the in-curve; inOut(f) = first-half f(2t)/2, second mirrored.
+const easeOut = (fn: (t: number) => number) => (t: number) => 1 - fn(1 - t);
+const easeInOut = (fn: (t: number) => number) => (t: number) =>
+    t < 0.5 ? fn(t * 2) / 2 : 1 - fn((1 - t) * 2) / 2;
+
 export const Easing = {
     linear: identity,
-    ease: identity,
-    quad: identity,
-    cubic: identity,
-    poly: () => identity,
-    sin: identity,
-    circle: identity,
-    exp: identity,
+    ease,
+    quad,
+    cubic,
+    poly: (n: number) => (t: number) => Math.pow(t, n),
+    sin: (t: number) => 1 - Math.cos((t * Math.PI) / 2),
+    circle: (t: number) => 1 - Math.sqrt(1 - t * t),
+    exp: (t: number) => Math.pow(2, 10 * (t - 1)),
     elastic: () => identity,
     back: () => identity,
     bounce: identity,
     bezier: () => identity,
     in: (fn: (t: number) => number) => fn,
-    out: (fn: (t: number) => number) => fn,
-    inOut: (fn: (t: number) => number) => fn,
+    out: easeOut,
+    inOut: easeInOut,
     step0: (n: number) => (n > 0 ? 1 : 0),
     step1: (n: number) => (n >= 1 ? 1 : 0),
 };

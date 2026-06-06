@@ -7,7 +7,7 @@
 import "./raf";
 
 // render entry points
-export { createRoot, render, AppRegistry, type Root, type RootOptions, type DevtoolsOptions } from "./render";
+export { createRoot, render, AppRegistry, type Root, type RootOptions, type DevtoolsOptions, type RunApplicationOptions } from "./render";
 
 // components
 export {
@@ -87,6 +87,8 @@ export {
     PixelRatio,
     useColorScheme,
     Appearance,
+    DynamicColorIOS,
+    PlatformColor,
     I18nManager,
     Alert,
     Keyboard,
@@ -99,12 +101,15 @@ export {
     NativeModules,
     findNodeHandle,
     processColor,
+    resolveColorValue,
     PanResponder,
     Vibration,
     DeviceEventEmitter,
     NativeEventEmitter,
     AccessibilityInfo,
     FilePicker,
+    type ColorSchemeName,
+    type DynamicColorIOSTuple,
     type FilePickerOptions,
 } from "./apis";
 export { Animated, AnimatedValue, Easing } from "./Animated";

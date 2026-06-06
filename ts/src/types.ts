@@ -7,7 +7,17 @@
 import type { ReactNode } from "react";
 
 // ── primitives ──────────────────────────────────────────────────────
-export type ColorValue = string;
+export type DynamicColorIOSValue = {
+    dynamic: {
+        light?: ColorValue | null;
+        dark?: ColorValue | null;
+        highContrastLight?: ColorValue | null;
+        highContrastDark?: ColorValue | null;
+    };
+};
+export type PlatformColorValue = { semantic: string[] };
+export type OpaqueColorValue = DynamicColorIOSValue | PlatformColorValue;
+export type ColorValue = string | OpaqueColorValue;
 export type DimensionValue = number | `${number}%` | "auto";
 export type FlexAlignType = "flex-start" | "flex-end" | "center" | "stretch" | "baseline";
 

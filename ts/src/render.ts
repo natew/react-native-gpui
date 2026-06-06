@@ -8,6 +8,7 @@ import Reconciler, { setCommitSink, serializeContainer, dispatchEvent, type Cont
 import { startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type SerializedNode } from "./runtime";
 import { AppCommands, setCommandSink } from "./commands";
 import { Dimensions } from "./Dimensions";
+import { setAppearanceUpdateSink } from "./colors";
 
 export type DevtoolsOptions = {
     /** hold Option to inspect native GPUI nodes; Option-click copies a node snapshot. */
@@ -86,6 +87,9 @@ export function createRoot(options: RootOptions = {}): Root {
             bridge.update(tree);
         }
     });
+    setAppearanceUpdateSink(() => {
+        if (bridge) bridge.update(serializeContainer(container));
+    });
 
     // Imperative host → frame commands (WebView.injectJavaScript / reload). Commands
     // only fire after mount, by which point the bridge exists.
@@ -113,6 +117,7 @@ export function createRoot(options: RootOptions = {}): Root {
         unmount() {
             Reconciler.updateContainer(null, fiberRoot, null, null);
             bridge?.close();
+            setAppearanceUpdateSink(undefined);
             bridge = null;
         },
     };
@@ -127,6 +132,10 @@ export function render(element: ReactElement, options?: RootOptions): Root {
 
 // ── AppRegistry (RN-familiar entry point) ───────────────────────────
 type ComponentProvider = () => ComponentType<any>;
+export interface RunApplicationOptions extends RootOptions {
+    initialProps?: Record<string, unknown>;
+}
+
 const registry = new Map<string, ComponentProvider>();
 
 export const AppRegistry = {
@@ -134,11 +143,12 @@ export const AppRegistry = {
         registry.set(appKey, provider);
         return appKey;
     },
-    runApplication(appKey: string, _params?: unknown): Root {
+    runApplication(appKey: string, options: RunApplicationOptions = {}): Root {
         const provider = registry.get(appKey);
         if (!provider) throw new Error(`Application "${appKey}" has not been registered.`);
         const Component = provider();
-        return render(createElement(Component));
+        const { initialProps, width, height, devtools } = options;
+        return render(createElement(Component, initialProps), { width, height, devtools });
     },
     getAppKeys(): string[] {
         return [...registry.keys()];

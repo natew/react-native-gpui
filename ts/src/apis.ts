@@ -1,5 +1,5 @@
 /**
- * Non-component RN APIs: Platform, PixelRatio, useWindowDimensions, useColorScheme.
+ * Non-component RN APIs: Platform, PixelRatio, useWindowDimensions.
  */
 import { useEffect, useState } from "react";
 import { spawn } from "child_process";
@@ -10,6 +10,16 @@ import {
     measureHostNodeInWindow,
     measureHostNodeLayout,
 } from "./reconciler";
+export {
+    Appearance,
+    DynamicColorIOS,
+    PlatformColor,
+    processColor,
+    resolveColorValue,
+    useColorScheme,
+    type ColorSchemeName,
+    type DynamicColorIOSTuple,
+} from "./colors";
 
 export function useWindowDimensions(): ScaledSize {
     const [dims, setDims] = useState<ScaledSize>(() => Dimensions.get("window"));
@@ -49,27 +59,6 @@ export const PixelRatio = {
         const ratio = PixelRatio.get();
         return Math.round(layoutSize * ratio) / ratio;
     },
-};
-
-/** Desktop has no system dark-mode hook here; reports light. */
-export function useColorScheme(): "light" | "dark" | null {
-    return "light";
-}
-
-type ColorSchemeName = "light" | "dark" | null;
-
-/** RN's Appearance module. Desktop reports a static light scheme for now. */
-export const Appearance = {
-    getColorScheme(): ColorSchemeName {
-        return "light";
-    },
-    setColorScheme(_scheme: ColorSchemeName): void {},
-    addChangeListener(
-        _listener: (prefs: { colorScheme: ColorSchemeName }) => void,
-    ): { remove(): void } {
-        return { remove() {} };
-    },
-    removeChangeListener(_listener: unknown): void {},
 };
 
 /** RN's I18nManager. LTR on desktop. */
@@ -202,11 +191,6 @@ export const FilePicker = {
 
 export function findNodeHandle(ref: unknown): number | null {
     return findHostNodeId(ref);
-}
-
-/** gpui consumes color strings directly; pass them through unchanged. */
-export function processColor(color: unknown): unknown {
-    return color;
 }
 
 export const PanResponder = {

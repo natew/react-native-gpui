@@ -4,6 +4,7 @@
  * the flat style the GPUI bridge understands.
  */
 import type { ViewStyle, TextStyle, ImageStyle, StyleProp } from "./types";
+import { resolveColorValue } from "./colors";
 
 type AnyStyle = Record<string, unknown>;
 
@@ -37,6 +38,9 @@ export function normalizeStyle(style: StyleProp<ViewStyle | TextStyle | ImageSty
     const s = StyleSheet.flatten(style) as AnyStyle;
     if (!s || Object.keys(s).length === 0) return undefined;
     const out: AnyStyle = { ...s };
+    for (const key of Object.keys(out)) {
+        out[key] = resolveColorValue(out[key]);
+    }
 
     // axis shorthands → per-side
     const axis = (short: string, a: string, b: string) => {

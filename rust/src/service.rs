@@ -313,6 +313,12 @@ fn fill_root(root: Arc<ReactElement>) -> Arc<ReactElement> {
     r.style.flex_grow = Some(1.0);
     r.style.flex_basis = Some(Dim::Pct(0.0));
     r.style.align_self = Some("stretch".to_string());
+    // CRITICAL: we just mutated the style after parse_json_tree cached it, so the
+    // cache is stale (it still holds the root's fixed initial width/height). Rebuild
+    // it from the filled style — otherwise build_gpui_style returns the cached fixed
+    // size and the root stops flex-filling the window, so layout no longer reflows on
+    // resize (it only catches up when JS sends a fresh tree). Regression from caching.
+    r.cached_gpui_style = Some(r.style.build_gpui_style(None));
     Arc::new(r)
 }
 

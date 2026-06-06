@@ -5,7 +5,7 @@
  *
  * hold Option over the window to highlight nodes. Option-click copies a snapshot.
  */
-import { render, View, Text, Pressable, TextInput, WebView, StyleSheet } from "../src/index";
+import { AppRegistry, View, Text, Pressable, TextInput, WebView, StyleSheet } from "../src/index";
 import { useState } from "react";
 
 function App() {
@@ -84,4 +84,5 @@ const s = StyleSheet.create({
     webview: { flex: 1, minHeight: 180, borderRadius: 8, overflow: "hidden" },
 });
 
-render(<App />, { width: 860, height: 520, devtools: { inspector: true } });
+AppRegistry.registerComponent("InspectorDevtools", () => App);
+AppRegistry.runApplication("InspectorDevtools", { width: 860, height: 520, devtools: { inspector: true } });

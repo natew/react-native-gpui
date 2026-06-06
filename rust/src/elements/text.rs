@@ -195,10 +195,16 @@ fn apply_layout_style(mut el: gpui::Div, style: &ElementStyle) -> gpui::Div {
 fn apply_line_limit(el: gpui::Div, number_of_lines: Option<usize>) -> gpui::Div {
     match number_of_lines {
         Some(1) => el.truncate(),
-        // gpui line_clamp is the multi-line truncation primitive; chaining
-        // text_ellipsis() here switches to single-line overflow behavior and
-        // collapses wrapped title widths.
-        Some(lines) => el.overflow_hidden().line_clamp(lines),
+        // multi-line clamp that ends the last visible line in `…`, matching
+        // css `-webkit-line-clamp`. `line_clamp(n)` keeps the text wrapping
+        // (whitespace stays normal — only `truncate()`/`whitespace_nowrap`
+        // forces single-line) and bounds the block to `n` lines; adding
+        // `text_ellipsis()` turns on gpui's overflow truncation, which for a
+        // clamped block trims the flat string to `wrap_width * n` and appends
+        // the ellipsis before wrapping (gpui `elements/text.rs`: truncate_width
+        // = available_width * line_clamp). Without `text_ellipsis()` the clamp
+        // clips mid-word with no `…`.
+        Some(lines) => el.line_clamp(lines).text_ellipsis(),
         None => el,
     }
 }
@@ -286,5 +292,66 @@ impl IntoElement for ReactTextElement {
     type Element = Self;
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_line_limit;
+    use gpui::{Styled, TextOverflow, WhiteSpace, div};
+
+    // numberOfLines={1} must force single-line truncation: nowrap + ellipsis.
+    #[test]
+    fn single_line_truncates_with_ellipsis() {
+        let mut el = apply_line_limit(div(), Some(1));
+        let text = el.text_style().clone().expect("text style set");
+        assert_eq!(text.white_space, Some(WhiteSpace::Nowrap));
+        match text.text_overflow {
+            Some(TextOverflow::Truncate(s)) => assert_eq!(s.as_ref(), "…"),
+            other => panic!("expected ellipsis truncate, got {other:?}"),
+        }
+        assert_eq!(text.line_clamp, None);
+    }
+
+    // numberOfLines={n>1} must clamp to n WRAPPED lines and end the last visible
+    // line in `…` (css -webkit-line-clamp parity), without forcing nowrap — the
+    // block still wraps. This is the multi-line ellipsis gap that was fixed: the
+    // clamp branch now sets text_overflow so gpui's truncate_width = box*n path
+    // fires instead of clipping mid-word with no ellipsis.
+    #[test]
+    fn multi_line_clamps_with_ellipsis_and_keeps_wrapping() {
+        for n in [2usize, 3, 4] {
+            let mut el = apply_line_limit(div(), Some(n));
+            let text = el.text_style().clone().expect("text style set");
+            assert_eq!(
+                text.line_clamp,
+                Some(n),
+                "line_clamp must bound the block to n lines"
+            );
+            match text.text_overflow {
+                Some(TextOverflow::Truncate(s)) => assert_eq!(s.as_ref(), "…"),
+                other => panic!("clamp branch must enable ellipsis truncation, got {other:?}"),
+            }
+            // multi-line clamp must NOT force nowrap — that would collapse it to
+            // a single line and break wrapped titles.
+            assert_ne!(
+                text.white_space,
+                Some(WhiteSpace::Nowrap),
+                "multi-line clamp must keep wrapping (no nowrap)"
+            );
+        }
+    }
+
+    // no numberOfLines → no truncation styling at all (free wrap).
+    #[test]
+    fn no_limit_leaves_text_untruncated() {
+        let mut el = apply_line_limit(div(), None);
+        match el.text_style() {
+            None => {}
+            Some(text) => {
+                assert!(text.text_overflow.is_none(), "no overflow truncation");
+                assert!(text.line_clamp.is_none(), "no line clamp");
+            }
+        }
     }
 }

@@ -1,9 +1,10 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Bounds, ContentMask, CursorStyle, DispatchPhase, Display, Element, ElementId,
+    AnyElement, App, Bounds, Corners, CursorStyle, DispatchPhase, Display, Element, ElementId,
     GlobalElementId, Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, Modifiers, MouseButton,
     MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta,
     ScrollWheelEvent, Window, div, point, prelude::*, px,
@@ -60,6 +61,7 @@ static SCROLL: Lazy<Mutex<HashMap<u64, ScrollOffset>>> = Lazy::new(|| Mutex::new
 static SCROLL_TO_END: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static ACTIVE_MOUSE_TARGET: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
+static CAPTURED_MOUSE_UP_TARGET: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
 static NATIVE_LAYOUT_OVERRIDES: Lazy<Mutex<HashMap<String, NativeLayoutOverride>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static NATIVE_LAYOUT_FRAMES: Lazy<Mutex<HashMap<String, NativeLayoutFrame>>> =
@@ -367,7 +369,12 @@ pub struct ReactDivElement {
     element: Arc<ReactElement>,
     window_id: u64,
     _parent_style: Option<ElementStyle>,
-    children: Vec<AnyElement>,
+    children: Vec<StackedChild>,
+}
+
+struct StackedChild {
+    element: AnyElement,
+    z_index: i32,
 }
 
 impl ReactDivElement {
@@ -404,6 +411,202 @@ impl ReactDivElement {
         }
         ((right - left).max(px(0.0)), (bottom - top).max(px(0.0)))
     }
+
+    fn stacked_child_indices(&self) -> Vec<usize> {
+        stacked_child_indices_for(self.children.iter().map(|child| child.z_index))
+    }
+}
+
+fn stacked_child_indices_for(z_indices: impl IntoIterator<Item = i32>) -> Vec<usize> {
+    let mut indexed = z_indices.into_iter().enumerate().collect::<Vec<_>>();
+    indexed.sort_by_key(|(index, z_index)| (*z_index, *index));
+    indexed.into_iter().map(|(index, _)| index).collect()
+}
+
+fn target_receives_captured_pointer_event(
+    active_target: Option<u64>,
+    target_id: u64,
+    inside_target: bool,
+) -> bool {
+    match active_target {
+        Some(active_target) => active_target == target_id,
+        None => inside_target,
+    }
+}
+
+fn target_receives_pointer_up_event(
+    active_target: Option<u64>,
+    captured_up_target: Option<u64>,
+    target_id: u64,
+    inside_target: bool,
+) -> bool {
+    if captured_up_target.is_some() && captured_up_target != Some(target_id) {
+        return false;
+    }
+    target_receives_captured_pointer_event(active_target, target_id, inside_target)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RoundedOverflowClip {
+    bounds: Bounds<Pixels>,
+    radii: Corners<Pixels>,
+}
+
+thread_local! {
+    static ROUNDED_OVERFLOW_CLIPS: RefCell<Vec<RoundedOverflowClip>> = const { RefCell::new(Vec::new()) };
+}
+
+struct RoundedOverflowClipGuard;
+
+impl Drop for RoundedOverflowClipGuard {
+    fn drop(&mut self) {
+        ROUNDED_OVERFLOW_CLIPS.with(|clips| {
+            clips.borrow_mut().pop();
+        });
+    }
+}
+
+fn push_rounded_overflow_clip(
+    clip: Option<RoundedOverflowClip>,
+) -> Option<RoundedOverflowClipGuard> {
+    if let Some(clip) = clip {
+        ROUNDED_OVERFLOW_CLIPS.with(|clips| {
+            clips.borrow_mut().push(clip);
+        });
+        Some(RoundedOverflowClipGuard)
+    } else {
+        None
+    }
+}
+
+fn rounded_overflow_clip(
+    bounds: Bounds<Pixels>,
+    style: &gpui::Style,
+    rem_size: Pixels,
+) -> Option<RoundedOverflowClip> {
+    let content_bounds = style.overflow_mask(bounds, rem_size)?.bounds;
+    if content_bounds.is_empty() {
+        return None;
+    }
+
+    let corner_radii = style
+        .corner_radii
+        .to_pixels(rem_size)
+        .clamp_radii_for_quad_size(bounds.size);
+    let border_widths = style.border_widths.to_pixels(rem_size);
+    let radii = Corners {
+        top_left: inner_corner_radius(corner_radii.top_left, border_widths.left, border_widths.top),
+        top_right: inner_corner_radius(
+            corner_radii.top_right,
+            border_widths.right,
+            border_widths.top,
+        ),
+        bottom_right: inner_corner_radius(
+            corner_radii.bottom_right,
+            border_widths.right,
+            border_widths.bottom,
+        ),
+        bottom_left: inner_corner_radius(
+            corner_radii.bottom_left,
+            border_widths.left,
+            border_widths.bottom,
+        ),
+    };
+    if pixels_are_zero(radii.top_left)
+        && pixels_are_zero(radii.top_right)
+        && pixels_are_zero(radii.bottom_right)
+        && pixels_are_zero(radii.bottom_left)
+    {
+        return None;
+    }
+
+    Some(RoundedOverflowClip {
+        bounds: content_bounds,
+        radii,
+    })
+}
+
+fn inner_corner_radius(
+    radius: Pixels,
+    horizontal_border: Pixels,
+    vertical_border: Pixels,
+) -> Pixels {
+    let radius: f32 = radius.into();
+    let horizontal_border: f32 = horizontal_border.into();
+    let vertical_border: f32 = vertical_border.into();
+    px((radius - horizontal_border.max(vertical_border)).max(0.0))
+}
+
+fn apply_rounded_overflow_clips_to_style(
+    style: &mut gpui::Style,
+    bounds: Bounds<Pixels>,
+    rem_size: Pixels,
+) {
+    let mut radii = style.corner_radii.to_pixels(rem_size);
+    ROUNDED_OVERFLOW_CLIPS.with(|clips| {
+        for clip in clips.borrow().iter() {
+            let clip_radii = rounded_clip_radii_for_bounds(bounds, *clip);
+            radii.top_left = max_pixels(radii.top_left, clip_radii.top_left);
+            radii.top_right = max_pixels(radii.top_right, clip_radii.top_right);
+            radii.bottom_right = max_pixels(radii.bottom_right, clip_radii.bottom_right);
+            radii.bottom_left = max_pixels(radii.bottom_left, clip_radii.bottom_left);
+        }
+    });
+    style.corner_radii = Corners {
+        top_left: radii.top_left.into(),
+        top_right: radii.top_right.into(),
+        bottom_right: radii.bottom_right.into(),
+        bottom_left: radii.bottom_left.into(),
+    };
+}
+
+fn rounded_clip_radii_for_bounds(
+    bounds: Bounds<Pixels>,
+    clip: RoundedOverflowClip,
+) -> Corners<Pixels> {
+    let epsilon = 0.5;
+    let left: f32 = bounds.left().into();
+    let top: f32 = bounds.top().into();
+    let right: f32 = bounds.right().into();
+    let bottom: f32 = bounds.bottom().into();
+    let clip_left: f32 = clip.bounds.left().into();
+    let clip_top: f32 = clip.bounds.top().into();
+    let clip_right: f32 = clip.bounds.right().into();
+    let clip_bottom: f32 = clip.bounds.bottom().into();
+
+    Corners {
+        top_left: if left <= clip_left + epsilon && top <= clip_top + epsilon {
+            clip.radii.top_left
+        } else {
+            Pixels::ZERO
+        },
+        top_right: if right >= clip_right - epsilon && top <= clip_top + epsilon {
+            clip.radii.top_right
+        } else {
+            Pixels::ZERO
+        },
+        bottom_right: if right >= clip_right - epsilon && bottom >= clip_bottom - epsilon {
+            clip.radii.bottom_right
+        } else {
+            Pixels::ZERO
+        },
+        bottom_left: if left <= clip_left + epsilon && bottom >= clip_bottom - epsilon {
+            clip.radii.bottom_left
+        } else {
+            Pixels::ZERO
+        },
+    }
+}
+
+fn max_pixels(a: Pixels, b: Pixels) -> Pixels {
+    let a: f32 = a.into();
+    let b: f32 = b.into();
+    px(a.max(b))
+}
+
+fn pixels_are_zero(value: Pixels) -> bool {
+    let value: f32 = value.into();
+    value == 0.0
 }
 
 impl Element for ReactDivElement {
@@ -451,7 +654,10 @@ impl Element for ReactDivElement {
             .element
             .children
             .iter()
-            .map(|child| create_element(child.clone(), self.window_id, Some(inherited.clone())))
+            .map(|child| StackedChild {
+                element: create_element(child.clone(), self.window_id, Some(inherited.clone())),
+                z_index: child.style.z_index.unwrap_or(0),
+            })
             .collect();
 
         // If element has text content, add it
@@ -474,15 +680,17 @@ impl Element for ReactDivElement {
                 if let Some(weight) = self.element.style.gpui_font_weight() {
                     te = te.font_weight(weight);
                 }
-                self.children
-                    .push(te.child(text.clone()).into_any_element());
+                self.children.push(StackedChild {
+                    element: te.child(text.clone()).into_any_element(),
+                    z_index: 0,
+                });
             }
         }
 
         let child_ids: Vec<_> = self
             .children
             .iter_mut()
-            .map(|c| c.request_layout(window, cx))
+            .map(|c| c.element.request_layout(window, cx))
             .collect();
 
         let layout_id = window.request_layout(style, child_ids.iter().copied(), cx);
@@ -582,13 +790,13 @@ impl Element for ReactDivElement {
             };
             set_scroll(self.element.global_id, off);
             window.with_element_offset(point(px(-off.x), px(-off.y)), |window| {
-                for child in &mut self.children {
-                    child.prepaint(window, cx);
+                for index in self.stacked_child_indices() {
+                    self.children[index].element.prepaint(window, cx);
                 }
             });
         } else {
-            for child in &mut self.children {
-                child.prepaint(window, cx);
+            for index in self.stacked_child_indices() {
+                self.children[index].element.prepaint(window, cx);
             }
         }
 
@@ -617,7 +825,8 @@ impl Element for ReactDivElement {
             return;
         }
 
-        let style = self.element.build_gpui_style(None);
+        let mut style = self.element.build_gpui_style(None);
+        apply_rounded_overflow_clips_to_style(&mut style, bounds, window.rem_size());
         let (clip, scroll) = overflow_mode(&self.element.style);
 
         // Wheel handling: a listener that nudges the persisted offset and asks for a
@@ -791,6 +1000,7 @@ impl Element for ReactDivElement {
                             && ev.button == MouseButton::Left
                             && event_bounds.contains(&ev.position)
                         {
+                            *CAPTURED_MOUSE_UP_TARGET.lock().unwrap() = None;
                             let mut active = ACTIVE_MOUSE_TARGET.lock().unwrap();
                             if active.is_none() {
                                 *active = Some(id);
@@ -879,12 +1089,20 @@ impl Element for ReactDivElement {
                             return;
                         }
                         let inside = event_bounds.contains(&ev.position);
-                        let captured = ACTIVE_MOUSE_TARGET.lock().unwrap().as_ref() == Some(&id);
-                        if !inside && !captured {
+                        let active_target = *ACTIVE_MOUSE_TARGET.lock().unwrap();
+                        let captured_up_target = *CAPTURED_MOUSE_UP_TARGET.lock().unwrap();
+                        let captured = active_target == Some(id);
+                        if !target_receives_pointer_up_event(
+                            active_target,
+                            captured_up_target,
+                            id,
+                            inside,
+                        ) {
                             return;
                         }
                         if captured {
                             *ACTIVE_MOUSE_TARGET.lock().unwrap() = None;
+                            *CAPTURED_MOUSE_UP_TARGET.lock().unwrap() = Some(id);
                         }
                         emit_mouse_if(
                             id,
@@ -1031,8 +1249,8 @@ impl Element for ReactDivElement {
                         } else {
                             drop(hover);
                         }
-                        let captured = ACTIVE_MOUSE_TARGET.lock().unwrap().as_ref() == Some(&id);
-                        if inside || captured {
+                        let active_target = *ACTIVE_MOUSE_TARGET.lock().unwrap();
+                        if target_receives_captured_pointer_event(active_target, id, inside) {
                             emit_mouse_if(
                                 id,
                                 mouse_move,
@@ -1106,16 +1324,28 @@ impl Element for ReactDivElement {
             window.set_cursor_style(mouse_cursor, hitbox);
         }
 
+        let overflow_mask = if clip {
+            style.overflow_mask(bounds, window.rem_size())
+        } else {
+            None
+        };
+        let rounded_clip = if clip {
+            rounded_overflow_clip(bounds, &style, window.rem_size())
+        } else {
+            None
+        };
+
         style.paint(bounds, window, cx, |window, cx| {
-            if clip {
-                window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                    for child in &mut self.children {
-                        child.paint(window, cx);
+            let _rounded_clip_guard = push_rounded_overflow_clip(rounded_clip);
+            if let Some(mask) = overflow_mask {
+                window.with_content_mask(Some(mask), |window| {
+                    for index in self.stacked_child_indices() {
+                        self.children[index].element.paint(window, cx);
                     }
                 });
             } else {
-                for child in &mut self.children {
-                    child.paint(window, cx);
+                for index in self.stacked_child_indices() {
+                    self.children[index].element.paint(window, cx);
                 }
             }
         });
@@ -1134,15 +1364,17 @@ mod tests {
     use std::sync::{Mutex, MutexGuard};
     use std::time::{Duration, Instant};
 
-    use gpui::px;
+    use gpui::{Bounds, Corners, point, px};
     use once_cell::sync::Lazy;
 
     use super::{
         ActiveNativeResize, NATIVE_LAYOUT_ANIMATIONS, NATIVE_LAYOUT_FRAMES,
-        NATIVE_LAYOUT_OVERRIDES, NativeLayoutAnimation, NativeLayoutOverride,
-        clear_native_layout_override, get_scroll, native_layout_animation_value,
-        native_layout_override, remember_native_layout_frame, scroll_to,
-        set_native_layout_override, update_native_resize,
+        NATIVE_LAYOUT_OVERRIDES, NativeLayoutAnimation, NativeLayoutOverride, RoundedOverflowClip,
+        clear_native_layout_override, get_scroll, inner_corner_radius,
+        native_layout_animation_value, native_layout_override, remember_native_layout_frame,
+        rounded_clip_radii_for_bounds, scroll_to, set_native_layout_override,
+        stacked_child_indices_for, target_receives_captured_pointer_event,
+        target_receives_pointer_up_event, update_native_resize,
     };
     use crate::elements::NativeResizeEdge;
 
@@ -1164,6 +1396,72 @@ mod tests {
         let next = get_scroll(id);
         assert_eq!(next.x, 42.0);
         assert_eq!(next.y, 77.0);
+    }
+
+    #[test]
+    fn stacked_child_indices_honor_z_index_stably() {
+        let order = stacked_child_indices_for([0, 20, -1, 20, 0]);
+
+        assert_eq!(order, vec![2, 0, 4, 1, 3]);
+    }
+
+    #[test]
+    fn active_pointer_target_exclusively_receives_captured_events() {
+        assert!(target_receives_captured_pointer_event(None, 2, true));
+        assert!(!target_receives_captured_pointer_event(None, 2, false));
+        assert!(target_receives_captured_pointer_event(Some(2), 2, false));
+        assert!(!target_receives_captured_pointer_event(Some(1), 2, true));
+    }
+
+    #[test]
+    fn captured_pointer_up_suppresses_overlapping_later_targets() {
+        assert!(!target_receives_pointer_up_event(Some(1), None, 2, true));
+        assert!(target_receives_pointer_up_event(Some(1), None, 1, true));
+        assert!(!target_receives_pointer_up_event(None, Some(1), 2, true));
+        assert!(target_receives_pointer_up_event(None, None, 2, true));
+    }
+
+    #[test]
+    fn inner_corner_radius_subtracts_largest_border() {
+        assert_eq!(inner_corner_radius(px(10.0), px(1.0), px(2.0)), px(8.0));
+        assert_eq!(inner_corner_radius(px(4.0), px(8.0), px(1.0)), px(0.0));
+    }
+
+    #[test]
+    fn rounded_clip_radii_apply_only_to_children_touching_clip_edges() {
+        let clip = RoundedOverflowClip {
+            bounds: Bounds::from_corners(point(px(0.0), px(0.0)), point(px(100.0), px(60.0))),
+            radii: Corners {
+                top_left: px(10.0),
+                top_right: px(11.0),
+                bottom_right: px(12.0),
+                bottom_left: px(13.0),
+            },
+        };
+
+        let top_row = rounded_clip_radii_for_bounds(
+            Bounds::from_corners(point(px(0.0), px(0.0)), point(px(100.0), px(20.0))),
+            clip,
+        );
+        assert_eq!(top_row.top_left, px(10.0));
+        assert_eq!(top_row.top_right, px(11.0));
+        assert_eq!(top_row.bottom_right, px(0.0));
+        assert_eq!(top_row.bottom_left, px(0.0));
+
+        let middle_row = rounded_clip_radii_for_bounds(
+            Bounds::from_corners(point(px(0.0), px(20.0)), point(px(100.0), px(40.0))),
+            clip,
+        );
+        assert_eq!(middle_row, Corners::default());
+
+        let bottom_row = rounded_clip_radii_for_bounds(
+            Bounds::from_corners(point(px(0.0), px(40.0)), point(px(100.0), px(60.0))),
+            clip,
+        );
+        assert_eq!(bottom_row.top_left, px(0.0));
+        assert_eq!(bottom_row.top_right, px(0.0));
+        assert_eq!(bottom_row.bottom_right, px(12.0));
+        assert_eq!(bottom_row.bottom_left, px(13.0));
     }
 
     #[test]

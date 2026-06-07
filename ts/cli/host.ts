@@ -98,9 +98,17 @@ function makeFifo(path: string) {
 
 // Launch an offscreen host running `entry`, own its control channel, wait for the
 // window + service to come up.
-export async function launchHost(entry: string, opts: { size?: string } = {}): Promise<LaunchedHost> {
-    const entryPath = resolve(entry);
-    if (!existsSync(entryPath)) throw new Error(`entry not found: ${entryPath}`);
+export async function launchHost(
+    entry: string,
+    opts: { size?: string; launchCmd?: string; cwd?: string } = {},
+): Promise<LaunchedHost> {
+    // --launch-cmd lets the CLI drive ANY rngpui app via its own bundler/launcher
+    // (e.g. agentbus' open-gpui), as long as that launcher forwards the control env
+    // (RNGPUI_CONTROL_FIFO/EVENTS/SERVICE_PID_FILE) to the shared runtime. Plain
+    // entries still use `bun run` from tsRoot.
+    const launchCwd = opts.cwd ? resolve(opts.cwd) : tsRoot;
+    const entryPath = opts.launchCmd ? "" : resolve(entry);
+    if (!opts.launchCmd && !existsSync(entryPath)) throw new Error(`entry not found: ${entryPath}`);
 
     const stamp = `${process.pid}-${Date.now().toString(36)}`;
     const appName = `rngpui-cli-${stamp}`;
@@ -120,9 +128,7 @@ export async function launchHost(entry: string, opts: { size?: string } = {}): P
     const size = opts.size ?? "1280x860";
     const [w, h] = size.split("x").map((n) => parseInt(n, 10));
 
-    const child: ChildProcess = spawn("bun", ["run", entryPath], {
-        cwd: tsRoot,
-        env: {
+    const spawnEnv = {
             ...process.env,
             RNGPUI_NO_ACTIVATE: "1",
             RNGPUI_TEST_MODE: "1",
@@ -144,9 +150,10 @@ export async function launchHost(entry: string, opts: { size?: string } = {}): P
             RNGPUI_CONTROL_FIFO: fifoPath,
             RNGPUI_CONTROL_EVENTS: eventsPath,
             RNGPUI_APP_NAME: appName,
-        },
-        stdio: ["ignore", "pipe", "pipe"],
-    });
+    };
+    const child: ChildProcess = opts.launchCmd
+        ? spawn("sh", ["-c", opts.launchCmd], { cwd: launchCwd, env: spawnEnv, stdio: ["ignore", "pipe", "pipe"] })
+        : spawn("bun", ["run", entryPath], { cwd: launchCwd, env: spawnEnv, stdio: ["ignore", "pipe", "pipe"] });
     let log = "";
     child.stdout?.on("data", (c) => (log += c));
     child.stderr?.on("data", (c) => (log += c));
@@ -161,9 +168,21 @@ export async function launchHost(entry: string, opts: { size?: string } = {}): P
         throw new Error(`${msg}\n--- host log tail ---\n${log.split("\n").slice(-20).join("\n")}`);
     };
 
+    // With --launch-cmd the spawned process is an external launcher (e.g. agentbus'
+    // open-gpui) that EXITS 0 after handing off to a detached app — so a clean exit is
+    // success, only a non-zero exit is failure. With a plain `bun run` entry the child
+    // IS the app, so any exit means it died. Also: the agentbus app's cold bundle build
+    // can take far longer than the 20s a plain example needs, so give the launcher path
+    // generous timeouts (timing out early rm'd the workdir out from under the late
+    // service, which then crashed writing its pid → ENOENT).
+    const launcherDied = () =>
+        opts.launchCmd ? child.exitCode != null && child.exitCode !== 0 : child.exitCode != null;
     let servicePid = 0;
     try {
-        servicePid = await waitForServicePid(pidPath, { timeoutMs: 20_000, isFixtureExited: () => child.exitCode != null });
+        servicePid = await waitForServicePid(pidPath, {
+            timeoutMs: opts.launchCmd ? 120_000 : 20_000,
+            isFixtureExited: launcherDied,
+        });
     } catch (err) {
         fail(`service did not start: ${(err as Error).message}`);
     }
@@ -171,8 +190,8 @@ export async function launchHost(entry: string, opts: { size?: string } = {}): P
     let window: GpuiWindow;
     try {
         window = (await waitForWindow((win: GpuiWindow) => win.pid === servicePid && win.title === "react-native-gpui", {
-            timeoutMs: 15_000,
-            isFixtureExited: () => child.exitCode != null,
+            timeoutMs: opts.launchCmd ? 30_000 : 15_000,
+            isFixtureExited: launcherDied,
         })) as GpuiWindow;
     } catch (err) {
         fail(`window did not appear: ${(err as Error).message}`);

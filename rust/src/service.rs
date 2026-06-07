@@ -1,8 +1,8 @@
 #![allow(unexpected_cfgs)]
 
 use std::io::{self, BufRead};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -11,11 +11,12 @@ use std::rc::Rc;
 use gpui::{
     App, AppContext, Bounds, Context, Entity, InteractiveElement as _, IntoElement, KeyBinding,
     Menu, MenuItem, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Point, Render, Styled, TitlebarOptions, Window,
+    MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, Styled, TitlebarOptions, Window,
     WindowBounds, WindowOptions, actions, point, px, size,
 };
 use gpui_component::input::{Enter, InputEvent, InputState, Position};
 use gpui_component::theme::{Theme, ThemeMode};
+use once_cell::sync::Lazy;
 use serde::Deserialize;
 
 actions!(rngpui, [Quit]);
@@ -25,6 +26,9 @@ actions!(rngpui, [Quit]);
 struct InvokeCommand {
     id: String,
 }
+
+static APP_COMMAND_BINDING_SLOTS: Lazy<Mutex<HashSet<AppCommandBindingSlot>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
 
 #[cfg(target_os = "macos")]
 mod ax;
@@ -861,6 +865,12 @@ struct AppCommandBinding {
     context: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct AppCommandBindingSlot {
+    key: String,
+    context: Option<String>,
+}
+
 #[derive(Clone, Deserialize)]
 struct AppCommandMenu {
     label: String,
@@ -965,16 +975,12 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
 }
 
 fn install_app_commands(config: AppCommandConfig, cx: &mut App) {
-    let bindings = config.bindings.into_iter().filter_map(|binding| {
-        if binding.id.is_empty() || binding.key.is_empty() {
-            return None;
-        }
-        Some(KeyBinding::new(
-            &binding.key,
-            InvokeCommand { id: binding.id },
-            binding.context.as_deref(),
-        ))
-    });
+    let bindings = {
+        let mut previous_slots = APP_COMMAND_BINDING_SLOTS
+            .lock()
+            .expect("app command binding slots mutex poisoned");
+        app_command_key_bindings(&mut previous_slots, config.bindings)
+    };
     cx.bind_keys(bindings);
 
     let mut menus = vec![Menu {
@@ -983,6 +989,53 @@ fn install_app_commands(config: AppCommandConfig, cx: &mut App) {
     }];
     menus.extend(config.menus.into_iter().map(build_app_menu));
     cx.set_menus(menus);
+}
+
+fn app_command_key_bindings(
+    previous_slots: &mut HashSet<AppCommandBindingSlot>,
+    bindings: Vec<AppCommandBinding>,
+) -> Vec<KeyBinding> {
+    let next_slots = app_command_binding_slots(&bindings);
+    let mut out = Vec::new();
+
+    for slot in previous_slots.difference(&next_slots) {
+        out.push(KeyBinding::new(
+            &slot.key,
+            NoAction {},
+            slot.context.as_deref(),
+        ));
+    }
+
+    *previous_slots = next_slots;
+
+    for binding in bindings {
+        if !valid_app_command_binding(&binding) {
+            continue;
+        }
+        let AppCommandBinding { id, key, context } = binding;
+        out.push(KeyBinding::new(
+            &key,
+            InvokeCommand { id },
+            context.as_deref(),
+        ));
+    }
+
+    out
+}
+
+fn app_command_binding_slots(bindings: &[AppCommandBinding]) -> HashSet<AppCommandBindingSlot> {
+    bindings
+        .iter()
+        .filter(|binding| valid_app_command_binding(binding))
+        .map(|binding| AppCommandBindingSlot {
+            key: binding.key.clone(),
+            context: binding.context.clone(),
+        })
+        .collect()
+}
+
+fn valid_app_command_binding(binding: &AppCommandBinding) -> bool {
+    !binding.id.is_empty() && !binding.key.is_empty()
 }
 
 fn build_app_menu(menu: AppCommandMenu) -> Menu {
@@ -1442,8 +1495,13 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Incoming, parse_incoming, position_for_byte_offset};
+    use super::{
+        AppCommandBinding, AppCommandBindingSlot, Incoming, app_command_key_bindings,
+        parse_incoming, position_for_byte_offset,
+    };
+    use gpui::{KeyContext, Keymap, Keystroke};
     use serde_json::json;
+    use std::collections::HashSet;
 
     #[test]
     fn maps_window_appearance_to_scheme() {
@@ -1471,6 +1529,37 @@ mod tests {
         } else {
             panic!("expected scrollTo command");
         }
+    }
+
+    #[test]
+    fn app_commands_mask_removed_key_bindings() {
+        let mut previous = HashSet::<AppCommandBindingSlot>::new();
+        let mut keymap = Keymap::default();
+        let down = Keystroke::parse("down").expect("down keystroke");
+        let context = [KeyContext::parse("pane").expect("pane context")];
+
+        keymap.add_bindings(app_command_key_bindings(
+            &mut previous,
+            vec![app_command_binding("focus.down", "down", Some("!Input"))],
+        ));
+        assert_eq!(
+            keymap.bindings_for_input(&[down.clone()], &context).0.len(),
+            1
+        );
+
+        keymap.add_bindings(app_command_key_bindings(&mut previous, vec![]));
+        assert!(
+            keymap
+                .bindings_for_input(&[down.clone()], &context)
+                .0
+                .is_empty()
+        );
+
+        keymap.add_bindings(app_command_key_bindings(
+            &mut previous,
+            vec![app_command_binding("focus.down", "down", Some("!Input"))],
+        ));
+        assert_eq!(keymap.bindings_for_input(&[down], &context).0.len(), 1);
     }
 
     #[test]
@@ -1576,6 +1665,14 @@ mod tests {
             assert_eq!(resize.max, Some(460.0));
         } else {
             panic!("expected tree");
+        }
+    }
+
+    fn app_command_binding(id: &str, key: &str, context: Option<&str>) -> AppCommandBinding {
+        AppCommandBinding {
+            id: id.to_string(),
+            key: key.to_string(),
+            context: context.map(str::to_string),
         }
     }
 }

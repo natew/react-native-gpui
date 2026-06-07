@@ -203,7 +203,10 @@ export async function launchHost(
             isFixtureExited: launcherDied,
         })) as GpuiWindow;
     } catch (err) {
-        fail(`window did not appear: ${(err as Error).message}`);
+        const seen = (listWindows() as GpuiWindow[])
+            .map((w) => `${w.owner}/"${w.title}"/pid${w.pid}/${w.width}x${w.height}`)
+            .join("  ");
+        fail(`window did not appear: ${(err as Error).message} [wanted pid ${servicePid} title "react-native-gpui"; saw: ${seen}]`);
     }
 
     // give the first React commit + a paint pass time to land so bounds are populated.

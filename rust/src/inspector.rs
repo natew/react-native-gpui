@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, App, ClipboardItem, IntoElement, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Position, Styled, div, px,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Position, Styled, div, point, px,
 };
 use once_cell::sync::Lazy;
 
@@ -576,6 +576,77 @@ fn hit_test(root: &Arc<ReactElement>, position: Point<Pixels>) -> Option<Inspect
     let mut hits = Vec::new();
     collect_hits(root, position, &mut path, &mut hits);
     hits.into_iter().max_by(compare_hits)
+}
+
+/// The innermost scroll container (overflow: scroll/auto) whose painted bounds contain
+/// the point — the `rngpui do scroll` target. Returns its globalId.
+pub fn scroll_container_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<u64> {
+    let position = point(px(x), px(y));
+    fn walk(el: &Arc<ReactElement>, position: Point<Pixels>, found: &mut Option<u64>) {
+        if el.style.is_display_none() {
+            return;
+        }
+        let Some(bounds) = bridge::cached_layout(el.global_id).map(Rect::from) else {
+            return;
+        };
+        if !bounds.is_visible() || !bounds.contains(position) {
+            return;
+        }
+        if matches!(el.style.overflow.as_deref(), Some("scroll" | "auto")) {
+            *found = Some(el.global_id);
+        }
+        for child in el.children.iter() {
+            walk(child, position, found);
+        }
+    }
+    let mut found = None;
+    walk(root, position, &mut found);
+    found
+}
+
+/// The topmost node at a point that listens for a press/click gesture, plus its
+/// events and bounds — used to synthesize a `do tap`. Walks up the hit path so a tap
+/// on a label inside a Pressable still finds the Pressable's handlers.
+pub fn tap_target_at(
+    root: &Arc<ReactElement>,
+    x: f32,
+    y: f32,
+) -> Option<(u64, Vec<String>, (f32, f32, f32, f32))> {
+    let position = point(px(x), px(y));
+    let hit = hit_test(root, position)?;
+    // the hit itself is the deepest interactive node when one exists (rank 100), but a
+    // text leaf can win when nothing interactive is under the point; in that case walk
+    // the captured path outward to the nearest press-handling ancestor.
+    const PRESS: &[&str] = &[
+        "press", "click", "pressIn", "pressOut", "longPress", "mouseDown", "pointerDown",
+        "touchStart",
+    ];
+    let listens_press = |events: &[String]| events.iter().any(|e| PRESS.contains(&e.as_str()));
+    if listens_press(&hit.events) {
+        return Some((
+            hit.target.id,
+            hit.events,
+            (
+                hit.bounds.x,
+                hit.bounds.y,
+                hit.bounds.width,
+                hit.bounds.height,
+            ),
+        ));
+    }
+    // no press handler directly under the point — fall back to the topmost node so the
+    // caller can still report what is there (a tap on a non-interactive node is a no-op
+    // event-wise, which the CLI surfaces).
+    Some((
+        hit.target.id,
+        hit.events,
+        (
+            hit.bounds.x,
+            hit.bounds.y,
+            hit.bounds.width,
+            hit.bounds.height,
+        ),
+    ))
 }
 
 fn collect_hits(

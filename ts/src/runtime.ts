@@ -3,7 +3,8 @@
  * it as newline-delimited JSON over stdin, and parses events back over stdout.
  */
 import { spawn, ChildProcess } from "child_process";
-import { existsSync, writeFileSync } from "fs";
+import { createReadStream, existsSync, writeFileSync } from "fs";
+import { createInterface } from "readline";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -167,6 +168,42 @@ export function startBridge(initial: SerializedNode, options: BridgeOptions = {}
         if (proc.stdin && proc.stdin.writable) proc.stdin.write(JSON.stringify(obj) + "\n");
     };
     writeLine(initial);
+
+    // Control channel for the `rngpui` developer CLI: when RNGPUI_CONTROL_FIFO points
+    // at a named pipe, every JSON line written to it is forwarded straight to the
+    // service stdin (dump / tap / type / scroll commands), and the service's stdout
+    // events are mirrored to RNGPUI_CONTROL_EVENTS so the CLI can await acks
+    // (dumpReady) without owning the service's pipes. This is the single hook that
+    // makes a launched host driveable; absent the env var it is inert.
+    const controlFifo = process.env.RNGPUI_CONTROL_FIFO;
+    if (controlFifo && existsSync(controlFifo)) {
+        const eventsPath = process.env.RNGPUI_CONTROL_EVENTS;
+        if (eventsPath) {
+            listeners.push((evt) => {
+                try {
+                    writeFileSync(eventsPath, JSON.stringify(evt) + "\n", { flag: "a" });
+                } catch {
+                    /* events file may be rotated by the CLI between commands */
+                }
+            });
+        }
+        const pumpControl = () => {
+            const rl = createInterface({ input: createReadStream(controlFifo), crlfDelay: Infinity });
+            rl.on("line", (line) => {
+                const trimmed = line.trim();
+                if (!trimmed) return;
+                try {
+                    writeLine(JSON.parse(trimmed));
+                } catch {
+                    /* ignore non-JSON control lines */
+                }
+            });
+            // a fifo returns EOF when the last writer closes; reopen so subsequent CLI
+            // commands keep flowing to the same long-lived host.
+            rl.on("close", () => setTimeout(pumpControl, 10));
+        };
+        pumpControl();
+    }
 
     return {
         update: writeLine,

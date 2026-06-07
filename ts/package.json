@@ -12,6 +12,9 @@
             "import": "./dist/index.js"
         }
     },
+    "bin": {
+        "rngpui": "./cli/bin.ts"
+    },
     "files": [
         "dist",
         "native",
@@ -50,6 +53,8 @@
         "png-grid": "bun run scripts/png-grid.mjs",
         "test:pixel": "bun run scripts/pixel.test.mjs",
         "superconductor": "bun run examples/superconductor.tsx",
+        "rngpui": "bun run cli/bin.ts",
+        "conformance:describe": "node scripts/describe-conformance.mjs",
         "prepublishOnly": "npm run build"
     },
     "os": [

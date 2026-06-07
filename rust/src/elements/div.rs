@@ -114,6 +114,20 @@ pub fn scroll_to(id: u64, x: Option<f32>, y: Option<f32>) {
     );
 }
 
+/// Apply a relative scroll delta to a scroll container's persisted offset — the
+/// `rngpui do scroll` driver. Clamped to the painted max in paint, so over-scrolling
+/// just pins to the end.
+pub fn scroll_by(id: u64, dx: f32, dy: f32) {
+    let current = get_scroll(id);
+    set_scroll(
+        id,
+        ScrollOffset {
+            x: (current.x + dx).max(0.0),
+            y: (current.y + dy).max(0.0),
+        },
+    );
+}
+
 pub fn scroll_to_end(id: u64) {
     SCROLL_TO_END.lock().unwrap().insert(id);
 }
@@ -518,6 +532,21 @@ fn emit_press_action_sequence(
             modifiers,
         );
     }
+}
+
+/// Synthesize a full press (mouseDown→pressIn→mouseUp→pressOut→press→click) at a
+/// window point on `id`, firing exactly the handlers the node listens for — the same
+/// sequence a real left-click produces in `paint`. Used by the `rngpui do tap` driver
+/// so the CLI can drive the live tree without OS-level focus theft.
+pub fn synth_tap(id: u64, events: &[String], bounds: (f32, f32, f32, f32), x: f32, y: f32) {
+    let position = point(px(x), px(y));
+    let bounds = Bounds {
+        origin: point(px(bounds.0), px(bounds.1)),
+        size: gpui::size(px(bounds.2), px(bounds.3)),
+    };
+    finish_pointer_gesture();
+    emit_press_action_sequence(id, events, position, bounds, Modifiers::default());
+    finish_pointer_gesture();
 }
 
 fn emit_press_cancel_sequence(

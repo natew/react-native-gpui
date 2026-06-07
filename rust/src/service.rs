@@ -33,6 +33,7 @@ static APP_COMMAND_BINDING_SLOTS: Lazy<Mutex<HashSet<AppCommandBindingSlot>>> =
 #[cfg(target_os = "macos")]
 mod ax;
 mod bridge;
+mod dump;
 #[cfg(target_os = "macos")]
 mod capture_png;
 mod elements;
@@ -351,6 +352,9 @@ struct ServiceApp {
     // persistent native WebView, one per <WebView> id.
     webviews: HashMap<u64, Rc<wry::WebView>>,
     inspector: inspector::InspectorState,
+    // id of the currently-focused text input, tracked for the `rngpui do type/key`
+    // driver so it can target the focused field without a focus_handle (pub(super)).
+    focused_input: Option<u64>,
 }
 
 type InputSpec = (u64, String, Option<String>, bool, bool);
@@ -621,8 +625,16 @@ impl Render for ServiceApp {
                                 bridge::submit(id, value.as_ref());
                             }
                         }
-                        InputEvent::Focus => bridge::event(id, "focus"),
-                        InputEvent::Blur => bridge::event(id, "blur"),
+                        InputEvent::Focus => {
+                            this.focused_input = Some(id);
+                            bridge::event(id, "focus");
+                        }
+                        InputEvent::Blur => {
+                            if this.focused_input == Some(id) {
+                                this.focused_input = None;
+                            }
+                            bridge::event(id, "blur");
+                        }
                     },
                 )
                 .detach();
@@ -927,6 +939,32 @@ enum Incoming {
     },
     BlurInput,
     AppCommands(AppCommandConfig),
+    /// `rngpui` CLI: write an annotated tree dump (authored facts + computed bounds)
+    /// to `path`, then emit a `dumpReady` ack.
+    Dump {
+        req_id: u64,
+        path: String,
+    },
+    /// `rngpui do tap`: synthesize a press gesture at a window point.
+    Tap {
+        x: f32,
+        y: f32,
+    },
+    /// `rngpui do scroll`: scroll the topmost scroll container at a point by (dx, dy).
+    ScrollAt {
+        x: f32,
+        y: f32,
+        dx: f32,
+        dy: f32,
+    },
+    /// `rngpui do type`: type text into the focused input.
+    TypeText {
+        text: String,
+    },
+    /// `rngpui do key`: send a single key (with optional modifiers) to the focused input.
+    KeyPress {
+        key: String,
+    },
 }
 
 /// Parse one stdin line into an `Incoming`. A `$cmd` object is a webview command;
@@ -969,6 +1007,31 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
             "appCommands" => serde_json::from_value(v.clone())
                 .ok()
                 .map(Incoming::AppCommands),
+            "dump" => {
+                let path = v.get("path").and_then(|x| x.as_str())?.to_string();
+                let req_id = v.get("reqId").and_then(|x| x.as_u64()).unwrap_or(0);
+                Some(Incoming::Dump { req_id, path })
+            }
+            "tap" => {
+                let x = v.get("x").and_then(|x| x.as_f64())? as f32;
+                let y = v.get("y").and_then(|x| x.as_f64())? as f32;
+                Some(Incoming::Tap { x, y })
+            }
+            "scrollAt" => {
+                let x = v.get("x").and_then(|x| x.as_f64())? as f32;
+                let y = v.get("y").and_then(|x| x.as_f64())? as f32;
+                let dx = v.get("dx").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+                let dy = v.get("dy").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+                Some(Incoming::ScrollAt { x, y, dx, dy })
+            }
+            "type" => {
+                let text = v.get("text").and_then(|x| x.as_str())?.to_string();
+                Some(Incoming::TypeText { text })
+            }
+            "key" => {
+                let key = v.get("key").and_then(|x| x.as_str())?.to_string();
+                Some(Incoming::KeyPress { key })
+            }
             _ => None,
         };
     }
@@ -1173,6 +1236,7 @@ fn main() {
             suppressed_input_changes: HashMap::new(),
             webviews: HashMap::new(),
             inspector: inspector::InspectorState::from_env(),
+            focused_input: None,
         });
 
         let options = WindowOptions {
@@ -1382,6 +1446,63 @@ fn main() {
                             break;
                         }
                     }
+                    // `rngpui do type`: insert text at the focused input's cursor, going
+                    // through the same InputState path a real keypress would, so onChange
+                    // fires and the rendered value updates.
+                    Incoming::TypeText { text } => {
+                        let applied = window_handle.update(cx, |_root, window, cx| {
+                            pump.update(cx, |this, cx| {
+                                if let Some(id) = this.focused_input
+                                    && let Some(state) = this.inputs.get(&id)
+                                {
+                                    state.update(cx, |input, cx| {
+                                        input.insert(text.clone(), window, cx)
+                                    });
+                                }
+                                cx.notify();
+                            })
+                        });
+                        if applied.is_err() {
+                            break;
+                        }
+                    }
+                    // `rngpui do key`: a single named key into the focused input. Enter
+                    // submits / inserts a newline (multiline) via the existing submit
+                    // path; Backspace deletes; printable single chars insert.
+                    Incoming::KeyPress { key } => {
+                        let applied = window_handle.update(cx, |_root, window, cx| {
+                            pump.update(cx, |this, cx| {
+                                if let Some(id) = this.focused_input
+                                    && let Some(state) = this.inputs.get(&id)
+                                {
+                                    let key_lower = key.to_ascii_lowercase();
+                                    state.update(cx, |input, cx| match key_lower.as_str() {
+                                        "enter" | "return" => {
+                                            input.insert("\n", window, cx);
+                                        }
+                                        "backspace" => {
+                                            let cursor = input.cursor();
+                                            if cursor > 0 {
+                                                let value = input.value().to_string();
+                                                let mut next = value;
+                                                next.truncate(cursor.saturating_sub(1));
+                                                input.set_value(next, window, cx);
+                                            }
+                                        }
+                                        "space" => input.insert(" ", window, cx),
+                                        k if k.chars().count() == 1 => {
+                                            input.insert(key.clone(), window, cx)
+                                        }
+                                        _ => {}
+                                    });
+                                }
+                                cx.notify();
+                            })
+                        });
+                        if applied.is_err() {
+                            break;
+                        }
+                    }
                     Incoming::AppCommands(config) => {
                         if cx.update(|cx| install_app_commands(config, cx)).is_err() {
                             break;
@@ -1444,8 +1565,43 @@ fn main() {
                                 }
                                 cx.notify();
                             }
+                            // `rngpui get …`: serialize the live tree (authored facts +
+                            // computed bounds) to a file, then ack so the CLI can read it.
+                            Incoming::Dump { req_id, path } => {
+                                let value = dump::dump_tree(&this.root);
+                                match serde_json::to_string(&value)
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|json| {
+                                        std::fs::write(&path, json).map_err(|e| e.to_string())
+                                    }) {
+                                    Ok(()) => bridge::dump_ready(req_id, &path),
+                                    Err(err) => eprintln!("[rngpui dump] failed: {err}"),
+                                }
+                            }
+                            // `rngpui do tap <x,y>`: hit-test the live tree and fire the
+                            // press sequence the node under the point listens for.
+                            Incoming::Tap { x, y } => {
+                                if let Some((id, events, bounds)) =
+                                    inspector::tap_target_at(&this.root, x, y)
+                                {
+                                    elements::synth_tap(id, &events, bounds, x, y);
+                                }
+                                cx.notify();
+                            }
+                            // `rngpui do scroll <x,y> <dx,dy>`: scroll the container at the
+                            // point by a delta.
+                            Incoming::ScrollAt { x, y, dx, dy } => {
+                                if let Some(id) =
+                                    inspector::scroll_container_at(&this.root, x, y)
+                                {
+                                    elements::scroll_by(id, dx, dy);
+                                }
+                                cx.notify();
+                            }
                             Incoming::FocusInput { .. }
                             | Incoming::BlurInput
+                            | Incoming::TypeText { .. }
+                            | Incoming::KeyPress { .. }
                             | Incoming::AppCommands(_) => unreachable!(),
                         });
                         if applied.is_err() {

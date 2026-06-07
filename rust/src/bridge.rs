@@ -55,6 +55,12 @@ pub fn command(id: &str) {
     emit_value(json!({ "type": "command", "id": id }));
 }
 
+/// An on-demand annotated tree dump (requested over IPC by the `rngpui` CLI) was
+/// written to `path`. `req_id` correlates the ack to the request.
+pub fn dump_ready(req_id: u64, path: &str) {
+    emit_value(json!({ "type": "dumpReady", "reqId": req_id, "path": path }));
+}
+
 /// A gesture event with no payload (press / pressIn / pressOut / longPress / focus / blur).
 pub fn event(id: u64, name: &str) {
     emit_value(json!({ "type": "event", "id": id, "event": name }));

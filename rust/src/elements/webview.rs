@@ -390,6 +390,7 @@ fn position_webview_host(
             }
 
             apply_host_layer_clip(host, style);
+            apply_webview_base_color(webview, style.background_color);
 
             let _: () = msg_send![class!(CATransaction), commit];
 
@@ -534,6 +535,67 @@ unsafe fn apply_host_layer_background(layer: id, color: Option<Hsla>) {
     let opaque = if alpha >= 1.0 { YES } else { NO };
     let _: () = msg_send![layer, setOpaque: opaque];
     let _: () = msg_send![layer, setBackgroundColor: cg_color];
+    if std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok() {
+        eprintln!(
+            "[webview host-layer] bg srgb=({red:.3},{green:.3},{blue:.3},{alpha:.3}) opaque={} has_color={}",
+            opaque == YES,
+            color.is_some(),
+        );
+    }
+}
+
+// Drive the WKWebView's compositing base from the element's themed background, not
+// the window's NSAppearance. A WKWebView built with `transparent=false` is opaque and
+// paints `underPageBackgroundColor` behind the page; that color is a dynamic system
+// color that follows the NSWindow appearance (which tracks the macOS *system* theme,
+// not the app's resolved color scheme). When the app scheme and the system appearance
+// disagree — and at the rounded-corner clip / pre-first-paint frame even when they
+// agree — WebKit can composite the page over that appearance base instead of the page
+// body, so the light app's `#ffffff` body doesn't fill and the glass shows through
+// ("see-through stage, only the shadow draws"). Pinning underPageBackgroundColor to the
+// same opaque themed color the host layer uses makes the base match the page in every
+// appearance, so the stage is always solid. Dark already matched by coincidence (dark
+// base ≈ dark body), which is why only light looked broken.
+#[cfg(target_os = "macos")]
+unsafe fn apply_webview_base_color(webview: id, color: Option<Hsla>) {
+    if webview == nil {
+        return;
+    }
+    let responds: bool = msg_send![webview, respondsToSelector: sel!(setUnderPageBackgroundColor:)];
+    if !responds {
+        return;
+    }
+    let Some(color) = color else {
+        return;
+    };
+    let (red, green, blue, alpha) = hsla_to_srgb(color);
+    // only pin an opaque base; a translucent element bg means "let the underlay/glass
+    // show through" (chrome webviews), which must stay appearance-default.
+    if alpha < 1.0 {
+        return;
+    }
+    let ns_color: id = msg_send![
+        class!(NSColor),
+        colorWithSRGBRed: red
+        green: green
+        blue: blue
+        alpha: alpha
+    ];
+    let _: () = msg_send![webview, setUnderPageBackgroundColor: ns_color];
+    // an opaque base color only composites solid if the backing layer is itself opaque.
+    // transparent=false leaves the WKWebView isOpaque YES, but mark its backing CALayer
+    // opaque explicitly so the stage can never composite the glass through on the
+    // see-through path. translucent chrome webviews returned above and keep their default.
+    let _: () = msg_send![webview, setWantsLayer: YES];
+    let layer: id = msg_send![webview, layer];
+    if layer != nil {
+        let _: () = msg_send![layer, setOpaque: YES];
+    }
+    if std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok() {
+        eprintln!(
+            "[webview base-color] pinned underPageBackgroundColor srgb=({red:.3},{green:.3},{blue:.3},{alpha:.3})"
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]

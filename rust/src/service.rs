@@ -678,7 +678,8 @@ impl Render for ServiceApp {
                 },
             );
             let view = self.webviews.entry(id).or_insert_with(|| {
-                let dbg = std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok();
+                let event_dbg = std::env::var("RNGPUI_WEBVIEW_EVENT_DEBUG").is_ok();
+                let message_dbg = std::env::var("RNGPUI_WEBVIEW_MESSAGE_DEBUG").is_ok();
                 let inspector_enabled = self.inspector.enabled();
                 let initialization_script = if inspector_enabled {
                     format!("{RN_WEBVIEW_SHIM}\n{}", inspector::WEBVIEW_INSPECTOR_SCRIPT)
@@ -694,7 +695,7 @@ impl Render for ServiceApp {
                     // it's dispatched to the node's onMessage handler by id.
                     .with_ipc_handler(move |req| {
                         let body = req.body();
-                        if dbg {
+                        if message_dbg {
                             eprintln!("[webview {id}] message: {body}");
                         }
                         if inspector_enabled && inspector::handle_webview_ipc(id, body) {
@@ -706,7 +707,7 @@ impl Render for ServiceApp {
                     // also the quickest way to distinguish load from compositing issues.
                     .with_on_page_load_handler(move |event, _url| {
                         if matches!(event, wry::PageLoadEvent::Finished) {
-                            if dbg {
+                            if event_dbg {
                                 eprintln!("[webview {id}] page-load finished");
                             }
                             bridge::event(id, "load");
@@ -1240,6 +1241,10 @@ fn main() {
                 if capture_onscreen {
                     liquid_glass::show_onscreen_capture_window(window);
                 }
+                #[cfg(target_os = "macos")]
+                if background && show_window {
+                    liquid_glass::show_nonactivating_window(window);
+                }
                 let content_for_activation = content.clone();
                 content_for_activation.update(cx, |_this, cx| {
                     cx.observe_window_activation(window, |this, window, cx| {
@@ -1270,6 +1275,27 @@ fn main() {
         // (skipped in background mode so it doesn't pop over your work).
         if !background {
             cx.activate(true);
+        }
+
+        #[cfg(target_os = "macos")]
+        if background && show_window {
+            let order_window_handle = window_handle;
+            cx.spawn(async move |cx| {
+                for _ in 0..8 {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(50))
+                        .await;
+                    if order_window_handle
+                        .update(cx, |_root, window, _cx| {
+                            liquid_glass::show_nonactivating_window(window);
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
         }
 
         if let Some(position) = inspector_copy_at {

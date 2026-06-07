@@ -7,12 +7,15 @@ import {
     createElement,
     Fragment,
     forwardRef,
+    useEffect,
     useImperativeHandle,
     useId,
+    useMemo,
     useRef,
     useState,
     type ReactNode,
     type FC,
+    type MutableRefObject,
 } from "react";
 import { sendCommand } from "./commands";
 import type { SerializedTerminalFrame } from "./runtime";
@@ -124,6 +127,7 @@ export interface WebViewProps extends AccessibilityProps {
     source: { uri: string } | { html: string };
     style?: StyleProp<ViewStyle>;
     boxShadow?: ViewStyle["boxShadow"];
+    nativeHandleRef?: MutableRefObject<WebViewHandle | null>;
     /** the page finished loading */
     onLoad?: () => void;
     /** the page posted a message via `window.ReactNativeWebView.postMessage(data)` */
@@ -139,6 +143,13 @@ export interface WebViewHandle {
     /** reload the current document */
     reload: () => void;
 }
+
+let nextWebViewCommandId = 1_000_000_000;
+
+function createWebViewCommandId() {
+    return nextWebViewCommandId++;
+}
+
 /**
  * `<WebView source={{ uri | html }} />` — a native WebView child (native web scroll +
  * selection). Two-way messaging: the page calls
@@ -146,30 +157,38 @@ export interface WebViewHandle {
  * `ref.injectJavaScript(js)` / `ref.postMessage(d)` / `ref.reload()` → the page.
  */
 export const WebView = forwardRef<WebViewHandle, WebViewProps>(function WebView(props, ref) {
-    // a ref on the host node resolves to the reconciler Instance (it carries the
-    // node id), which is how a host → frame command targets this exact webview.
-    const host = useRef<{ id: number } | null>(null);
-    useImperativeHandle(
-        ref,
+    const commandIdRef = useRef<number | null>(null);
+    if (commandIdRef.current == null) commandIdRef.current = createWebViewCommandId();
+    const commandId = commandIdRef.current;
+    const handle = useMemo<WebViewHandle>(
         () => ({
             injectJavaScript(js) {
-                if (host.current) sendCommand({ $cmd: "eval", id: host.current.id, js });
+                sendCommand({ $cmd: "eval", id: commandId, js });
             },
             postMessage(data) {
-                if (host.current) {
-                    const js = `(function(){var e=new MessageEvent('message',{data:${JSON.stringify(
-                        data,
-                    )}});window.dispatchEvent(e);document.dispatchEvent(e);})();`;
-                    sendCommand({ $cmd: "eval", id: host.current.id, js });
-                }
+                const js = `(function(){var e=new MessageEvent('message',{data:${JSON.stringify(
+                    data,
+                )}});window.dispatchEvent(e);document.dispatchEvent(e);})();`;
+                sendCommand({ $cmd: "eval", id: commandId, js });
             },
             reload() {
-                if (host.current) sendCommand({ $cmd: "reload", id: host.current.id });
+                sendCommand({ $cmd: "reload", id: commandId });
             },
         }),
-        [],
+        [commandId],
     );
-    return createElement("WebView" as any, { ...props, ref: host });
+    useImperativeHandle(ref, () => handle, [handle]);
+    if (props.nativeHandleRef) props.nativeHandleRef.current = handle;
+    useEffect(() => {
+        const nativeHandleRef = props.nativeHandleRef;
+        if (!nativeHandleRef) return;
+        nativeHandleRef.current = handle;
+        return () => {
+            if (nativeHandleRef.current === handle) nativeHandleRef.current = null;
+        };
+    }, [handle, props.nativeHandleRef]);
+    const { nativeHandleRef: _nativeHandleRef, ...hostProps } = props;
+    return createElement("WebView" as any, { ...hostProps, __rngpuiHostId: commandId });
 });
 
 export type GhosttyTerminalFrame = SerializedTerminalFrame;

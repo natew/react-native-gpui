@@ -415,8 +415,13 @@ export function measureHostNodeLayout(
     inst.measureLayout(relativeToNativeNode ?? null, onSuccess, onFail);
 }
 
+function explicitHostId(props: Record<string, unknown>): number | undefined {
+    const id = props.__rngpuiHostId;
+    return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : undefined;
+}
+
 function createPublicInstance(type: string, props: Record<string, unknown>): Instance {
-    const id = genId();
+    const id = explicitHostId(props) ?? genId();
     const instance: Instance = {
         id,
         type,

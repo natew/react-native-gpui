@@ -142,6 +142,19 @@ pub fn show_onscreen_capture_window(window: &mut Window) {
     }
 }
 
+pub fn show_nonactivating_window(window: &mut Window) {
+    let Some(ns_view) = raw_ns_view(window) else {
+        return;
+    };
+    unsafe {
+        let ns_window: id = msg_send![ns_view, window];
+        if ns_window == nil {
+            return;
+        }
+        let _: () = msg_send![ns_window, orderFrontRegardless];
+    }
+}
+
 fn debug_offscreen_test(message: &str) {
     if std::env::var("RNGPUI_TEST_DEBUG").is_ok() {
         eprintln!("[rngpui test debug] {message}");

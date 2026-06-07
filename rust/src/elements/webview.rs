@@ -13,7 +13,7 @@ use crate::elements::{ReactElement, report_layout};
 use crate::style::ElementStyle;
 
 #[cfg(target_os = "macos")]
-use cocoa::appkit::{NSViewHeightSizable, NSViewWidthSizable};
+use cocoa::appkit::{NSBackingStoreBuffered, NSViewHeightSizable, NSViewWidthSizable};
 #[cfg(target_os = "macos")]
 use cocoa::base::{NO, YES, id, nil};
 #[cfg(target_os = "macos")]
@@ -29,7 +29,8 @@ use wry::WebViewExtMacOS;
 const CA_LAYER_MIN_X_MIN_Y_CORNER: u64 = 1 << 0;
 #[cfg(target_os = "macos")]
 const CA_LAYER_MAX_X_MIN_Y_CORNER: u64 = 1 << 1;
-
+#[cfg(target_os = "macos")]
+const NS_WINDOW_ABOVE: i64 = 1;
 // The service owns one persistent wry WebView per `<WebView>` id and publishes a
 // snapshot here each render, so this (stateless) element can resolve its view by id
 // and park it over the right layout bounds — the standard gpui + wry overlay pattern.
@@ -39,6 +40,8 @@ thread_local! {
     static WEBVIEW_LOADED_CONTENT: RefCell<HashMap<u64, WebViewContent>> = RefCell::new(HashMap::new());
     #[cfg(target_os = "macos")]
     static WEBVIEW_HOSTS: RefCell<HashMap<u64, id>> = RefCell::new(HashMap::new());
+    #[cfg(target_os = "macos")]
+    static WEBVIEW_WINDOWS: RefCell<HashMap<u64, id>> = RefCell::new(HashMap::new());
     #[cfg(target_os = "macos")]
     static WEBVIEW_BACKING_VIEWS: RefCell<HashMap<usize, id>> = RefCell::new(HashMap::new());
     // last native geometry we actually applied per webview id, so we can skip the
@@ -113,6 +116,24 @@ pub fn set_webviews(map: HashMap<u64, Rc<wry::WebView>>, content: HashMap<u64, W
             unsafe {
                 let _: () = msg_send![*host, removeFromSuperview];
                 let _: () = msg_send![*host, release];
+            }
+            false
+        });
+    });
+    #[cfg(target_os = "macos")]
+    WEBVIEW_WINDOWS.with(|windows| {
+        windows.borrow_mut().retain(|id, window| {
+            if live_ids.contains(id) {
+                return true;
+            }
+            unsafe {
+                let parent: id = msg_send![*window, parentWindow];
+                if parent != nil {
+                    let _: () = msg_send![parent, removeChildWindow: *window];
+                }
+                let _: () = msg_send![*window, orderOut: nil];
+                let _: () = msg_send![*window, close];
+                let _: () = msg_send![*window, release];
             }
             false
         });
@@ -290,7 +311,7 @@ fn ensure_host_view(id: u64, parent_view: id, gpui_view: id) -> id {
             // repaints; idle has none, so it only flickers while moving). Once set up the
             // order is stable, so the steady-state path here is a cheap no-op.
             if current_parent != parent_view || topmost != gpui_view {
-                if std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok() {
+                if std::env::var("RNGPUI_WEBVIEW_GEOMETRY_DEBUG").is_ok() {
                     eprintln!(
                         "[webview {id}] re-establishing underlay z-order (reparent={} topmost_wrong={})",
                         current_parent != parent_view,
@@ -362,8 +383,10 @@ fn position_webview_host(
     });
 
     unsafe {
+        let child_window = ensure_webview_window(id, parent_view, host, style.background_color);
         let current_parent: id = msg_send![webview, superview];
-        let reparented = current_parent != host;
+        let child_content_view: id = msg_send![child_window, contentView];
+        let reparented = current_parent != child_content_view;
 
         if reparented || changed || style_changed {
             let _: () = msg_send![class!(CATransaction), begin];
@@ -371,19 +394,13 @@ fn position_webview_host(
 
             if reparented || changed {
                 if reparented {
-                    if std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok() {
-                        eprintln!("[webview {id}] reparenting native view into underlay host");
+                    if std::env::var("RNGPUI_WEBVIEW_GEOMETRY_DEBUG").is_ok() {
+                        eprintln!("[webview {id}] reparenting native view into webview window");
                     }
-                    let _: id = msg_send![webview, retain];
-                    if current_parent != nil {
-                        let _: () = msg_send![webview, removeFromSuperview];
-                    }
-                    let _: () = msg_send![host, addSubview: webview];
-                    let _: () = msg_send![webview, release];
+                    let _ = view.reparent(child_window as *mut _);
                 }
 
                 set_child_frame(parent_view, host, x, y, width, height);
-                set_child_frame(host, webview, 0.0, 0.0, width, height);
                 WEBVIEW_LAST_BOUNDS.with(|b| {
                     b.borrow_mut().insert(id, new_bounds);
                 });
@@ -391,6 +408,14 @@ fn position_webview_host(
 
             apply_host_layer_clip(host, style);
             apply_webview_base_color(webview, style.background_color);
+            sync_webview_window(
+                id,
+                parent_view,
+                host,
+                child_window,
+                webview,
+                style.background_color,
+            );
 
             let _: () = msg_send![class!(CATransaction), commit];
 
@@ -402,6 +427,14 @@ fn position_webview_host(
         // cheap + idempotent; keep asserting visibility every frame regardless.
         let _: () = msg_send![host, setHidden: NO];
         let _: () = msg_send![webview, setHidden: NO];
+        sync_webview_window(
+            id,
+            parent_view,
+            host,
+            child_window,
+            webview,
+            style.background_color,
+        );
     }
 }
 
@@ -433,6 +466,117 @@ unsafe fn set_child_frame(parent: id, child: id, x: f64, y: f64, width: f64, hei
     };
     let frame = NSRect::new(NSPoint::new(x, origin_y), NSSize::new(width, height));
     let _: () = msg_send![child, setFrame: frame];
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ensure_webview_window(id: u64, parent_view: id, host: id, color: Option<Hsla>) -> id {
+    WEBVIEW_WINDOWS.with(|windows| {
+        let mut windows = windows.borrow_mut();
+        *windows.entry(id).or_insert_with(|| unsafe {
+            let frame = webview_window_screen_rect(parent_view, host);
+            let window: id = msg_send![class!(NSWindow), alloc];
+            let window: id = msg_send![
+                window,
+                initWithContentRect: frame
+                styleMask: 0u64
+                backing: NSBackingStoreBuffered
+                defer: NO
+            ];
+            configure_webview_window(window, color);
+            window
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn configure_webview_window(window: id, color: Option<Hsla>) {
+    if window == nil {
+        return;
+    }
+    let _: () = msg_send![window, setReleasedWhenClosed: NO];
+    let _: () = msg_send![window, setIgnoresMouseEvents: NO];
+    let _: () = msg_send![window, setHasShadow: NO];
+    let _: () = msg_send![window, setCanHide: NO];
+    let _: () = msg_send![window, setAlphaValue: 1.0f64];
+    unsafe {
+        apply_webview_window_background(window, color);
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn sync_webview_window(
+    id: u64,
+    parent_view: id,
+    host: id,
+    child_window: id,
+    webview: id,
+    color: Option<Hsla>,
+) {
+    if parent_view == nil || host == nil || child_window == nil || webview == nil {
+        return;
+    }
+
+    let parent_window: id = msg_send![parent_view, window];
+    if parent_window == nil {
+        return;
+    }
+
+    let screen_rect = unsafe { webview_window_screen_rect(parent_view, host) };
+    let _: () = msg_send![child_window, setFrame: screen_rect display: YES];
+    let _: () = msg_send![parent_window, addChildWindow: child_window ordered: NS_WINDOW_ABOVE];
+    let _: () = msg_send![child_window, setIgnoresMouseEvents: NO];
+    unsafe {
+        apply_webview_window_background(child_window, color);
+    }
+
+    let content_view: id = msg_send![child_window, contentView];
+    if content_view != nil {
+        let content_bounds: NSRect = msg_send![content_view, bounds];
+        let _: () = msg_send![webview, setFrame: content_bounds];
+        let _: () =
+            msg_send![webview, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
+    }
+
+    if std::env::var("RNGPUI_WEBVIEW_GEOMETRY_DEBUG").is_ok() {
+        let parent_number: i64 = msg_send![parent_window, windowNumber];
+        let webview_number: i64 = msg_send![child_window, windowNumber];
+        eprintln!(
+            "[webview {id} window] parent={parent_number} child={webview_number} frame x={:.1} y={:.1} w={:.1} h={:.1}",
+            screen_rect.origin.x,
+            screen_rect.origin.y,
+            screen_rect.size.width,
+            screen_rect.size.height,
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn webview_window_screen_rect(parent_view: id, host: id) -> NSRect {
+    let parent_window: id = msg_send![parent_view, window];
+    if parent_window == nil || host == nil {
+        return NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0));
+    }
+    let host_bounds: NSRect = msg_send![host, bounds];
+    let window_rect: NSRect = msg_send![host, convertRect: host_bounds toView: nil];
+    msg_send![parent_window, convertRectToScreen: window_rect]
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn apply_webview_window_background(window: id, color: Option<Hsla>) {
+    if window == nil {
+        return;
+    }
+    let (red, green, blue, alpha) = color.map(hsla_to_srgb).unwrap_or((0.0, 0.0, 0.0, 0.0));
+    let ns_color: id = msg_send![
+        class!(NSColor),
+        colorWithSRGBRed: red
+        green: green
+        blue: blue
+        alpha: alpha
+    ];
+    let opaque = if alpha >= 1.0 { YES } else { NO };
+    let _: () = msg_send![window, setOpaque: opaque];
+    let _: () = msg_send![window, setBackgroundColor: ns_color];
 }
 
 #[cfg(target_os = "macos")]
@@ -535,7 +679,7 @@ unsafe fn apply_host_layer_background(layer: id, color: Option<Hsla>) {
     let opaque = if alpha >= 1.0 { YES } else { NO };
     let _: () = msg_send![layer, setOpaque: opaque];
     let _: () = msg_send![layer, setBackgroundColor: cg_color];
-    if std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok() {
+    if std::env::var("RNGPUI_WEBVIEW_GEOMETRY_DEBUG").is_ok() {
         eprintln!(
             "[webview host-layer] bg srgb=({red:.3},{green:.3},{blue:.3},{alpha:.3}) opaque={} has_color={}",
             opaque == YES,
@@ -596,7 +740,7 @@ unsafe fn apply_webview_base_color(webview: id, color: Option<Hsla>) {
         let _: () = msg_send![layer, setOpaque: YES];
         let _: () = msg_send![layer, setBackgroundColor: cg_color];
     }
-    if std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok() {
+    if std::env::var("RNGPUI_WEBVIEW_GEOMETRY_DEBUG").is_ok() {
         eprintln!(
             "[webview base-color] pinned underPageBackgroundColor srgb=({red:.3},{green:.3},{blue:.3},{alpha:.3})"
         );
@@ -815,7 +959,7 @@ impl Element for ReactWebViewElement {
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
 
         if let Some(view) = webview(self.element.global_id) {
-            if std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok() {
+            if std::env::var("RNGPUI_WEBVIEW_GEOMETRY_DEBUG").is_ok() {
                 eprintln!(
                     "[webview {}] bounds x={} y={} w={} h={}",
                     self.element.global_id,
@@ -827,7 +971,6 @@ impl Element for ReactWebViewElement {
             }
             #[cfg(target_os = "macos")]
             {
-                load_if_needed(self.element.global_id, &view);
                 position_webview_host(
                     window,
                     &view,
@@ -835,6 +978,7 @@ impl Element for ReactWebViewElement {
                     bounds,
                     &self.element.style,
                 );
+                load_if_needed(self.element.global_id, &view);
             }
             #[cfg(not(target_os = "macos"))]
             {

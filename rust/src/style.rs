@@ -680,7 +680,7 @@ fn parse_stop_color(seg: &str) -> Option<Hsla> {
 /// Parse a CSS `box-shadow` value (one or more comma-separated layers) into
 /// GPUI `BoxShadow`s. Format per layer: `offsetX offsetY [blur] [spread] color`
 /// (color may also lead). `inset` is ignored (GPUI has drop shadows only).
-fn parse_box_shadows(input: &str) -> Vec<BoxShadow> {
+pub(crate) fn parse_box_shadows(input: &str) -> Vec<BoxShadow> {
     split_top_level_commas(input)
         .into_iter()
         .filter_map(|seg| parse_one_shadow(&seg))
@@ -696,8 +696,8 @@ fn parse_one_shadow(seg: &str) -> Option<BoxShadow> {
         a: 0.3,
     };
 
-    // pull out the color token (rgb/rgba(...) or #hex), leaving only lengths
-    if let Some(start) = rest.find("rgb") {
+    // pull out the color token (rgb/rgba/hsl/hsla(...) or #hex), leaving only lengths
+    if let Some(start) = find_css_color_function(&rest) {
         if let Some(close_rel) = rest[start..].find(')') {
             let end = start + close_rel + 1;
             if let Some(c) = parse_css_color(&rest[start..end]) {
@@ -727,6 +727,15 @@ fn parse_one_shadow(seg: &str) -> Option<BoxShadow> {
         blur_radius: px(nums.get(2).copied().unwrap_or(0.0)),
         spread_radius: px(nums.get(3).copied().unwrap_or(0.0)),
     })
+}
+
+fn find_css_color_function(input: &str) -> Option<usize> {
+    match (input.find("rgb"), input.find("hsl")) {
+        (Some(rgb), Some(hsl)) => Some(rgb.min(hsl)),
+        (Some(rgb), None) => Some(rgb),
+        (None, Some(hsl)) => Some(hsl),
+        (None, None) => None,
+    }
 }
 
 fn split_top_level_commas(input: &str) -> Vec<String> {
@@ -891,4 +900,25 @@ pub fn u32_to_hsla(c: u32) -> Hsla {
         b: (c & 0xFF) as f32 / 255.0,
         a: 1.0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn box_shadow_parser_extracts_hsla_color() {
+        let shadows = parse_box_shadows(
+            "0 12px 32px -8px hsla(240, 10%, 10%, 0.08), 0 2px 8px -2px hsla(240, 10%, 10%, 0.05)",
+        );
+
+        assert_eq!(shadows.len(), 2);
+        assert_eq!(f32::from(shadows[0].offset.x), 0.0);
+        assert_eq!(f32::from(shadows[0].offset.y), 12.0);
+        assert_eq!(f32::from(shadows[0].blur_radius), 32.0);
+        assert_eq!(f32::from(shadows[0].spread_radius), -8.0);
+        assert!((shadows[0].color.h - (240.0 / 360.0)).abs() < 0.001);
+        assert!((shadows[0].color.a - 0.08).abs() < 0.001);
+        assert!((shadows[1].color.a - 0.05).abs() < 0.001);
+    }
 }

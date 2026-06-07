@@ -1173,8 +1173,15 @@ fn main() {
                 liquid_glass::install(window);
                 #[cfg(target_os = "macos")]
                 if offscreen_test_window && !liquid_glass::show_offscreen_test_window(window) {
-                    eprintln!("[rngpui test] window was clamped on-screen; refusing to show");
-                    cx.quit();
+                    // macOS constrained the window back on-screen (happens on some
+                    // display arrangements — `setFrame:display:` clamps a fully
+                    // offscreen origin). rather than refuse + quit — which blocks every
+                    // composite-dependent test (webview paint, dynamic color, animation
+                    // frame-diff) — fall back to the invisible on-screen path used for
+                    // pixel capture: alpha ~0, non-key, click-through. imperceptible and
+                    // non-focus-stealing, but it composites so the test can run.
+                    eprintln!("[rngpui test] offscreen position clamped; showing invisible (alpha~0) instead");
+                    liquid_glass::show_onscreen_capture_window(window);
                 }
                 #[cfg(target_os = "macos")]
                 if capture_onscreen {

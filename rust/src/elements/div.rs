@@ -586,6 +586,20 @@ fn press_drag_release_target_for_start(id: u64) -> Option<PressDragTarget> {
         })
 }
 
+fn take_press_drag_release_target_for_target(id: u64) -> Option<PressDragTarget> {
+    let mut active_mouse = ACTIVE_MOUSE_TARGET.lock().unwrap();
+    let mut captured_up = CAPTURED_MOUSE_UP_TARGET.lock().unwrap();
+    let mut active_drag = ACTIVE_PRESS_DRAG.lock().unwrap();
+    let target = active_drag
+        .as_ref()
+        .and_then(|active| active.release_target.clone())
+        .filter(|target| target.id == id)?;
+    *active_mouse = None;
+    *captured_up = Some(id);
+    *active_drag = None;
+    Some(target)
+}
+
 fn track_drag_press_target_if_needed(
     id: u64,
     group: &Option<String>,
@@ -1431,6 +1445,15 @@ impl Element for ReactDivElement {
                             id,
                             inside,
                         ) {
+                            if let Some(target) = take_press_drag_release_target_for_target(id) {
+                                emit_press_action_sequence(
+                                    target.id,
+                                    &target.events,
+                                    ev.position,
+                                    target.bounds,
+                                    ev.modifiers,
+                                );
+                            }
                             return;
                         }
                         if captured {
@@ -1527,15 +1550,17 @@ impl Element for ReactDivElement {
                     || responder_move
                     || press_action
                 {
-                    let hitbox_for_move = hitbox.clone();
                     let layout_bounds = bounds;
+                    let event_bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
                     let press_group_for_move = press_group.clone();
                     let event_names_for_move = event_names.clone();
-                    window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, _cx| {
+                    window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _window, _cx| {
                         if phase != DispatchPhase::Bubble {
                             return;
                         }
-                        let inside = hitbox_for_move.is_hovered(window);
+                        let active_target = *ACTIVE_MOUSE_TARGET.lock().unwrap();
+                        let dragging = ev.dragging() || active_target.is_some();
+                        let inside = event_bounds.contains(&ev.position);
                         let mut hover = HOVER.lock().unwrap();
                         let was_inside = hover.contains(&id);
                         if inside && !was_inside {
@@ -1565,7 +1590,7 @@ impl Element for ReactDivElement {
                                 layout_bounds,
                                 ev.modifiers,
                             );
-                            if ev.dragging() && press_action {
+                            if dragging && press_action {
                                 track_drag_press_target_if_needed(
                                     id,
                                     &press_group_for_move,
@@ -1578,7 +1603,7 @@ impl Element for ReactDivElement {
                         } else if !inside && was_inside {
                             hover.remove(&id);
                             drop(hover);
-                            if ev.dragging() && press_action {
+                            if dragging && press_action {
                                 press_drag_mark_left_start(id);
                                 press_drag_clear_release_target(id);
                             }
@@ -1608,11 +1633,10 @@ impl Element for ReactDivElement {
                             );
                         } else {
                             drop(hover);
-                            if !inside && ev.dragging() && press_action {
+                            if !inside && dragging && press_action {
                                 press_drag_mark_left_start(id);
                             }
                         }
-                        let active_target = *ACTIVE_MOUSE_TARGET.lock().unwrap();
                         if target_receives_captured_pointer_event(active_target, id, inside) {
                             emit_mouse_if(
                                 id,
@@ -1744,8 +1768,8 @@ mod tests {
         press_drag_clear_release_target, press_drag_release_target_for_start,
         press_drag_should_target, remember_native_layout_frame, rounded_clip_radii_for_bounds,
         scroll_to, set_native_layout_override, stacked_child_indices_for,
-        target_receives_captured_pointer_event, target_receives_pointer_up_event,
-        track_drag_press_target_if_needed, update_native_resize,
+        take_press_drag_release_target_for_target, target_receives_captured_pointer_event,
+        target_receives_pointer_up_event, track_drag_press_target_if_needed, update_native_resize,
     };
     use crate::elements::NativeResizeEdge;
 
@@ -1919,6 +1943,32 @@ mod tests {
 
         let release_target = press_drag_release_target_for_start(1).unwrap();
         assert_eq!(release_target.id, 2);
+        finish_pointer_gesture();
+    }
+
+    #[test]
+    fn press_drag_release_target_can_emit_from_target_row() {
+        let _guard = pointer_gesture_test_guard();
+        finish_pointer_gesture();
+        *ACTIVE_PRESS_DRAG.lock().unwrap() = Some(ActivePressDrag {
+            start_id: 1,
+            group: Some("project-picker-trigger".to_string()),
+            did_activate: true,
+            left_start: true,
+            start_events: Vec::new(),
+            start_bounds: Bounds::default(),
+            start_cancelled: true,
+            release_target: Some(PressDragTarget {
+                id: 2,
+                events: vec!["responderRelease".to_string()],
+                bounds: Bounds::from_corners(point(px(0.0), px(0.0)), point(px(10.0), px(10.0))),
+            }),
+        });
+
+        assert!(take_press_drag_release_target_for_target(3).is_none());
+        let target = take_press_drag_release_target_for_target(2).unwrap();
+        assert_eq!(target.id, 2);
+        assert!(press_drag_release_target_for_start(1).is_none());
         finish_pointer_gesture();
     }
 

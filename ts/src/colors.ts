@@ -1,4 +1,3 @@
-import { spawnSync } from "child_process";
 import { useSyncExternalStore } from "react";
 import type { ColorValue, DynamicColorIOSValue, PlatformColorValue } from "./types";
 
@@ -18,12 +17,11 @@ let systemColorScheme: Exclude<ColorSchemeName, null> = readSystemColorScheme();
 let colorSchemeOverride: ColorSchemeName | undefined;
 let appearanceUpdateSink: (() => void) | undefined;
 
+// The native host pushes the real system scheme via an `appearance` event when the window
+// opens (and on every macOS light/dark toggle) → applyNativeColorScheme. This is only the
+// pre-first-event default; it's corrected within the first frame.
 function readSystemColorScheme(): Exclude<ColorSchemeName, null> {
-    const result = spawnSync("defaults", ["read", "-g", "AppleInterfaceStyle"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-    });
-    return result.stdout.trim() === "Dark" ? "dark" : "light";
+    return "dark";
 }
 
 function getEffectiveColorScheme(): Exclude<ColorSchemeName, null> {

@@ -29,6 +29,14 @@ libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "dfac6f
 # foreground gpui task that applies them and calls cx.notify() (event-driven render).
 flume = "0.11"
 raw-window-handle = "0.6"
+# host environment for the embedded JS: HTTP (fetch) + WebSocket (live agentbus data).
+ureq = { version = "2", features = ["json"] }
+tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+url = "2"
+
+[build-dependencies]
+# compiles the Hermes JSI C ABI shim (hermes_shim.cpp + jsi.cpp) — see build.rs.
+cc = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"

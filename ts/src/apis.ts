@@ -2,7 +2,6 @@
  * Non-component RN APIs: Platform, PixelRatio, useWindowDimensions.
  */
 import { useEffect, useState } from "react";
-import { spawn } from "child_process";
 import { Dimensions, type ScaledSize } from "./Dimensions";
 import {
     findHostNodeId,
@@ -261,32 +260,11 @@ if (result !== $.NSModalResponseOK) {
 `.trim();
 }
 
-function runFilePickerScript(script: string): Promise<string[]> {
-    return new Promise((resolve, reject) => {
-        const child = spawn("osascript", ["-l", "JavaScript", "-e", script], {
-            stdio: ["ignore", "pipe", "pipe"],
-        });
-        let output = "";
-        let error = "";
-        child.stdout.on("data", (chunk: Buffer) => {
-            output += chunk.toString();
-        });
-        child.stderr.on("data", (chunk: Buffer) => {
-            error += chunk.toString();
-        });
-        child.on("error", reject);
-        child.on("exit", (code) => {
-            if (code === 0) {
-                resolve(parseFilePickerOutput(output));
-                return;
-            }
-            if (/User canceled/i.test(error)) {
-                resolve([]);
-                return;
-            }
-            reject(new Error(error.trim() || `file picker exited with code ${code}`));
-        });
-    });
+// The native file picker (NSOpenPanel) ran via `osascript` in the old Bun-process model.
+// In the single-process Hermes host it must be a native host fn (Rust opens NSOpenPanel);
+// not yet wired — see plans/single-process-hermes.md "remaining host fns".
+function runFilePickerScript(_script: string): Promise<string[]> {
+    return Promise.reject(new Error("native file picker not yet wired in the single-process host"));
 }
 
 function parseFilePickerOutput(output: string) {

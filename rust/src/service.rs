@@ -1,6 +1,5 @@
 #![allow(unexpected_cfgs)]
 
-use std::io::{self, BufRead};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -36,6 +35,7 @@ mod bridge;
 #[cfg(target_os = "macos")]
 mod capture_png;
 mod elements;
+mod hermes;
 mod hit_passthrough;
 mod icons;
 mod inspector;
@@ -50,6 +50,22 @@ use raw_window_handle::HasWindowHandle;
 use style::{Dim, ElementStyle};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+// startup timing: process-start instant + a one-shot first-render marker. gated on
+// RNGPUI_STARTUP_TIMING so it's silent in normal runs. used to drive cold start < 200ms.
+static STARTUP: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+static FIRST_RENDER_LOGGED: AtomicBool = AtomicBool::new(false);
+
+fn startup_mark(label: &str) {
+    if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some() {
+        if let Some(t0) = STARTUP.get() {
+            eprintln!(
+                "[startup] {label} +{:.1}ms",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+}
 
 fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::SeqCst)
@@ -525,9 +541,19 @@ impl Render for ServiceApp {
         // reset the per-frame hit-test passthrough registry before this frame's prepaint
         // pass repopulates it (webview rects + occluder rects, for native webview events).
         hit_passthrough::begin_frame();
-        // The tree is applied (and a re-render scheduled) by the stdin pump task in
-        // `main`, not polled here — rendering is fully on-demand: this runs only on a
-        // new tree, input, scroll, or resize, so the app idles at ~0fps.
+        if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some()
+            && !FIRST_RENDER_LOGGED.swap(true, Ordering::SeqCst)
+        {
+            if let Some(t0) = STARTUP.get() {
+                eprintln!(
+                    "[startup] first render +{:.1}ms",
+                    t0.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+        }
+        // The tree is applied (and a re-render scheduled) by the hermes JS thread's
+        // foreground task in `main`, not polled here — rendering is fully on-demand: this
+        // runs only on a new tree, input, scroll, or resize, so the app idles at ~0fps.
         let theme_mode = root_theme_mode(&self.root);
         if Theme::global(cx).mode != theme_mode {
             Theme::change(theme_mode, Some(window), cx);
@@ -1057,54 +1083,43 @@ fn build_app_menu_item(item: AppCommandMenuItem) -> MenuItem {
     }
 }
 
-fn main() {
-    // Background thread continuously reads JSON from stdin (one message per line) and
-    // hands each to a flume channel. The first tree bootstraps the window size; the
-    // rest are applied by a foreground task that calls cx.notify() — no polling.
-    let (tree_tx, tree_rx) = flume::unbounded::<Incoming>();
-    std::thread::spawn(move || {
-        let stdin = io::stdin();
-        for line in stdin.lock().lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => break,
-            };
-            if line.trim().is_empty() {
-                continue;
-            }
-            let v: serde_json::Value = match serde_json::from_str(&line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            if let Some(msg) = parse_incoming(&v) {
-                if tree_tx.send(msg).is_err() {
-                    break; // window closed
-                }
-            }
-        }
-    });
-
-    // first tree bootstraps the window; ignore any commands that arrive before it.
-    let initial = loop {
-        match tree_rx.recv() {
-            Ok(Incoming::Tree(t)) => break t,
-            Ok(_) => continue,
-            Err(_) => break fallback_root(),
+/// Read the app bundle named by RNGPUI_BUNDLE — Hermes bytecode (`app.hbc`) or JS source.
+/// Hermes auto-detects HBC vs. source by magic, so either works.
+fn load_bundle() -> Vec<u8> {
+    let path = match std::env::var("RNGPUI_BUNDLE") {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("[hermes] RNGPUI_BUNDLE not set — point it at app.hbc or app.js");
+            std::process::exit(1);
         }
     };
+    match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("[hermes] cannot read bundle {path}: {e}");
+            std::process::exit(1);
+        }
+    }
+}
 
-    // Window opens at the root's declared width/height; after that it fills.
-    let win_w = initial.style.width.and_then(Dim::as_px).unwrap_or(720.0);
-    let win_h = initial.style.height.and_then(Dim::as_px).unwrap_or(800.0);
-    // debug override: RNGPUI_WINDOW_SIZE="w,h" forces a fixed window size — e.g. a
-    // small corner window for non-focus-stealing visual debugging (a backgrounded
-    // window must be unoccluded to render + be screenshotted on macOS).
-    let (win_w, win_h) = parse_point_env("RNGPUI_WINDOW_SIZE")
-        .map(|p| (f32::from(p.x), f32::from(p.y)))
-        .unwrap_or((win_w, win_h));
-    let app_root = fill_root(initial);
+fn main() {
+    let _ = STARTUP.set(std::time::Instant::now());
+    // The JS runs in an embedded Hermes runtime on a dedicated thread (hermes.rs). The
+    // bundle's reconciler hands every committed tree to __rngpui_applyTree, which parses it
+    // and sends an Incoming on this channel: the first tree bootstraps the window size, the
+    // rest are applied by a foreground task that calls cx.notify() — no polling.
+    let (tree_tx, tree_rx) = flume::unbounded::<Incoming>();
 
-    bridge::ready(win_w, win_h);
+    // start the JS engine; its first synchronous React commit sends the first tree below.
+    // native events + fetch/ws results flow back to the JS thread via hermes::post.
+    let bundle = load_bundle();
+    startup_mark("bundle loaded");
+    hermes::start(bundle, tree_tx);
+    // NOTE: we deliberately do NOT block for the first tree here. The GPUI platform init
+    // below (Application::new + app.run + gpui_component::init) is tree-independent and is
+    // the dominant cold-start cost (~85ms), so we let it overlap the JS eval (~60ms). The
+    // first tree is awaited inside app.run, right before the window opens — by then it's
+    // already available, so there's no added latency and no window-size flash.
 
     // test mode keeps conformance windows backgrounded and off the main screen.
     let test_mode = std::env::var("RNGPUI_TEST_MODE").is_ok();
@@ -1131,10 +1146,13 @@ fn main() {
     let show_window = (!test_mode || test_onscreen) && !capture_onscreen;
 
     let app = gpui::Application::new().with_assets(icons::Assets);
+    startup_mark("Application::new");
     app.run(move |cx: &mut App| {
+        startup_mark("app.run entered");
         // sets up gpui-component's theme + the input key bindings (backspace,
         // arrows, select-all, copy/paste, word-motion, …) used by InputState.
         gpui_component::init(cx);
+        startup_mark("gpui_component::init done");
         Theme::global_mut(cx).background = gpui::Hsla::transparent_black();
         // React Native multiline TextInput uses shift+enter for a newline when
         // plain enter submits. gpui-component only binds platform-secondary+enter.
@@ -1161,7 +1179,28 @@ fn main() {
         })
         .detach();
 
-        // The view that renders the tree. Created up front so the stdin pump below
+        // await the first tree HERE (after the tree-independent GPUI init above, which
+        // overlapped the JS eval). it bootstraps the window size + initial content.
+        startup_mark("awaiting first tree");
+        let initial = loop {
+            match tree_rx.recv() {
+                Ok(Incoming::Tree(t)) => break t,
+                Ok(_) => continue,
+                Err(_) => break fallback_root(),
+            }
+        };
+        startup_mark("first tree received");
+        // window opens at the root's declared width/height (RNGPUI_WINDOW_SIZE overrides);
+        // after that it fills.
+        let win_w = initial.style.width.and_then(Dim::as_px).unwrap_or(720.0);
+        let win_h = initial.style.height.and_then(Dim::as_px).unwrap_or(800.0);
+        let (win_w, win_h) = parse_point_env("RNGPUI_WINDOW_SIZE")
+            .map(|p| (f32::from(p.x), f32::from(p.y)))
+            .unwrap_or((win_w, win_h));
+        let app_root = fill_root(initial);
+        bridge::ready(win_w, win_h);
+
+        // The view that renders the tree. Created up front so the applier task below
         // can update it directly.
         let content = cx.new(|_| ServiceApp {
             root: app_root,
@@ -1220,11 +1259,14 @@ fn main() {
         };
 
         let pump = content.clone();
+        startup_mark("pre open_window");
         let window_handle = cx
             .open_window(options, move |window, cx| {
                 window.set_window_title("react-native-gpui");
+                startup_mark("open_window cb: pre glass");
                 #[cfg(target_os = "macos")]
                 liquid_glass::install(window);
+                startup_mark("open_window cb: post glass");
                 #[cfg(target_os = "macos")]
                 if offscreen_test_window && !liquid_glass::show_offscreen_test_window(window) {
                     // macOS constrained the window back on-screen (happens on some
@@ -1271,6 +1313,7 @@ fn main() {
                 cx.new(|cx| gpui_component::Root::new(content.clone(), window, cx))
             })
             .expect("open window");
+        startup_mark("window opened (GPUI/Metal init)");
         // bring the app to the front so keystrokes reach the focused input
         // (skipped in background mode so it doesn't pop over your work).
         if !background {

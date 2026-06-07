@@ -1,6 +1,6 @@
 [package]
 name = "react-native-gpui"
-version = "0.1.16"
+version = "0.1.17"
 edition = "2024"
 
 # The renderer service: reads a JSON element tree on stdin, renders it with GPUI,

@@ -66,12 +66,32 @@ struct AxNode {
 struct AxState {
     content_view: usize,
     nodes: HashMap<u64, AxNode>,
+    focused_text_id: Option<u64>,
 }
 
 static STATE: OnceLock<Mutex<AxState>> = OnceLock::new();
+type FocusInputHandler = Box<dyn Fn(u64) + Send + Sync + 'static>;
+static FOCUS_INPUT_HANDLER: OnceLock<Mutex<Option<FocusInputHandler>>> = OnceLock::new();
 
 fn state() -> &'static Mutex<AxState> {
     STATE.get_or_init(|| Mutex::new(AxState::default()))
+}
+
+fn focus_input_handler() -> &'static Mutex<Option<FocusInputHandler>> {
+    FOCUS_INPUT_HANDLER.get_or_init(|| Mutex::new(None))
+}
+
+pub fn set_focus_input_handler(handler: impl Fn(u64) + Send + Sync + 'static) {
+    *focus_input_handler().lock().unwrap() = Some(Box::new(handler));
+}
+
+pub fn set_focused_text_node(id: u64, focused: bool) {
+    let mut state = state().lock().unwrap();
+    if focused {
+        state.focused_text_id = Some(id);
+    } else if state.focused_text_id == Some(id) {
+        state.focused_text_id = None;
+    }
 }
 
 pub fn sync_tree(window: &mut Window, root: &Arc<ReactElement>) {
@@ -473,7 +493,19 @@ fn set_text_node_value(this: &Object, text: String, insert_at_cursor: bool) {
         node.value = Some(next.clone());
         next
     };
+    if insert_at_cursor {
+        focus_text_node(id);
+    }
     crate::bridge::change_text(id, &next);
+}
+
+fn focus_text_node(id: u64) {
+    set_focused_text_node(id, true);
+    if let Some(handler) = focus_input_handler().lock().unwrap().as_ref() {
+        handler(id);
+    } else {
+        crate::bridge::event(id, "focus");
+    }
 }
 
 extern "C" fn hit_test(_: &Object, _: Sel, _: NSPoint) -> id {
@@ -606,7 +638,7 @@ fn dispatch_press_action(this: &Object) -> bool {
         dispatch_press_sequence(id, &events);
         true
     } else if is_text_node {
-        crate::bridge::event(id, "focus");
+        focus_text_node(id);
         true
     } else {
         false
@@ -698,7 +730,8 @@ extern "C" fn set_accessibility_value(this: &Object, _: Sel, value: id) {
 }
 
 extern "C" fn accessibility_focused(this: &Object, _: Sel) -> BOOL {
-    if with_node(this, is_text_node, false) {
+    let id = unsafe { node_id(this) };
+    if with_node(this, is_text_node, false) && state().lock().unwrap().focused_text_id == Some(id) {
         YES
     } else {
         NO
@@ -710,8 +743,11 @@ extern "C" fn set_accessibility_focused(this: &Object, _: Sel, focused: BOOL) {
         let id = unsafe { node_id(this) };
         let can_focus = with_node(this, |node| is_text_node(node) && !node.disabled, false);
         if can_focus {
-            crate::bridge::event(id, "focus");
+            focus_text_node(id);
         }
+    } else {
+        let id = unsafe { node_id(this) };
+        set_focused_text_node(id, false);
     }
 }
 
@@ -751,7 +787,9 @@ extern "C" fn accessibility_set_value_for_attribute(
 
 #[cfg(test)]
 mod tests {
-    use super::{ax_is_element, ax_label, ax_role, events_have_press_action};
+    use super::{
+        ax_is_element, ax_label, ax_role, events_have_press_action, set_focused_text_node, state,
+    };
     use crate::elements::{AccessibilityInfo, ReactElement};
     use crate::style::ElementStyle;
 
@@ -802,6 +840,18 @@ mod tests {
         assert!(!events_have_press_action(&events(&["mouseEnter"])));
         assert!(!events_have_press_action(&events(&["pressIn", "pressOut"])));
         assert!(!events_have_press_action(&events(&["responderGrant"])));
+    }
+
+    #[test]
+    fn focused_text_node_tracks_one_focused_input() {
+        set_focused_text_node(1, true);
+        assert_eq!(state().lock().unwrap().focused_text_id, Some(1));
+        set_focused_text_node(2, true);
+        assert_eq!(state().lock().unwrap().focused_text_id, Some(2));
+        set_focused_text_node(1, false);
+        assert_eq!(state().lock().unwrap().focused_text_id, Some(2));
+        set_focused_text_node(2, false);
+        assert_eq!(state().lock().unwrap().focused_text_id, None);
     }
 
     #[test]

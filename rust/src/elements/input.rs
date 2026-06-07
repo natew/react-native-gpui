@@ -55,7 +55,9 @@ impl ReactInputElement {
             Some(state) => {
                 let editable = self.element.editable;
                 let listens_key_press = self.element.listens("keyPress");
+                let listens_submit = self.element.listens("submit");
                 let element_id = self.element.global_id;
+                let submit_state = state.clone();
                 let mut input = Input::new(&state)
                     .appearance(false)
                     .focus_bordered(false)
@@ -65,6 +67,28 @@ impl ReactInputElement {
                 }
                 div()
                     .size_full()
+                    .capture_key_down(move |event: &KeyDownEvent, _: &mut Window, cx: &mut App| {
+                        if !editable || !listens_submit {
+                            return;
+                        }
+                        let key = js_key(&event.keystroke);
+                        if key != "Enter" || event.keystroke.modifiers.shift {
+                            return;
+                        }
+                        if listens_key_press {
+                            crate::bridge::key_press(
+                                element_id,
+                                &key,
+                                false,
+                                event.keystroke.modifiers.control,
+                                event.keystroke.modifiers.alt,
+                                event.keystroke.modifiers.platform,
+                            );
+                        }
+                        let value = submit_state.read(cx).value().to_string();
+                        crate::bridge::submit(element_id, value.as_ref());
+                        cx.stop_propagation();
+                    })
                     .on_key_down(move |event: &KeyDownEvent, _: &mut Window, _: &mut App| {
                         if !editable || !listens_key_press {
                             return;

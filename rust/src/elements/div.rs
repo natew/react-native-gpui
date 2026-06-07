@@ -1732,25 +1732,32 @@ mod tests {
     use std::sync::{Mutex, MutexGuard};
     use std::time::{Duration, Instant};
 
-    use gpui::{Bounds, Corners, point, px};
+    use gpui::{Bounds, Corners, Modifiers, point, px};
     use once_cell::sync::Lazy;
 
     use super::{
-        ActiveNativeResize, ActivePressDrag, NATIVE_LAYOUT_ANIMATIONS, NATIVE_LAYOUT_FRAMES,
-        NATIVE_LAYOUT_OVERRIDES, NativeLayoutAnimation, NativeLayoutOverride, RoundedOverflowClip,
-        clear_native_layout_override, events_have_press_action, get_scroll, inner_corner_radius,
+        ACTIVE_PRESS_DRAG, ActiveNativeResize, ActivePressDrag, NATIVE_LAYOUT_ANIMATIONS,
+        NATIVE_LAYOUT_FRAMES, NATIVE_LAYOUT_OVERRIDES, NativeLayoutAnimation, NativeLayoutOverride,
+        PressDragTarget, RoundedOverflowClip, clear_native_layout_override,
+        events_have_press_action, finish_pointer_gesture, get_scroll, inner_corner_radius,
         native_layout_animation_value, native_layout_has_animations, native_layout_override,
+        press_drag_clear_release_target, press_drag_release_target_for_start,
         press_drag_should_target, remember_native_layout_frame, rounded_clip_radii_for_bounds,
         scroll_to, set_native_layout_override, stacked_child_indices_for,
         target_receives_captured_pointer_event, target_receives_pointer_up_event,
-        update_native_resize,
+        track_drag_press_target_if_needed, update_native_resize,
     };
     use crate::elements::NativeResizeEdge;
 
     static NATIVE_LAYOUT_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+    static POINTER_GESTURE_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     fn native_layout_test_guard() -> MutexGuard<'static, ()> {
         NATIVE_LAYOUT_TEST_LOCK.lock().unwrap()
+    }
+
+    fn pointer_gesture_test_guard() -> MutexGuard<'static, ()> {
+        POINTER_GESTURE_TEST_LOCK.lock().unwrap()
     }
 
     #[test]
@@ -1870,6 +1877,76 @@ mod tests {
 
         assert!(press_drag_should_target(&mut active, 2, &None));
         assert!(!press_drag_should_target(&mut active, 3, &files));
+    }
+
+    #[test]
+    fn press_drag_records_release_target_without_immediate_action() {
+        let _guard = pointer_gesture_test_guard();
+        finish_pointer_gesture();
+        let group = Some("project-picker-trigger".to_string());
+        *ACTIVE_PRESS_DRAG.lock().unwrap() = Some(ActivePressDrag {
+            start_id: 1,
+            group: group.clone(),
+            did_activate: false,
+            left_start: false,
+            start_events: Vec::new(),
+            start_bounds: Bounds::default(),
+            start_cancelled: false,
+            release_target: None,
+        });
+
+        let target_events = vec!["responderRelease".to_string(), "press".to_string()];
+        let target_bounds =
+            Bounds::from_corners(point(px(10.0), px(20.0)), point(px(80.0), px(60.0)));
+
+        assert!(track_drag_press_target_if_needed(
+            2,
+            &group,
+            &target_events,
+            point(px(32.0), px(44.0)),
+            target_bounds,
+            Modifiers::default(),
+        ));
+
+        let active = ACTIVE_PRESS_DRAG.lock().unwrap().clone().unwrap();
+        assert!(active.did_activate);
+        assert!(active.left_start);
+        assert!(active.start_cancelled);
+        let target = active.release_target.unwrap();
+        assert_eq!(target.id, 2);
+        assert_eq!(target.events, target_events);
+        assert_eq!(target.bounds, target_bounds);
+
+        let release_target = press_drag_release_target_for_start(1).unwrap();
+        assert_eq!(release_target.id, 2);
+        finish_pointer_gesture();
+    }
+
+    #[test]
+    fn press_drag_clears_release_target_when_drag_leaves_row() {
+        let _guard = pointer_gesture_test_guard();
+        finish_pointer_gesture();
+        *ACTIVE_PRESS_DRAG.lock().unwrap() = Some(ActivePressDrag {
+            start_id: 1,
+            group: Some("project-picker-trigger".to_string()),
+            did_activate: true,
+            left_start: true,
+            start_events: Vec::new(),
+            start_bounds: Bounds::default(),
+            start_cancelled: true,
+            release_target: Some(PressDragTarget {
+                id: 2,
+                events: vec!["responderRelease".to_string()],
+                bounds: Bounds::from_corners(point(px(0.0), px(0.0)), point(px(10.0), px(10.0))),
+            }),
+        });
+
+        press_drag_clear_release_target(3);
+        assert!(press_drag_release_target_for_start(1).is_some());
+
+        press_drag_clear_release_target(2);
+        assert!(press_drag_release_target_for_start(1).is_none());
+        finish_pointer_gesture();
     }
 
     #[test]

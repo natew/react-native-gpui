@@ -64,6 +64,13 @@ struct ActiveNativeResize {
 }
 
 #[derive(Clone, Debug)]
+struct PressDragTarget {
+    id: u64,
+    events: Vec<String>,
+    bounds: Bounds<Pixels>,
+}
+
+#[derive(Clone, Debug)]
 struct ActivePressDrag {
     start_id: u64,
     group: Option<String>,
@@ -72,6 +79,7 @@ struct ActivePressDrag {
     start_events: Vec<String>,
     start_bounds: Bounds<Pixels>,
     start_cancelled: bool,
+    release_target: Option<PressDragTarget>,
 }
 
 static SCROLL: Lazy<Mutex<HashMap<u64, ScrollOffset>>> = Lazy::new(|| Mutex::new(HashMap::new()));
@@ -459,7 +467,7 @@ fn press_drag_groups_match(active_group: &Option<String>, target_group: &Option<
     }
 }
 
-fn press_drag_should_activate(
+fn press_drag_should_target(
     active: &mut ActivePressDrag,
     target_id: u64,
     target_group: &Option<String>,
@@ -481,6 +489,18 @@ fn press_drag_mark_left_start(id: u64) {
         && active.start_id == id
     {
         active.left_start = true;
+    }
+}
+
+fn press_drag_clear_release_target(id: u64) {
+    let mut guard = ACTIVE_PRESS_DRAG.lock().unwrap();
+    if let Some(active) = guard.as_mut()
+        && active
+            .release_target
+            .as_ref()
+            .is_some_and(|target| target.id == id)
+    {
+        active.release_target = None;
     }
 }
 
@@ -552,7 +572,21 @@ fn press_drag_should_suppress_captured_action(id: u64) -> bool {
         .is_some_and(|active| active.start_id == id && active.did_activate)
 }
 
-fn activate_drag_press_if_needed(
+fn press_drag_release_target_for_start(id: u64) -> Option<PressDragTarget> {
+    ACTIVE_PRESS_DRAG
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|active| {
+            if active.start_id == id {
+                active.release_target.clone()
+            } else {
+                None
+            }
+        })
+}
+
+fn track_drag_press_target_if_needed(
     id: u64,
     group: &Option<String>,
     events: &[String],
@@ -562,9 +596,9 @@ fn activate_drag_press_if_needed(
 ) -> bool {
     let mut guard = ACTIVE_PRESS_DRAG.lock().unwrap();
     let mut cancel_start: Option<(u64, Vec<String>, Bounds<Pixels>)> = None;
-    let should_activate = match guard.as_mut() {
+    let should_target = match guard.as_mut() {
         Some(active) => {
-            if !press_drag_should_activate(active, id, group) {
+            if !press_drag_should_target(active, id, group) {
                 false
             } else {
                 if !active.start_cancelled {
@@ -575,19 +609,23 @@ fn activate_drag_press_if_needed(
                         active.start_bounds,
                     ));
                 }
+                active.release_target = Some(PressDragTarget {
+                    id,
+                    events: events.to_vec(),
+                    bounds,
+                });
                 true
             }
         }
         None => false,
     };
     drop(guard);
-    if !should_activate {
+    if !should_target {
         return false;
     };
     if let Some((start_id, start_events, start_bounds)) = cancel_start {
         emit_press_cancel_sequence(start_id, &start_events, position, start_bounds, modifiers);
     }
-    emit_press_action_sequence(id, events, position, bounds, modifiers);
     true
 }
 
@@ -1291,6 +1329,7 @@ impl Element for ReactDivElement {
                                     start_events: event_names_for_down.clone(),
                                     start_bounds: layout_bounds,
                                     start_cancelled: false,
+                                    release_target: None,
                                 });
                             }
                             emit_mouse_if(
@@ -1381,6 +1420,11 @@ impl Element for ReactDivElement {
                         let captured = active_target == Some(id);
                         let suppress_action =
                             captured && press_drag_should_suppress_captured_action(id);
+                        let drag_release_target = if suppress_action {
+                            press_drag_release_target_for_start(id)
+                        } else {
+                            None
+                        };
                         if !target_receives_pointer_up_event(
                             active_target,
                             captured_up_target,
@@ -1460,6 +1504,15 @@ impl Element for ReactDivElement {
                                 ev.modifiers,
                             );
                         }
+                        if let Some(target) = drag_release_target {
+                            emit_press_action_sequence(
+                                target.id,
+                                &target.events,
+                                ev.position,
+                                target.bounds,
+                                ev.modifiers,
+                            );
+                        }
                     });
                 }
                 if mouse_enter
@@ -1513,7 +1566,7 @@ impl Element for ReactDivElement {
                                 ev.modifiers,
                             );
                             if ev.dragging() && press_action {
-                                activate_drag_press_if_needed(
+                                track_drag_press_target_if_needed(
                                     id,
                                     &press_group_for_move,
                                     &event_names_for_move,
@@ -1527,6 +1580,7 @@ impl Element for ReactDivElement {
                             drop(hover);
                             if ev.dragging() && press_action {
                                 press_drag_mark_left_start(id);
+                                press_drag_clear_release_target(id);
                             }
                             emit_mouse_if(
                                 id,
@@ -1686,7 +1740,7 @@ mod tests {
         NATIVE_LAYOUT_OVERRIDES, NativeLayoutAnimation, NativeLayoutOverride, RoundedOverflowClip,
         clear_native_layout_override, events_have_press_action, get_scroll, inner_corner_radius,
         native_layout_animation_value, native_layout_has_animations, native_layout_override,
-        press_drag_should_activate, remember_native_layout_frame, rounded_clip_radii_for_bounds,
+        press_drag_should_target, remember_native_layout_frame, rounded_clip_radii_for_bounds,
         scroll_to, set_native_layout_override, stacked_child_indices_for,
         target_receives_captured_pointer_event, target_receives_pointer_up_event,
         update_native_resize,
@@ -1758,7 +1812,7 @@ mod tests {
     }
 
     #[test]
-    fn press_drag_activation_repeats_on_hover_entry_and_stays_group_scoped() {
+    fn press_drag_target_repeats_on_hover_entry_and_stays_group_scoped() {
         let mut active = ActivePressDrag {
             start_id: 1,
             group: Some("files".to_string()),
@@ -1767,17 +1821,18 @@ mod tests {
             start_events: Vec::new(),
             start_bounds: Bounds::default(),
             start_cancelled: false,
+            release_target: None,
         };
         let files = Some("files".to_string());
         let sessions = Some("sessions".to_string());
 
-        assert!(press_drag_should_activate(&mut active, 2, &files));
+        assert!(press_drag_should_target(&mut active, 2, &files));
         assert!(active.did_activate);
         assert!(active.left_start);
-        assert!(press_drag_should_activate(&mut active, 2, &files));
-        assert!(press_drag_should_activate(&mut active, 1, &files));
-        assert!(!press_drag_should_activate(&mut active, 3, &sessions));
-        assert!(!press_drag_should_activate(&mut active, 4, &None));
+        assert!(press_drag_should_target(&mut active, 2, &files));
+        assert!(press_drag_should_target(&mut active, 1, &files));
+        assert!(!press_drag_should_target(&mut active, 3, &sessions));
+        assert!(!press_drag_should_target(&mut active, 4, &None));
     }
 
     #[test]
@@ -1790,12 +1845,13 @@ mod tests {
             start_events: Vec::new(),
             start_bounds: Bounds::default(),
             start_cancelled: false,
+            release_target: None,
         };
         let files = Some("files".to_string());
 
-        assert!(!press_drag_should_activate(&mut active, 1, &files));
+        assert!(!press_drag_should_target(&mut active, 1, &files));
         active.left_start = true;
-        assert!(press_drag_should_activate(&mut active, 1, &files));
+        assert!(press_drag_should_target(&mut active, 1, &files));
     }
 
     #[test]
@@ -1808,11 +1864,12 @@ mod tests {
             start_events: Vec::new(),
             start_bounds: Bounds::default(),
             start_cancelled: false,
+            release_target: None,
         };
         let files = Some("files".to_string());
 
-        assert!(press_drag_should_activate(&mut active, 2, &None));
-        assert!(!press_drag_should_activate(&mut active, 3, &files));
+        assert!(press_drag_should_target(&mut active, 2, &None));
+        assert!(!press_drag_should_target(&mut active, 3, &files));
     }
 
     #[test]

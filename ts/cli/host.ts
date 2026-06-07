@@ -164,6 +164,15 @@ export async function launchHost(
         } catch {
             /* already gone */
         }
+        // the detached service may have already written its pid before we gave up
+        // (e.g. window-detect timeout on the launcher path) — kill it too, else it
+        // orphans (ppid=1) and piles up into a focus-stealing window storm.
+        try {
+            const p = parseInt(readFileSync(pidPath, "utf8").trim(), 10);
+            if (p > 0) process.kill(p, "SIGTERM");
+        } catch {
+            /* no pid yet / already gone */
+        }
         rmSync(workdir, { recursive: true, force: true });
         throw new Error(`${msg}\n--- host log tail ---\n${log.split("\n").slice(-20).join("\n")}`);
     };

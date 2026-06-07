@@ -561,10 +561,6 @@ unsafe fn apply_webview_base_color(webview: id, color: Option<Hsla>) {
     if webview == nil {
         return;
     }
-    let responds: bool = msg_send![webview, respondsToSelector: sel!(setUnderPageBackgroundColor:)];
-    if !responds {
-        return;
-    }
     let Some(color) = color else {
         return;
     };
@@ -581,15 +577,24 @@ unsafe fn apply_webview_base_color(webview: id, color: Option<Hsla>) {
         blue: blue
         alpha: alpha
     ];
-    let _: () = msg_send![webview, setUnderPageBackgroundColor: ns_color];
-    // an opaque base color only composites solid if the backing layer is itself opaque.
-    // transparent=false leaves the WKWebView isOpaque YES, but mark its backing CALayer
-    // opaque explicitly so the stage can never composite the glass through on the
-    // see-through path. translucent chrome webviews returned above and keep their default.
+    let cg_color: id = msg_send![ns_color, CGColor];
+    // Force the content WKWebView fully opaque and paint the themed base on its own
+    // backing layer. `transparent=false` should already leave isOpaque YES, but in
+    // practice the page was compositing over the translucent glass — and white over
+    // glass reads as a flat GREY, not white (exactly the "stage isn't white" report).
+    // Pinning isOpaque + the layer backgroundColor makes the content stage a solid
+    // themed fill; underPageBackgroundColor matches the overscroll/rubber-band area.
+    // Translucent chrome webviews returned above and keep their appearance-default.
+    let _: () = msg_send![webview, setOpaque: YES];
+    let responds: bool = msg_send![webview, respondsToSelector: sel!(setUnderPageBackgroundColor:)];
+    if responds {
+        let _: () = msg_send![webview, setUnderPageBackgroundColor: ns_color];
+    }
     let _: () = msg_send![webview, setWantsLayer: YES];
     let layer: id = msg_send![webview, layer];
     if layer != nil {
         let _: () = msg_send![layer, setOpaque: YES];
+        let _: () = msg_send![layer, setBackgroundColor: cg_color];
     }
     if std::env::var("RNGPUI_WEBVIEW_DEBUG").is_ok() {
         eprintln!(

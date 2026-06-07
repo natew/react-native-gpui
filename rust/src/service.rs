@@ -621,16 +621,8 @@ impl Render for ServiceApp {
                                 bridge::submit(id, value.as_ref());
                             }
                         }
-                        InputEvent::Focus => {
-                            #[cfg(target_os = "macos")]
-                            ax::set_focused_text_node(id, true);
-                            bridge::event(id, "focus");
-                        }
-                        InputEvent::Blur => {
-                            #[cfg(target_os = "macos")]
-                            ax::set_focused_text_node(id, false);
-                            bridge::event(id, "blur");
-                        }
+                        InputEvent::Focus => bridge::event(id, "focus"),
+                        InputEvent::Blur => bridge::event(id, "blur"),
                     },
                 )
                 .detach();
@@ -1070,13 +1062,6 @@ fn main() {
     // hands each to a flume channel. The first tree bootstraps the window size; the
     // rest are applied by a foreground task that calls cx.notify() — no polling.
     let (tree_tx, tree_rx) = flume::unbounded::<Incoming>();
-    #[cfg(target_os = "macos")]
-    {
-        let focus_tx = tree_tx.clone();
-        ax::set_focus_input_handler(move |id| {
-            let _ = focus_tx.send(Incoming::FocusInput { id });
-        });
-    }
     std::thread::spawn(move || {
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
@@ -1152,14 +1137,12 @@ fn main() {
         gpui_component::init(cx);
         Theme::global_mut(cx).background = gpui::Hsla::transparent_black();
         // React Native multiline TextInput uses shift+enter for a newline when
-        // plain return submits. gpui receives return-key events under both
-        // spellings depending on the event source, so bind both aliases here.
-        cx.bind_keys([
-            KeyBinding::new("enter", Enter { secondary: false }, Some("Input")),
-            KeyBinding::new("return", Enter { secondary: false }, Some("Input")),
-            KeyBinding::new("shift-enter", Enter { secondary: true }, Some("Input")),
-            KeyBinding::new("shift-return", Enter { secondary: true }, Some("Input")),
-        ]);
+        // plain enter submits. gpui-component only binds platform-secondary+enter.
+        cx.bind_keys([KeyBinding::new(
+            "shift-enter",
+            Enter { secondary: true },
+            Some("Input"),
+        )]);
 
         // quit on ⌘Q and when the last window closes (X button).
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());

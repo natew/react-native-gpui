@@ -64,13 +64,6 @@ struct ActiveNativeResize {
 }
 
 #[derive(Clone, Debug)]
-struct PressDragTarget {
-    id: u64,
-    events: Vec<String>,
-    bounds: Bounds<Pixels>,
-}
-
-#[derive(Clone, Debug)]
 struct ActivePressDrag {
     start_id: u64,
     group: Option<String>,
@@ -79,7 +72,6 @@ struct ActivePressDrag {
     start_events: Vec<String>,
     start_bounds: Bounds<Pixels>,
     start_cancelled: bool,
-    release_target: Option<PressDragTarget>,
 }
 
 static SCROLL: Lazy<Mutex<HashMap<u64, ScrollOffset>>> = Lazy::new(|| Mutex::new(HashMap::new()));
@@ -467,7 +459,7 @@ fn press_drag_groups_match(active_group: &Option<String>, target_group: &Option<
     }
 }
 
-fn press_drag_should_target(
+fn press_drag_should_activate(
     active: &mut ActivePressDrag,
     target_id: u64,
     target_group: &Option<String>,
@@ -489,18 +481,6 @@ fn press_drag_mark_left_start(id: u64) {
         && active.start_id == id
     {
         active.left_start = true;
-    }
-}
-
-fn press_drag_clear_release_target(id: u64) {
-    let mut guard = ACTIVE_PRESS_DRAG.lock().unwrap();
-    if let Some(active) = guard.as_mut()
-        && active
-            .release_target
-            .as_ref()
-            .is_some_and(|target| target.id == id)
-    {
-        active.release_target = None;
     }
 }
 
@@ -572,35 +552,7 @@ fn press_drag_should_suppress_captured_action(id: u64) -> bool {
         .is_some_and(|active| active.start_id == id && active.did_activate)
 }
 
-fn press_drag_release_target_for_start(id: u64) -> Option<PressDragTarget> {
-    ACTIVE_PRESS_DRAG
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|active| {
-            if active.start_id == id {
-                active.release_target.clone()
-            } else {
-                None
-            }
-        })
-}
-
-fn take_press_drag_release_target_for_target(id: u64) -> Option<PressDragTarget> {
-    let mut active_mouse = ACTIVE_MOUSE_TARGET.lock().unwrap();
-    let mut captured_up = CAPTURED_MOUSE_UP_TARGET.lock().unwrap();
-    let mut active_drag = ACTIVE_PRESS_DRAG.lock().unwrap();
-    let target = active_drag
-        .as_ref()
-        .and_then(|active| active.release_target.clone())
-        .filter(|target| target.id == id)?;
-    *active_mouse = None;
-    *captured_up = Some(id);
-    *active_drag = None;
-    Some(target)
-}
-
-fn track_drag_press_target_if_needed(
+fn activate_drag_press_if_needed(
     id: u64,
     group: &Option<String>,
     events: &[String],
@@ -610,9 +562,9 @@ fn track_drag_press_target_if_needed(
 ) -> bool {
     let mut guard = ACTIVE_PRESS_DRAG.lock().unwrap();
     let mut cancel_start: Option<(u64, Vec<String>, Bounds<Pixels>)> = None;
-    let should_target = match guard.as_mut() {
+    let should_activate = match guard.as_mut() {
         Some(active) => {
-            if !press_drag_should_target(active, id, group) {
+            if !press_drag_should_activate(active, id, group) {
                 false
             } else {
                 if !active.start_cancelled {
@@ -623,23 +575,19 @@ fn track_drag_press_target_if_needed(
                         active.start_bounds,
                     ));
                 }
-                active.release_target = Some(PressDragTarget {
-                    id,
-                    events: events.to_vec(),
-                    bounds,
-                });
                 true
             }
         }
         None => false,
     };
     drop(guard);
-    if !should_target {
+    if !should_activate {
         return false;
     };
     if let Some((start_id, start_events, start_bounds)) = cancel_start {
         emit_press_cancel_sequence(start_id, &start_events, position, start_bounds, modifiers);
     }
+    emit_press_action_sequence(id, events, position, bounds, modifiers);
     true
 }
 
@@ -1343,7 +1291,6 @@ impl Element for ReactDivElement {
                                     start_events: event_names_for_down.clone(),
                                     start_bounds: layout_bounds,
                                     start_cancelled: false,
-                                    release_target: None,
                                 });
                             }
                             emit_mouse_if(
@@ -1434,26 +1381,12 @@ impl Element for ReactDivElement {
                         let captured = active_target == Some(id);
                         let suppress_action =
                             captured && press_drag_should_suppress_captured_action(id);
-                        let drag_release_target = if suppress_action {
-                            press_drag_release_target_for_start(id)
-                        } else {
-                            None
-                        };
                         if !target_receives_pointer_up_event(
                             active_target,
                             captured_up_target,
                             id,
                             inside,
                         ) {
-                            if let Some(target) = take_press_drag_release_target_for_target(id) {
-                                emit_press_action_sequence(
-                                    target.id,
-                                    &target.events,
-                                    ev.position,
-                                    target.bounds,
-                                    ev.modifiers,
-                                );
-                            }
                             return;
                         }
                         if captured {
@@ -1527,15 +1460,6 @@ impl Element for ReactDivElement {
                                 ev.modifiers,
                             );
                         }
-                        if let Some(target) = drag_release_target {
-                            emit_press_action_sequence(
-                                target.id,
-                                &target.events,
-                                ev.position,
-                                target.bounds,
-                                ev.modifiers,
-                            );
-                        }
                     });
                 }
                 if mouse_enter
@@ -1550,17 +1474,15 @@ impl Element for ReactDivElement {
                     || responder_move
                     || press_action
                 {
+                    let hitbox_for_move = hitbox.clone();
                     let layout_bounds = bounds;
-                    let event_bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
                     let press_group_for_move = press_group.clone();
                     let event_names_for_move = event_names.clone();
-                    window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _window, _cx| {
+                    window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, _cx| {
                         if phase != DispatchPhase::Bubble {
                             return;
                         }
-                        let active_target = *ACTIVE_MOUSE_TARGET.lock().unwrap();
-                        let dragging = ev.dragging() || active_target.is_some();
-                        let inside = event_bounds.contains(&ev.position);
+                        let inside = hitbox_for_move.is_hovered(window);
                         let mut hover = HOVER.lock().unwrap();
                         let was_inside = hover.contains(&id);
                         if inside && !was_inside {
@@ -1590,8 +1512,8 @@ impl Element for ReactDivElement {
                                 layout_bounds,
                                 ev.modifiers,
                             );
-                            if dragging && press_action {
-                                track_drag_press_target_if_needed(
+                            if ev.dragging() && press_action {
+                                activate_drag_press_if_needed(
                                     id,
                                     &press_group_for_move,
                                     &event_names_for_move,
@@ -1603,9 +1525,8 @@ impl Element for ReactDivElement {
                         } else if !inside && was_inside {
                             hover.remove(&id);
                             drop(hover);
-                            if dragging && press_action {
+                            if ev.dragging() && press_action {
                                 press_drag_mark_left_start(id);
-                                press_drag_clear_release_target(id);
                             }
                             emit_mouse_if(
                                 id,
@@ -1633,10 +1554,11 @@ impl Element for ReactDivElement {
                             );
                         } else {
                             drop(hover);
-                            if !inside && dragging && press_action {
+                            if !inside && ev.dragging() && press_action {
                                 press_drag_mark_left_start(id);
                             }
                         }
+                        let active_target = *ACTIVE_MOUSE_TARGET.lock().unwrap();
                         if target_receives_captured_pointer_event(active_target, id, inside) {
                             emit_mouse_if(
                                 id,
@@ -1756,32 +1678,25 @@ mod tests {
     use std::sync::{Mutex, MutexGuard};
     use std::time::{Duration, Instant};
 
-    use gpui::{Bounds, Corners, Modifiers, point, px};
+    use gpui::{Bounds, Corners, point, px};
     use once_cell::sync::Lazy;
 
     use super::{
-        ACTIVE_PRESS_DRAG, ActiveNativeResize, ActivePressDrag, NATIVE_LAYOUT_ANIMATIONS,
-        NATIVE_LAYOUT_FRAMES, NATIVE_LAYOUT_OVERRIDES, NativeLayoutAnimation, NativeLayoutOverride,
-        PressDragTarget, RoundedOverflowClip, clear_native_layout_override,
-        events_have_press_action, finish_pointer_gesture, get_scroll, inner_corner_radius,
+        ActiveNativeResize, ActivePressDrag, NATIVE_LAYOUT_ANIMATIONS, NATIVE_LAYOUT_FRAMES,
+        NATIVE_LAYOUT_OVERRIDES, NativeLayoutAnimation, NativeLayoutOverride, RoundedOverflowClip,
+        clear_native_layout_override, events_have_press_action, get_scroll, inner_corner_radius,
         native_layout_animation_value, native_layout_has_animations, native_layout_override,
-        press_drag_clear_release_target, press_drag_release_target_for_start,
-        press_drag_should_target, remember_native_layout_frame, rounded_clip_radii_for_bounds,
+        press_drag_should_activate, remember_native_layout_frame, rounded_clip_radii_for_bounds,
         scroll_to, set_native_layout_override, stacked_child_indices_for,
-        take_press_drag_release_target_for_target, target_receives_captured_pointer_event,
-        target_receives_pointer_up_event, track_drag_press_target_if_needed, update_native_resize,
+        target_receives_captured_pointer_event, target_receives_pointer_up_event,
+        update_native_resize,
     };
     use crate::elements::NativeResizeEdge;
 
     static NATIVE_LAYOUT_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
-    static POINTER_GESTURE_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     fn native_layout_test_guard() -> MutexGuard<'static, ()> {
         NATIVE_LAYOUT_TEST_LOCK.lock().unwrap()
-    }
-
-    fn pointer_gesture_test_guard() -> MutexGuard<'static, ()> {
-        POINTER_GESTURE_TEST_LOCK.lock().unwrap()
     }
 
     #[test]
@@ -1843,7 +1758,7 @@ mod tests {
     }
 
     #[test]
-    fn press_drag_target_repeats_on_hover_entry_and_stays_group_scoped() {
+    fn press_drag_activation_repeats_on_hover_entry_and_stays_group_scoped() {
         let mut active = ActivePressDrag {
             start_id: 1,
             group: Some("files".to_string()),
@@ -1852,18 +1767,17 @@ mod tests {
             start_events: Vec::new(),
             start_bounds: Bounds::default(),
             start_cancelled: false,
-            release_target: None,
         };
         let files = Some("files".to_string());
         let sessions = Some("sessions".to_string());
 
-        assert!(press_drag_should_target(&mut active, 2, &files));
+        assert!(press_drag_should_activate(&mut active, 2, &files));
         assert!(active.did_activate);
         assert!(active.left_start);
-        assert!(press_drag_should_target(&mut active, 2, &files));
-        assert!(press_drag_should_target(&mut active, 1, &files));
-        assert!(!press_drag_should_target(&mut active, 3, &sessions));
-        assert!(!press_drag_should_target(&mut active, 4, &None));
+        assert!(press_drag_should_activate(&mut active, 2, &files));
+        assert!(press_drag_should_activate(&mut active, 1, &files));
+        assert!(!press_drag_should_activate(&mut active, 3, &sessions));
+        assert!(!press_drag_should_activate(&mut active, 4, &None));
     }
 
     #[test]
@@ -1876,13 +1790,12 @@ mod tests {
             start_events: Vec::new(),
             start_bounds: Bounds::default(),
             start_cancelled: false,
-            release_target: None,
         };
         let files = Some("files".to_string());
 
-        assert!(!press_drag_should_target(&mut active, 1, &files));
+        assert!(!press_drag_should_activate(&mut active, 1, &files));
         active.left_start = true;
-        assert!(press_drag_should_target(&mut active, 1, &files));
+        assert!(press_drag_should_activate(&mut active, 1, &files));
     }
 
     #[test]
@@ -1895,108 +1808,11 @@ mod tests {
             start_events: Vec::new(),
             start_bounds: Bounds::default(),
             start_cancelled: false,
-            release_target: None,
         };
         let files = Some("files".to_string());
 
-        assert!(press_drag_should_target(&mut active, 2, &None));
-        assert!(!press_drag_should_target(&mut active, 3, &files));
-    }
-
-    #[test]
-    fn press_drag_records_release_target_without_immediate_action() {
-        let _guard = pointer_gesture_test_guard();
-        finish_pointer_gesture();
-        let group = Some("project-picker-trigger".to_string());
-        *ACTIVE_PRESS_DRAG.lock().unwrap() = Some(ActivePressDrag {
-            start_id: 1,
-            group: group.clone(),
-            did_activate: false,
-            left_start: false,
-            start_events: Vec::new(),
-            start_bounds: Bounds::default(),
-            start_cancelled: false,
-            release_target: None,
-        });
-
-        let target_events = vec!["responderRelease".to_string(), "press".to_string()];
-        let target_bounds =
-            Bounds::from_corners(point(px(10.0), px(20.0)), point(px(80.0), px(60.0)));
-
-        assert!(track_drag_press_target_if_needed(
-            2,
-            &group,
-            &target_events,
-            point(px(32.0), px(44.0)),
-            target_bounds,
-            Modifiers::default(),
-        ));
-
-        let active = ACTIVE_PRESS_DRAG.lock().unwrap().clone().unwrap();
-        assert!(active.did_activate);
-        assert!(active.left_start);
-        assert!(active.start_cancelled);
-        let target = active.release_target.unwrap();
-        assert_eq!(target.id, 2);
-        assert_eq!(target.events, target_events);
-        assert_eq!(target.bounds, target_bounds);
-
-        let release_target = press_drag_release_target_for_start(1).unwrap();
-        assert_eq!(release_target.id, 2);
-        finish_pointer_gesture();
-    }
-
-    #[test]
-    fn press_drag_release_target_can_emit_from_target_row() {
-        let _guard = pointer_gesture_test_guard();
-        finish_pointer_gesture();
-        *ACTIVE_PRESS_DRAG.lock().unwrap() = Some(ActivePressDrag {
-            start_id: 1,
-            group: Some("project-picker-trigger".to_string()),
-            did_activate: true,
-            left_start: true,
-            start_events: Vec::new(),
-            start_bounds: Bounds::default(),
-            start_cancelled: true,
-            release_target: Some(PressDragTarget {
-                id: 2,
-                events: vec!["responderRelease".to_string()],
-                bounds: Bounds::from_corners(point(px(0.0), px(0.0)), point(px(10.0), px(10.0))),
-            }),
-        });
-
-        assert!(take_press_drag_release_target_for_target(3).is_none());
-        let target = take_press_drag_release_target_for_target(2).unwrap();
-        assert_eq!(target.id, 2);
-        assert!(press_drag_release_target_for_start(1).is_none());
-        finish_pointer_gesture();
-    }
-
-    #[test]
-    fn press_drag_clears_release_target_when_drag_leaves_row() {
-        let _guard = pointer_gesture_test_guard();
-        finish_pointer_gesture();
-        *ACTIVE_PRESS_DRAG.lock().unwrap() = Some(ActivePressDrag {
-            start_id: 1,
-            group: Some("project-picker-trigger".to_string()),
-            did_activate: true,
-            left_start: true,
-            start_events: Vec::new(),
-            start_bounds: Bounds::default(),
-            start_cancelled: true,
-            release_target: Some(PressDragTarget {
-                id: 2,
-                events: vec!["responderRelease".to_string()],
-                bounds: Bounds::from_corners(point(px(0.0), px(0.0)), point(px(10.0), px(10.0))),
-            }),
-        });
-
-        press_drag_clear_release_target(3);
-        assert!(press_drag_release_target_for_start(1).is_some());
-
-        press_drag_clear_release_target(2);
-        assert!(press_drag_release_target_for_start(1).is_none());
-        finish_pointer_gesture();
+        assert!(press_drag_should_activate(&mut active, 2, &None));
+        assert!(!press_drag_should_activate(&mut active, 3, &files));
     }
 
     #[test]

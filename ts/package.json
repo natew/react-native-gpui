@@ -47,6 +47,7 @@
         "conformance:text-lines": "bun run scripts/text-lines-conformance.mjs",
         "pixel-diff": "bun run scripts/pixel-diff.mjs",
         "pixel-sample": "bun run scripts/pixel-sample.mjs",
+        "png-grid": "bun run scripts/png-grid.mjs",
         "superconductor": "bun run examples/superconductor.tsx",
         "prepublishOnly": "npm run build"
     },

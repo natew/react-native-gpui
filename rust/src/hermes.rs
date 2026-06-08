@@ -742,6 +742,15 @@ fn dispatch_coalesced(rt: *mut c_void, batch: Vec<JsCall>) {
 
 fn run_loop(rt: *mut c_void, ctx: &JsContext, calls_rx: &Receiver<JsCall>) {
     let max_wait = Duration::from_millis(250);
+    // RNGPUI_PERF_TRACE=1 logs the wall time the single JS thread spends processing
+    // each batch of native calls (React render + reconcile + microtasks). This IS the
+    // input-freeze budget: while the thread is in here it cannot accept the next tap.
+    // Threshold (ms) is configurable so a flood of cheap frames doesn't spam.
+    let perf_trace = std::env::var_os("RNGPUI_PERF_TRACE").is_some();
+    let perf_threshold_ms: f64 = std::env::var("RNGPUI_PERF_TRACE_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4.0);
     loop {
         // React's initial mount and Promise continuations can be queued as Hermes
         // microtasks even when there are no native calls or timers. Drain before
@@ -772,6 +781,11 @@ fn run_loop(rt: *mut c_void, ctx: &JsContext, calls_rx: &Receiver<JsCall>) {
                 Err(flume::TryRecvError::Disconnected) => return,
             }
         }
+        let trace = if perf_trace {
+            Some((batch.len(), perf_batch_label(&batch), Instant::now()))
+        } else {
+            None
+        };
         dispatch_coalesced(rt, batch);
 
         // fire due timers, then run microtasks (Promises / React scheduling).
@@ -780,7 +794,38 @@ fn run_loop(rt: *mut c_void, ctx: &JsContext, calls_rx: &Receiver<JsCall>) {
             call1(rt, "__rngpui_fireTimer", &id.to_string());
         }
         unsafe { rng_hermes_drain_microtasks(rt) };
+
+        if let Some((len, label, started)) = trace {
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            if ms >= perf_threshold_ms {
+                eprintln!("[perf] js-block {ms:.1}ms batch={len} {label}");
+            }
+        }
     }
+}
+
+// A short attribution hint for a processed batch: how many calls and what the first
+// few were (event name for UI events, else the host fn). Cheap substring sniffing,
+// no JSON parse in the hot path.
+fn perf_batch_label(batch: &[JsCall]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for call in batch.iter().take(3) {
+        if call.func == "__rngpui_onHostEvent" {
+            let ev = call
+                .arg
+                .split("\"event\":\"")
+                .nth(1)
+                .and_then(|s| s.split('"').next())
+                .unwrap_or("event");
+            parts.push(ev.to_string());
+        } else {
+            parts.push(call.func.trim_start_matches("__rngpui_").to_string());
+        }
+    }
+    if batch.len() > 3 {
+        parts.push(format!("+{}", batch.len() - 3));
+    }
+    parts.join(",")
 }
 
 #[cfg(test)]

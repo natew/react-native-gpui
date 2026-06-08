@@ -13,6 +13,18 @@ export interface Instance {
     type: string;
     props: Record<string, unknown>;
     children: Array<Instance | TextInstance>;
+    // ── serialization memo ──
+    // parent backlink + dirty flag let us cache each node's SerializedNode and
+    // only recompute the ones that actually changed (see markSerializeDirty /
+    // serialize). `cached === undefined` means "no valid cache".
+    parent: Instance | null;
+    dirty: boolean;
+    cached: SerializedNode | undefined;
+    cachedListGroup: string | undefined;
+    // true if this node is a portal host/view or has one in its subtree; such
+    // nodes embed external mutable content (PortalContext) so they are never
+    // cached — but their siblings/cousins still memoize normally.
+    hasPortal: boolean;
     measure: (callback: MeasureCallback) => void;
     measureInWindow: (callback: MeasureInWindowCallback) => void;
     measureLayout: (
@@ -24,6 +36,7 @@ export interface Instance {
 export interface TextInstance {
     id: number;
     text: string;
+    parent: Instance | null;
 }
 export interface Container {
     rootID: number;
@@ -43,6 +56,51 @@ const pendingMeasures = new Map<number, Array<() => void>>();
 const layoutSignatures = new Map<number, string>();
 const PORTAL_HOST_TYPE = "RNTPortalHostView";
 const PORTAL_VIEW_TYPE = "RNTPortalView";
+
+// ── serialization memo ──────────────────────────────────────────────
+// serialize() rebuilds a node's SerializedNode from scratch — normalizing every
+// style object and re-walking children — and it runs on EVERY React commit AND
+// every hover/press/measure. For the full control room that was ~12-32ms per
+// commit over the whole tree even when ~3 nodes changed, all on the single JS
+// thread, which is what froze input. We cache each Instance's SerializedNode and
+// recompute only dirty nodes (+ their ancestors, whose children array changed),
+// so a commit costs O(changed), not O(tree).
+//
+// Portal hosts embed content from elsewhere in the tree via a mutable
+// PortalContext, so their serialization isn't a pure function of their own
+// subtree. We never cache a node that is (or contains) a portal host/view —
+// tracked per-node via `hasPortal` — so those subtrees recompute every commit
+// while the rest of the tree (sidebar, stage, etc.) memoizes. Tamagui keeps a
+// portal host permanently mounted, so a global "any portal → disable memo"
+// guard would disable memoization forever; per-node is what makes it real.
+const isPortalType = (type: string) => type === PORTAL_HOST_TYPE || type === PORTAL_VIEW_TYPE;
+// diagnostic: cache hit/miss per commit (RNGPUI_SERIALIZE_TRACE=1)
+const SERIALIZE_TRACE = typeof process !== "undefined" && !!process.env?.RNGPUI_SERIALIZE_TRACE;
+let serHit = 0;
+let serMiss = 0;
+let commitUpdates = 0;
+let creates = 0;
+
+// Mark a node and its ancestors dirty: an ancestor's cached SerializedNode
+// embeds its children's nodes, so a child change must invalidate the chain up to
+// the root. Stops early once it hits an already-dirty ancestor.
+function markSerializeDirty(node: Instance | TextInstance | null) {
+    let cur: Instance | TextInstance | null = node;
+    while (cur) {
+        if (isTextLike(cur)) {
+            cur = cur.parent;
+            continue;
+        }
+        if (cur.dirty) return;
+        cur.dirty = true;
+        cur.cached = undefined;
+        cur = cur.parent;
+    }
+}
+
+function markSerializeDirtyById(id: number) {
+    markSerializeDirty(instances.get(id) ?? null);
+}
 
 type LayoutRect = { x: number; y: number; width: number; height: number };
 type MeasureCallback = (x: number, y: number, width: number, height: number, pageX: number, pageY: number) => void;
@@ -109,6 +167,8 @@ function setPseudoState(set: Set<number>, id: number, active: boolean) {
     if (!changed) return;
     if (active) set.add(id);
     else set.delete(id);
+    // hover/press changes this node's serialized style — invalidate just it.
+    markSerializeDirtyById(id);
     requestPseudoCommit();
 }
 
@@ -201,6 +261,8 @@ function requestMeasuredLayout(id: number): boolean {
     const hasLayout = layouts.has(id);
     if (!measuredIds.has(id)) {
         measuredIds.add(id);
+        // gaining a 'layout' event changes this node's serialized `events`.
+        markSerializeDirtyById(id);
         requestPseudoCommit();
     } else if (!hasLayout) {
         requestPseudoCommit();
@@ -353,7 +415,12 @@ function invalidateLayout(node: Instance | TextInstance) {
 }
 
 function cleanupInstance(node: Instance | TextInstance) {
-    if (isTextLike(node)) return;
+    if (isTextLike(node)) {
+        node.parent = null;
+        return;
+    }
+    node.parent = null;
+    node.cached = undefined;
     handlers.delete(node.id);
     hoveredIds.delete(node.id);
     pressedIds.delete(node.id);
@@ -428,6 +495,11 @@ function createPublicInstance(type: string, props: Record<string, unknown>): Ins
         type,
         props,
         children: [],
+        parent: null,
+        dirty: true,
+        cached: undefined,
+        cachedListGroup: undefined,
+        hasPortal: false,
         measure(callback) {
             afterMeasuredLayout(id, () => {
                 const layout = layoutFor(id);
@@ -759,6 +831,16 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
     if (isTextLike(inst)) return { globalId: inst.id, type: "text", text: inst.text };
     if (inst.type === PORTAL_VIEW_TYPE) return null;
 
+    // Memo fast path: a clean, non-portal node serialized under the same inherited
+    // list group re-emits its cached node (and its whole clean subtree) with zero
+    // style/object work. `cached` is only ever set for non-portal nodes, so this
+    // never returns stale portal content.
+    if (!inst.dirty && inst.cached !== undefined && inst.cachedListGroup === inheritedListGroup) {
+        if (SERIALIZE_TRACE) serHit++;
+        return inst.cached;
+    }
+    if (SERIALIZE_TRACE) serMiss++;
+
     const props = inst.props;
     const listGroup = stringProp(props, "nativeListGroup") ?? inheritedListGroup;
     const baseStyle = (normalizePropsStyle(props) ?? {}) as Record<string, unknown>;
@@ -858,6 +940,17 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
         }
         if (kids.length) node.children = kids;
     }
+    // a node "has a portal" if it IS one or any non-text child does (children were
+    // just serialized above, so child.hasPortal is current; cache-hit children keep
+    // their last value, which is still valid until a structural change dirties them).
+    inst.hasPortal = isPortalType(inst.type) || inst.children.some((c) => !isTextLike(c) && c.hasPortal);
+    inst.dirty = false;
+    if (inst.hasPortal) {
+        inst.cached = undefined;
+    } else {
+        inst.cached = node;
+        inst.cachedListGroup = inheritedListGroup;
+    }
     return node;
 }
 
@@ -909,17 +1002,31 @@ function imageSource(source: unknown): string | undefined {
 
 export function serializeContainer(c: Container): SerializedNode {
     currentContainer = c;
+    // commitUpdate/createInstance fire during the React commit phase BEFORE this
+    // serialize runs, so capture them now, then reset for the next commit.
+    const updThisCommit = commitUpdates;
+    const creThisCommit = creates;
+    if (SERIALIZE_TRACE) {
+        serHit = 0;
+        serMiss = 0;
+        commitUpdates = 0;
+        creates = 0;
+    }
     const byHost = new Map<string, Instance[]>();
     for (const child of c.children) collectPortals(child, byHost);
     const context: PortalContext = { byHost, usedHosts: new Set() };
     // id 0 is reserved for the window root, so it never collides with element ids
     // (genId starts at 1) — keeps scroll/input/webview maps keyed cleanly.
-    return {
+    const root = {
         globalId: 0,
         type: "div",
         style: { width: c.width, height: c.height, flexDirection: "column", position: "relative" },
         children: serializeChildren(c.children, context),
     };
+    if (SERIALIZE_TRACE && (serMiss > 0 || updThisCommit > 0 || creThisCommit > 0)) {
+        console.error(`[ser] updates=${updThisCommit} creates=${creThisCommit} miss=${serMiss} hit=${serHit}`);
+    }
+    return root;
 }
 
 export function setCommitSink(fn: (tree: SerializedNode) => void) {
@@ -944,31 +1051,38 @@ const hostConfig: any = {
     scheduleMicrotask: queueMicrotask,
 
     createInstance(type: string, props: Record<string, unknown>): Instance {
+        if (SERIALIZE_TRACE) creates++;
         const inst = createPublicInstance(type, props);
         registerHandlers(inst.id, props);
         return inst;
     },
     createTextInstance(text: string): TextInstance {
-        return { id: genId(), text };
+        return { id: genId(), text, parent: null };
     },
     appendInitialChild(parent: Instance, child: Instance | TextInstance) {
         parent.children.push(child);
+        child.parent = parent;
         invalidateLayout(parent);
+        markSerializeDirty(parent);
     },
     appendChild(parent: Instance, child: Instance | TextInstance) {
         detachForMove(parent.children, child);
         parent.children.push(child);
+        child.parent = parent;
         invalidateLayout(parent);
+        markSerializeDirty(parent);
     },
     appendChildToContainer(container: Container, child: Instance | TextInstance) {
         detachForMove(container.children, child);
         container.children.push(child);
+        child.parent = null;
     },
     removeChild(parent: Instance, child: Instance | TextInstance) {
         const i = parent.children.indexOf(child);
         if (i !== -1) {
             parent.children.splice(i, 1);
             invalidateLayout(parent);
+            markSerializeDirty(parent);
             cleanupInstance(child);
         }
     },
@@ -983,12 +1097,15 @@ const hostConfig: any = {
         detachForMove(parent.children, child);
         const i = parent.children.indexOf(before);
         parent.children.splice(i === -1 ? parent.children.length : i, 0, child);
+        child.parent = parent;
         invalidateLayout(parent);
+        markSerializeDirty(parent);
     },
     insertInContainerBefore(container: Container, child: Instance | TextInstance, before: Instance | TextInstance) {
         detachForMove(container.children, child);
         const i = container.children.indexOf(before);
         container.children.splice(i === -1 ? container.children.length : i, 0, child);
+        child.parent = null;
     },
     // react-reconciler 0.31 signature: (instance, type, prevProps, nextProps, handle)
     commitUpdate(instance: Instance, _type: string, _prevProps: unknown, nextProps: Record<string, unknown>) {
@@ -999,9 +1116,13 @@ const hostConfig: any = {
         }
         instance.props = nextProps;
         registerHandlers(instance.id, nextProps);
+        markSerializeDirty(instance);
+        if (SERIALIZE_TRACE) commitUpdates++;
     },
     commitTextUpdate(textInstance: TextInstance, _old: string, next: string) {
         textInstance.text = next;
+        // text has no cache of its own; its serialized form lives in its parent.
+        markSerializeDirty(textInstance.parent);
     },
     finalizeInitialChildren: () => false,
     shouldSetTextContent: (type: string, props: Record<string, unknown>) =>

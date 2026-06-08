@@ -6,7 +6,7 @@
 //   rngpui get color 200,300 --attach
 //   rngpui do tap "Run" --launch examples/kitchen-sink.tsx
 //
-// GET commands introspect (tree / describe / layout / style / color / point); DO
+// GET commands introspect (tree / stats / webviews / describe / layout / style / color / point); DO
 // commands drive (tap / type / key / scroll / drag). Selectors substring-match testID /
 // identifier / nativeID / label / text / type, or `#<globalId>`, or `x,y`. `--json`
 // for machine output.
@@ -31,6 +31,9 @@ target (pick one; defaults to --attach):
 
 get (introspect — read-only):
   get tree                       full annotated node tree (bounds + ids)
+  get stats [selector]           aggregate node counts, visibility, duplicate IDs,
+                                 type/list-group counts, and webview totals
+  get webviews                   webview inventory: source, bounds, visibility
   get describe [selector]        path, ids, computed bounds, resolved style, AND
                                  sampled dominant/average color within the bounds
   get layout [selector]          computed window-coordinate bounds per node

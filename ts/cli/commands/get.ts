@@ -110,6 +110,74 @@ export async function runGet(host: Host, sub: string, args: string[], json: bool
             return 0;
         }
 
+        case "stats": {
+            const selector = args[0];
+            const root = selector ? matchNodes(dump, selector)[0] : dump;
+            if (!root) {
+                console.error(`  no node matched "${selector}"`);
+                return 1;
+            }
+            const stats = treeStats(root);
+            out(
+                json,
+                () => {
+                    console.log(
+                        `  nodes=${stats.nodes} visible=${stats.visible} hidden=${stats.hidden} interactive=${stats.interactive} maxDepth=${stats.maxDepth}`
+                    );
+                    console.log(
+                        `  webviews=${stats.webviews.total} visible=${stats.webviews.visible} hidden=${stats.webviews.hidden}`
+                    );
+                    if (stats.duplicateGlobalIds.length) {
+                        console.log(`  duplicate globalIds: ${stats.duplicateGlobalIds.join(", ")}`);
+                    }
+                    console.log(`  by type: ${formatCounts(stats.byType)}`);
+                    if (Object.keys(stats.byNativeListGroup).length) {
+                        console.log(`  list groups: ${formatCounts(stats.byNativeListGroup)}`);
+                    }
+                    if (Object.keys(stats.unpaintedByType).length) {
+                        console.log(`  unpainted by type: ${formatCounts(stats.unpaintedByType)}`);
+                    }
+                },
+                stats,
+            );
+            return 0;
+        }
+
+        case "webviews": {
+            const webviews = [...walk(dump)]
+                .filter((node) => node.type === "webview")
+                .map((node) => ({
+                    globalId: node.globalId,
+                    id: shortId(node),
+                    source: node.src ? { kind: "uri", value: node.src } : node.text ? { kind: "html", bytes: node.text.length } : null,
+                    bounds: node.bounds ?? null,
+                    visible: isVisible(node),
+                    display: node.style?.display ?? null,
+                }));
+            out(
+                json,
+                () => {
+                    if (!webviews.length) {
+                        console.log("  no webviews");
+                        return;
+                    }
+                    for (const webview of webviews) {
+                        const source =
+                            webview.source?.kind === "uri"
+                                ? webview.source.value
+                                : webview.source?.kind === "html"
+                                  ? `inline-html ${webview.source.bytes}b`
+                                  : "(no source)";
+                        console.log(
+                            `  webview ${webview.id} #${webview.globalId} [${webview.bounds ? `${webview.bounds.x.toFixed(0)},${webview.bounds.y.toFixed(0)} ${webview.bounds.width.toFixed(0)}x${webview.bounds.height.toFixed(0)}` : "—"}] visible=${webview.visible} display=${String(webview.display ?? "default")} source=${source}`
+                        );
+                    }
+                },
+                webviews,
+            );
+            return 0;
+        }
+
         case "describe": {
             const selector = args[0];
             const nodes: DumpNode[] = selector ? matchNodes(dump, selector) : [dump];
@@ -226,9 +294,84 @@ export async function runGet(host: Host, sub: string, args: string[], json: bool
 
         default:
             console.error(`  unknown get subcommand: ${sub}`);
-            console.error("  available: tree, describe, layout, style, color, point");
+            console.error("  available: tree, stats, webviews, describe, layout, style, color, point");
             return 1;
     }
+}
+
+type TreeStats = {
+    root: { globalId: number; type: string; id: string };
+    nodes: number;
+    visible: number;
+    hidden: number;
+    interactive: number;
+    maxDepth: number;
+    duplicateGlobalIds: number[];
+    byType: Record<string, number>;
+    unpaintedByType: Record<string, number>;
+    byNativeListGroup: Record<string, number>;
+    webviews: { total: number; visible: number; hidden: number };
+};
+
+function treeStats(root: DumpNode): TreeStats {
+    const seen = new Map<number, number>();
+    const byType: Record<string, number> = {};
+    const unpaintedByType: Record<string, number> = {};
+    const byNativeListGroup: Record<string, number> = {};
+    const webviews = { total: 0, visible: 0, hidden: 0 };
+    let nodes = 0;
+    let visible = 0;
+    let interactive = 0;
+    let maxDepth = 0;
+
+    const visit = (node: DumpNode, depth: number) => {
+        nodes += 1;
+        maxDepth = Math.max(maxDepth, depth);
+        seen.set(node.globalId, (seen.get(node.globalId) ?? 0) + 1);
+        byType[node.type] = (byType[node.type] ?? 0) + 1;
+        if (node.nativeListGroup) {
+            byNativeListGroup[node.nativeListGroup] = (byNativeListGroup[node.nativeListGroup] ?? 0) + 1;
+        }
+        if (node.events?.length) interactive += 1;
+        if (isVisible(node)) {
+            visible += 1;
+        } else {
+            unpaintedByType[node.type] = (unpaintedByType[node.type] ?? 0) + 1;
+        }
+        if (node.type === "webview") {
+            webviews.total += 1;
+            if (isVisible(node)) webviews.visible += 1;
+            else webviews.hidden += 1;
+        }
+        for (const child of node.children ?? []) visit(child, depth + 1);
+    };
+    visit(root, 0);
+
+    return {
+        root: { globalId: root.globalId, type: root.type, id: shortId(root) },
+        nodes,
+        visible,
+        hidden: nodes - visible,
+        interactive,
+        maxDepth,
+        duplicateGlobalIds: [...seen.entries()]
+            .filter(([, count]) => count > 1)
+            .map(([id]) => id)
+            .sort((a, b) => a - b),
+        byType: sortCounts(byType),
+        unpaintedByType: sortCounts(unpaintedByType),
+        byNativeListGroup: sortCounts(byNativeListGroup),
+        webviews,
+    };
+}
+
+function sortCounts(counts: Record<string, number>) {
+    return Object.fromEntries(Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])));
+}
+
+function formatCounts(counts: Record<string, number>) {
+    const entries = Object.entries(counts);
+    return entries.length ? entries.map(([key, value]) => `${key}=${value}`).join(" ") : "(none)";
 }
 
 function matchNodes(dump: DumpNode, selector: string): DumpNode[] {

@@ -62,6 +62,13 @@ and the **actual sampled pixel color** within those bounds.
 **`get` (read-only introspection):**
 
 - `get tree` — full annotated node tree (type, ids, computed bounds).
+- `get stats [selector]` — aggregate node counts, visible/hidden counts,
+  interactive count, max depth, duplicate `globalId`s, type counts, native list
+  group counts, and WebView totals. Use this first when checking leaks or drift:
+  repeated interactions should not make `nodes` or duplicate IDs climb.
+- `get webviews` — WebView inventory with inline/html source size, bounds,
+  `visible`, and `display`; use this to verify hidden kept-mounted WebViews are
+  retained but not painted.
 - `get describe [selector]` — per node: path, ids, **computed bounds**, resolved
   style, and **sampled dominant/average color** inside the bounds (+ `visible`).
 - `get layout [selector]` — computed bounds per node.

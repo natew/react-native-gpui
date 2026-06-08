@@ -654,15 +654,7 @@ unsafe fn configure_backing_view(view: id) {
 }
 
 #[cfg(target_os = "macos")]
-fn hide_webview_host(id: u64) {
-    // drop the cached geometry so the next show re-applies the frame even if the
-    // layout bounds are unchanged from before it was hidden.
-    WEBVIEW_LAST_BOUNDS.with(|b| {
-        b.borrow_mut().remove(&id);
-    });
-    WEBVIEW_LAST_HOST_STYLES.with(|s| {
-        s.borrow_mut().remove(&id);
-    });
+pub fn hide_webview_host(id: u64) {
     WEBVIEW_HOSTS.with(|hosts| {
         let Some(host) = hosts.borrow().get(&id).copied() else {
             return;

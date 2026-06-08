@@ -19,6 +19,7 @@ const tasks = [
     { name: "appearance", command: "bun", args: ["run", "scripts/appearance-conformance.ts"], cwd: root, timeoutMs: 10_000 },
     { name: "file-picker", command: "bun", args: ["run", "scripts/file-picker-conformance.ts"], cwd: root },
     { name: "display-none", command: "bun", args: ["run", "scripts/display-none-conformance.ts"], cwd: root },
+    { name: "diagnostics", command: "node", args: ["scripts/diagnostics-conformance.mjs"], cwd: root, timeoutMs: 15_000 },
     { name: "measure", command: "node", args: ["scripts/run-hermes-example.mjs", "examples/measure-conformance.tsx", "--timeout-ms", "8000"], cwd: root, env: conformanceEnv() },
     { name: "native-layout", command: "node", args: ["scripts/run-hermes-example.mjs", "examples/native-layout-conformance.tsx", "--timeout-ms", "8000"], cwd: root, env: conformanceEnv() },
     {

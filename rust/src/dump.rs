@@ -129,6 +129,27 @@ fn resolved_style(style: &ElementStyle) -> Map<String, Value> {
         m.insert("flexShrink".into(), json!(v));
     }
     insert_dim(&mut m, "flexBasis", style.flex_basis);
+    if let Some(v) = style.flex_direction.as_ref() {
+        m.insert("flexDirection".into(), json!(v));
+    }
+    if let Some(v) = style.justify_content.as_ref() {
+        m.insert("justifyContent".into(), json!(v));
+    }
+    if let Some(v) = style.align_items.as_ref() {
+        m.insert("alignItems".into(), json!(v));
+    }
+    if let Some(v) = style.align_self.as_ref() {
+        m.insert("alignSelf".into(), json!(v));
+    }
+    if let Some(v) = style.gap {
+        m.insert("gap".into(), json!(v));
+    }
+    if let Some(v) = style.row_gap {
+        m.insert("rowGap".into(), json!(v));
+    }
+    if let Some(v) = style.column_gap {
+        m.insert("columnGap".into(), json!(v));
+    }
     if let Some(v) = style.position.as_ref() {
         m.insert("position".into(), json!(v));
     }
@@ -159,6 +180,11 @@ fn resolved_style(style: &ElementStyle) -> Map<String, Value> {
     if let Some(v) = style.overflow.as_ref() {
         m.insert("overflow".into(), json!(v));
     }
+    insert_dim(&mut m, "padding", style.padding);
+    insert_dim(&mut m, "paddingTop", style.padding_top);
+    insert_dim(&mut m, "paddingRight", style.padding_right);
+    insert_dim(&mut m, "paddingBottom", style.padding_bottom);
+    insert_dim(&mut m, "paddingLeft", style.padding_left);
     if let Some(v) = style.box_shadow.as_ref() {
         m.insert("boxShadow".into(), json!(v));
     }

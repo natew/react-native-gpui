@@ -488,18 +488,23 @@ fn consume_suppressed_input_change(
     true
 }
 
-/// Collect (id, content, is_html) for every webview node. Prefers a `src` uri;
+/// Collect (id, content, is_html, hidden) for every webview node. Prefers a `src` uri;
 /// falls back to inline html carried in `text`.
-fn collect_webviews(el: &Arc<ReactElement>, out: &mut Vec<(u64, String, bool)>) {
+fn collect_webviews(
+    el: &Arc<ReactElement>,
+    inherited_hidden: bool,
+    out: &mut Vec<(u64, String, bool, bool)>,
+) {
+    let hidden = inherited_hidden || el.style.is_display_none();
     if el.element_type == "webview" {
         if let Some(uri) = el.src.clone() {
-            out.push((el.global_id, uri, false));
+            out.push((el.global_id, uri, false, hidden));
         } else if let Some(html) = el.text.clone() {
-            out.push((el.global_id, html, true));
+            out.push((el.global_id, html, true, hidden));
         }
     }
     for c in &el.children {
-        collect_webviews(c, out);
+        collect_webviews(c, hidden, out);
     }
 }
 
@@ -716,11 +721,11 @@ impl Render for ServiceApp {
         // Same lifecycle for <WebView>: create a native child view per id, then
         // let the element resize and load it once layout has real bounds.
         let mut wv_specs = Vec::new();
-        collect_webviews(&self.root, &mut wv_specs);
-        let present_wv: HashSet<u64> = wv_specs.iter().map(|(id, _, _)| *id).collect();
+        collect_webviews(&self.root, false, &mut wv_specs);
+        let present_wv: HashSet<u64> = wv_specs.iter().map(|(id, _, _, _)| *id).collect();
         self.webviews.retain(|id, _| present_wv.contains(id));
         let mut webview_content = HashMap::new();
-        for (id, content, is_html) in wv_specs {
+        for (id, content, is_html, hidden) in wv_specs {
             webview_content.insert(
                 id,
                 WebViewContent {
@@ -777,10 +782,16 @@ impl Render for ServiceApp {
                     builder.build_as_child(&window_handle)
                 };
                 let wv = wv.expect("failed to create webview");
-                let _ = wv.set_visible(true);
+                let _ = wv.set_visible(!hidden);
                 Rc::new(wv)
             });
-            let _ = view.set_visible(true);
+            if hidden {
+                #[cfg(target_os = "macos")]
+                elements::webview::hide_webview_host(id);
+                let _ = view.set_visible(false);
+            } else {
+                let _ = view.set_visible(true);
+            }
         }
         elements::webview::set_webviews(self.webviews.clone(), webview_content);
         if self.inspector.enabled() {

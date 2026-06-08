@@ -4,7 +4,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AttachedHost, DumpNode, LaunchedHost } from "../host";
+import { isDriveableHost, type AttachedHost, type DumpNode, type LaunchedHost } from "../host";
 import { isVisible, nodeAtPoint, parsePoint, resolve, walk } from "../selectors";
 import { averageColor, dominantColor, pixelAt } from "../../scripts/pixel.mjs";
 import { readPng } from "../../scripts/png.mjs";
@@ -64,8 +64,125 @@ function renderTree(node: DumpNode, depth: number, lines: string[], filter?: (n:
     for (const child of node.children ?? []) renderTree(child, depth + 1, lines, filter);
 }
 
+type ScreenSummary = {
+    target: {
+        mode: Host["mode"];
+        appName: string | null;
+        servicePid: number;
+        window: { id: number; width: number; height: number; owner: string; title: string };
+        driveable: boolean;
+        controlSocketPath: string | null;
+    };
+    stats: TreeStats;
+    webviews: Array<{ globalId: number; id: string; bounds: DumpNode["bounds"] | null; visible: boolean; source: string | null }>;
+    interactive: Array<{
+        globalId: number;
+        selector: string;
+        type: string;
+        bounds: DumpNode["bounds"] | null;
+        events: string[];
+        stateStyle: Record<string, unknown>;
+    }>;
+};
+
+function screenSummary(host: Host, dump: DumpNode): ScreenSummary {
+    const interactive = [...walk(dump)]
+        .filter((node) => isVisible(node) && !!node.events?.length)
+        .sort((a, b) => (a.bounds!.y - b.bounds!.y || a.bounds!.x - b.bounds!.x || areaOf(a) - areaOf(b)))
+        .slice(0, 40)
+        .map((node) => ({
+            globalId: node.globalId,
+            selector: selectorFor(node),
+            type: node.type,
+            bounds: node.bounds ?? null,
+            events: node.events ?? [],
+            stateStyle: stateStyleOf(node),
+        }));
+    const webviews = [...walk(dump)]
+        .filter((node) => node.type === "webview")
+        .map((node) => ({
+            globalId: node.globalId,
+            id: shortId(node),
+            bounds: node.bounds ?? null,
+            visible: isVisible(node),
+            source: node.src ?? (node.text ? `inline-html ${node.text.length}b` : null),
+        }));
+    return {
+        target: {
+            mode: host.mode,
+            appName: host.mode === "launch" ? host.appName : host.appName ?? null,
+            servicePid: host.servicePid,
+            window: {
+                id: host.window.id ?? host.window.window_id,
+                width: host.window.width,
+                height: host.window.height,
+                owner: host.window.owner,
+                title: host.window.title,
+            },
+            driveable: isDriveableHost(host),
+            controlSocketPath: host.mode === "attach" ? host.controlSocketPath ?? null : "(session)",
+        },
+        stats: treeStats(dump),
+        webviews,
+        interactive,
+    };
+}
+
+function printScreenSummary(summary: ScreenSummary) {
+    const t = summary.target;
+    console.log(
+        `  target: ${t.mode} ${t.appName ?? t.window.owner} pid=${t.servicePid} window=${t.window.width}x${t.window.height} driveable=${t.driveable}${t.controlSocketPath ? ` socket=${t.controlSocketPath}` : ""}`
+    );
+    console.log(
+        `  tree: nodes=${summary.stats.nodes} visible=${summary.stats.visible} hidden=${summary.stats.hidden} interactive=${summary.stats.interactive} webviews=${summary.stats.webviews.visible}/${summary.stats.webviews.total}`
+    );
+    if (summary.webviews.length) {
+        console.log("  webviews:");
+        for (const webview of summary.webviews.slice(0, 8)) {
+            console.log(`    ${webview.id} #${webview.globalId} [${webview.bounds ? `${webview.bounds.x.toFixed(0)},${webview.bounds.y.toFixed(0)} ${webview.bounds.width.toFixed(0)}x${webview.bounds.height.toFixed(0)}` : "-"}] visible=${webview.visible} source=${webview.source ?? "(none)"}`);
+        }
+    }
+    console.log("  tappable selectors:");
+    for (const node of summary.interactive.slice(0, 24)) {
+        const state = formatStateStyle(node.stateStyle);
+        console.log(`    ${JSON.stringify(node.selector)} #${node.globalId} ${node.type} [${node.bounds ? `${node.bounds.x.toFixed(0)},${node.bounds.y.toFixed(0)} ${node.bounds.width.toFixed(0)}x${node.bounds.height.toFixed(0)}` : "-"}] (${node.events.join(",")})${state ? ` ${state}` : ""}`);
+    }
+}
+
+function selectorFor(node: DumpNode): string {
+    const a = node.accessibility ?? {};
+    return cleanSelector(a.testID) ?? cleanSelector(a.identifier) ?? cleanSelector(a.nativeID) ?? cleanSelector(a.label) ?? cleanSelector(node.text) ?? shortId(node);
+}
+
+function cleanSelector(value: unknown): string | null {
+    if (typeof value !== "string") return null;
+    const cleaned = value.replace(/\s+/g, " ").trim();
+    return cleaned ? cleaned.slice(0, 120) : null;
+}
+
+function areaOf(node: DumpNode): number {
+    const b = node.bounds;
+    return b ? b.width * b.height : Infinity;
+}
+
+function stateStyleOf(node: DumpNode): Record<string, unknown> {
+    const style = node.style ?? {};
+    const out: Record<string, unknown> = {};
+    for (const key of ["backgroundColor", "borderColor", "boxShadow", "opacity", "display"]) {
+        const value = style[key];
+        if (value !== undefined && value !== "none" && value !== "#00000000") out[key] = value;
+    }
+    return out;
+}
+
+function formatStateStyle(style: Record<string, unknown>): string {
+    const entries = Object.entries(style);
+    return entries.length ? entries.map(([key, value]) => `${key}=${String(value)}`).join(" ") : "";
+}
+
 export async function runGet(host: Host, sub: string, args: string[], json: boolean): Promise<number> {
-    if (host.mode === "attach") {
+    const dump = await host.dump();
+    if (!dump) {
         if (sub === "color") {
             const pt = parsePoint(args[0] ?? "");
             if (!pt) {
@@ -88,17 +205,17 @@ export async function runGet(host: Host, sub: string, args: string[], json: bool
             });
             return color ? 0 : 1;
         }
-        console.error("  attached processes expose pixel capture only; use --launch, --bundle, or --session for tree introspection");
-        return 1;
-    }
-
-    const dump = await host.dump();
-    if (!dump) {
-        console.error("  no tree available (attached process exposes no dump; use --launch <entry.tsx> for full introspection)");
+        console.error("  no tree available (attach exposes trees only when the app publishes RNGPUI_CONTROL_SOCKET metadata)");
         return 1;
     }
 
     switch (sub) {
+        case "screen": {
+            const summary = screenSummary(host, dump);
+            out(json, () => printScreenSummary(summary), summary);
+            return 0;
+        }
+
         case "tree": {
             if (json) {
                 console.log(JSON.stringify(dump, null, 2));
@@ -180,6 +297,11 @@ export async function runGet(host: Host, sub: string, args: string[], json: bool
 
         case "describe": {
             const selector = args[0];
+            if (!selector) {
+                const summary = screenSummary(host, dump);
+                out(json, () => printScreenSummary(summary), summary);
+                return 0;
+            }
             const nodes: DumpNode[] = selector ? matchNodes(dump, selector) : [dump];
             if (nodes.length === 0) {
                 console.error(`  no node matched "${selector}"`);
@@ -294,7 +416,7 @@ export async function runGet(host: Host, sub: string, args: string[], json: bool
 
         default:
             console.error(`  unknown get subcommand: ${sub}`);
-            console.error("  available: tree, stats, webviews, describe, layout, style, color, point");
+            console.error("  available: screen, tree, stats, webviews, describe, layout, style, color, point");
             return 1;
     }
 }

@@ -59,9 +59,24 @@ export interface AttachedHost {
     mode: "attach";
     servicePid: number;
     window: GpuiWindow;
+    appName?: string;
+    controlSocketPath?: string;
+    dumpTreePath?: string;
+    request?<T = unknown>(cmd: object): Promise<T>;
     capture(path: string): void;
     dump(): Promise<DumpNode | null>;
     close(): void;
+}
+
+export type Host = LaunchedHost | AttachedHost;
+
+export type DriveableHost = Host & {
+    request<T = unknown>(cmd: object): Promise<T>;
+    dump(): Promise<DumpNode>;
+};
+
+export function isDriveableHost(host: Host): host is DriveableHost {
+    return typeof (host as { request?: unknown }).request === "function";
 }
 
 export type DumpNode = {
@@ -94,6 +109,15 @@ type SessionMeta = {
     size: string;
 };
 
+type OwnerMeta = {
+    owner?: string;
+    ownerLabel?: string;
+    appName?: string;
+    pidPath?: string;
+    controlSocketPath?: string;
+    dumpTreePath?: string;
+};
+
 type LaunchOptions = {
     size?: string;
     bundle?: string;
@@ -101,7 +125,9 @@ type LaunchOptions = {
 };
 
 function serviceBinary() {
-    const binary = resolve(process.env.RNGPUI_SERVICE || resolve(tsRoot, "..", "rust", "target", "release", "rngpui-service"));
+    const packaged = resolve(tsRoot, "native", "rngpui-service");
+    const dev = resolve(tsRoot, "..", "rust", "target", "release", "rngpui-service");
+    const binary = resolve(process.env.RNGPUI_SERVICE || (existsSync(packaged) ? packaged : dev));
     if (!existsSync(binary)) throw new Error(`rngpui-service not found: ${binary}`);
     stageServiceDylibs(binary);
     return binary;
@@ -109,6 +135,9 @@ function serviceBinary() {
 
 function stageServiceDylibs(binary: string) {
     const releaseDir = dirname(binary);
+    if (existsSync(join(releaseDir, "libhermesvm.dylib")) && findDylibs(releaseDir, "libghostty-vt").length > 0) {
+        return;
+    }
     const hermesRoot = resolve(process.env.HERMES_ROOT || "/Users/n8/github/hermes");
     const hermesDylib = resolve(hermesRoot, "build", "lib", "libhermesvm.dylib");
     if (!existsSync(hermesDylib)) throw new Error(`libhermesvm.dylib not found: ${hermesDylib}`);
@@ -331,28 +360,46 @@ function makeLaunchedHost({
 }
 
 export async function attachHost(): Promise<AttachedHost> {
-    const candidates = listWindows()
-        .filter((window: GpuiWindow) => window.title === "react-native-gpui" && window.owner !== "agentbus-gpui-user")
-        .sort((a: GpuiWindow, b: GpuiWindow) => b.width * b.height - a.width * a.height);
+    const candidates = (listWindows() as GpuiWindow[])
+        .filter((window) => window.title === "react-native-gpui")
+        .map((window) => ({ window, meta: ownerMetaForWindow(window) }))
+        .sort((a, b) => {
+            const ad = isMetaDriveable(a.meta) ? 0 : 1;
+            const bd = isMetaDriveable(b.meta) ? 0 : 1;
+            if (ad !== bd) return ad - bd;
+            return b.window.width * b.window.height - a.window.width * a.window.height;
+        });
     if (candidates.length === 0) {
         throw new Error("no running rngpui window found; launch one with --launch <entry.tsx> or --bundle <app.hbc>");
     }
-    const window = candidates[0];
-    return {
+    const { window, meta } = candidates[0];
+    const controlSocketPath = isMetaDriveable(meta) ? meta.controlSocketPath : undefined;
+    const request = controlSocketPath ? <T = unknown>(cmd: object) => requestSocket<T>(controlSocketPath, cmd) : undefined;
+    const attached: AttachedHost = {
         mode: "attach",
         servicePid: window.pid,
         window,
+        appName: meta?.appName ?? window.owner,
+        controlSocketPath,
+        dumpTreePath: meta?.dumpTreePath,
         capture(path: string) {
             const fresh = currentWindow(window.pid) ?? window;
             captureWindow(fresh, path);
         },
         async dump() {
+            if (request) {
+                const response = await request<{ ok: boolean; tree?: DumpNode; error?: string }>({ $cmd: "dump" });
+                if (!response.ok || !response.tree) throw new Error(response.error || "dump failed");
+                return response.tree;
+            }
             return null;
         },
         close() {
             /* read-only: never touch a process we do not own */
         },
     };
+    if (request) attached.request = request;
+    return attached;
 }
 
 export function currentWindow(servicePid: number): GpuiWindow | null {
@@ -398,6 +445,45 @@ function requestSocket<T>(socketPath: string, cmd: object): Promise<T> {
             }
         });
     });
+}
+
+function isMetaDriveable(meta: OwnerMeta | null): meta is OwnerMeta & { controlSocketPath: string } {
+    return !!meta?.controlSocketPath && existsSync(meta.controlSocketPath);
+}
+
+function ownerMetaForWindow(window: GpuiWindow): OwnerMeta | null {
+    const paths = new Set<string>([`/tmp/${window.owner}.owner.json`]);
+    try {
+        for (const entry of readdirSync("/tmp")) {
+            if (entry.endsWith(".owner.json")) paths.add(join("/tmp", entry));
+        }
+    } catch {
+        /* /tmp should exist, but attach can still work read-only without metadata */
+    }
+
+    for (const path of paths) {
+        const meta = readOwnerMeta(path);
+        if (!meta) continue;
+        if (meta.appName === window.owner) return meta;
+        if (meta.pidPath && pidPathMatches(meta.pidPath, window.pid)) return meta;
+    }
+    return null;
+}
+
+function readOwnerMeta(path: string): OwnerMeta | null {
+    try {
+        return JSON.parse(readFileSync(path, "utf8")) as OwnerMeta;
+    } catch {
+        return null;
+    }
+}
+
+function pidPathMatches(path: string, pid: number): boolean {
+    try {
+        return Number(readFileSync(path, "utf8").trim()) === pid;
+    } catch {
+        return false;
+    }
 }
 
 async function waitForSocket(path: string, exited?: () => boolean) {

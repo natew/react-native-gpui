@@ -16,8 +16,13 @@
         "rngpui": "./cli/bin.ts"
     },
     "files": [
+        "cli",
         "dist",
         "native",
+        "scripts/bundle-hermes.mjs",
+        "scripts/conformance-utils.mjs",
+        "scripts/pixel.mjs",
+        "scripts/png.mjs",
         "README.md"
     ],
     "scripts": {

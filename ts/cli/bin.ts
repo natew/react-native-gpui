@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // `rngpui` — the react-native-gpui developer CLI. A get/do devtool over a running OR
 // launched offscreen rngpui app, modeled on soot's sootsim CLI.
 //
@@ -14,11 +14,13 @@
 import { attachHost, attachSession, closeSession, launchHost, type AttachedHost, type LaunchedHost } from "./host";
 import { runGet } from "./commands/get";
 import { runDo } from "./commands/do";
+import { runFlow } from "./commands/flow";
 
 const HELP = `rngpui — react-native-gpui developer CLI
 
 usage:
   rngpui <get|do> <subcommand> [selector] [--launch <entry.tsx> | --bundle <app.hbc> | --session <dir> | --attach] [--json]
+  rngpui flow [--profile] tap <selector> [tap <selector> ...] [--out <dir>] [target]
   rngpui close --session <dir>
 
 target (pick one; defaults to --attach):
@@ -26,10 +28,12 @@ target (pick one; defaults to --attach):
   --bundle <app.hbc>     spawn rngpui-service against an existing Hermes bundle
   --keep                 keep the launched service alive and print its session dir
   --session <dir>        reuse a kept driveable session for do-then-get workflows
-  --attach               capture a running rngpui window read-only
+  --attach               attach to a running rngpui window; driveable only when
+                         owner metadata advertises RNGPUI_CONTROL_SOCKET
   --size <WxH>           launched window size (default 1280x860)
 
 get (introspect — read-only):
+  get screen                     actionable visible-screen summary
   get tree                       full annotated node tree (bounds + ids)
   get stats [selector]           aggregate node counts, visibility, duplicate IDs,
                                  type/list-group counts, and webview totals
@@ -41,12 +45,21 @@ get (introspect — read-only):
   get color <selector|x,y>       sampled dominant/average color in a node or at a point
   get point <x,y>                topmost node + pixel color at a window point
 
-do (drive — needs --launch):
+do (drive):
   do tap <selector|x,y>          synthesize a press at the node center / point
   do type <text>                 type into the focused input
   do key <key>                   send one key (enter, backspace, space, a, …)
   do scroll <selector|x,y> <dx,dy>  scroll the container at the point by a delta
   do drag <from> <to> [steps]    synthesize an owned offscreen press-drag
+
+flow:
+  flow --profile tap "Session A" tap "Session B"
+                                 run semantic taps and write trees/screenshots
+                                 plus profile.json (default /tmp/rngpui-flow-*)
+  --no-screenshots               keep profile timing clean for rapid stress flows
+  --settle-ms <n>                wait up to n ms for first tree change per step
+                                 (default 700; use 0 for rapid fire)
+  --cadence-ms <n>               fixed delay after each tap before the next step
 
 selectors:
   #42            globalId 42
@@ -58,6 +71,8 @@ examples:
   rngpui get tree --launch examples/kitchen-sink.tsx --keep
   rngpui do tap count-button --session /tmp/rngpui-cli-abc123
   rngpui get describe count-label --session /tmp/rngpui-cli-abc123
+  rngpui get describe --attach
+  rngpui flow --profile tap "Session A" tap "Session B" --attach
   rngpui close --session /tmp/rngpui-cli-abc123
   rngpui get color 640,400 --attach --json
 `;
@@ -75,6 +90,12 @@ function parseArgs(argv: string[]) {
         else if (a === "--session") flags.session = args[++i] ?? "";
         else if (a === "--keep") flags.keep = true;
         else if (a === "--size") flags.size = args[++i] ?? "";
+        else if (a === "--profile") flags.profile = true;
+        else if (a === "--screenshots") flags.screenshots = true;
+        else if (a === "--no-screenshots") flags.screenshots = false;
+        else if (a === "--settle-ms") flags.settleMs = args[++i] ?? "";
+        else if (a === "--cadence-ms") flags.cadenceMs = args[++i] ?? "";
+        else if (a === "--out") flags.out = args[++i] ?? "";
         else if (a === "-h" || a === "--help") flags.help = true;
         else positional.push(a);
     }
@@ -103,12 +124,12 @@ async function main(): Promise<number> {
         return 0;
     }
 
-    if (group !== "get" && group !== "do") {
+    if (group !== "get" && group !== "do" && group !== "flow") {
         console.error(`  unknown command group: ${group}`);
         console.error("  run `rngpui --help` for the surface.");
         return 1;
     }
-    if (!sub) {
+    if (!sub && group !== "flow") {
         console.error(`  ${group} needs a subcommand — run \`rngpui --help\``);
         return 1;
     }
@@ -134,7 +155,19 @@ async function main(): Promise<number> {
             host = await attachHost();
         }
 
-        const code = group === "get" ? await runGet(host, sub, rest, json) : await runDo(host, sub, rest, json);
+        const code =
+            group === "get"
+                ? await runGet(host, sub, rest, json)
+                : group === "do"
+                  ? await runDo(host, sub, rest, json)
+                  : await runFlow(host, sub ? [sub, ...rest] : rest, {
+                        json,
+                        profile: flags.profile === true,
+                        screenshots: flags.screenshots === undefined ? undefined : flags.screenshots === true,
+                        settleMs: flags.settleMs === undefined ? undefined : Number(flags.settleMs),
+                        cadenceMs: flags.cadenceMs === undefined ? undefined : Number(flags.cadenceMs),
+                        out: flags.out ? String(flags.out) : undefined,
+                    });
         if (flags.keep === true && host.mode === "launch") {
             console.error(`[rngpui] session ${host.sessionDir}`);
         }

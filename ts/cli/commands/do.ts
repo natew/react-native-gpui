@@ -1,7 +1,8 @@
-// `rngpui do …` — drive the live instance with synthetic input. Requires a
-// driveable launch/session target; an attached read-only target cannot be driven.
+// `rngpui do ...` - drive the live instance with synthetic input. Launched
+// sessions are driveable, and attached apps become driveable when their owner
+// metadata advertises a debug control socket.
 
-import type { AttachedHost, DumpNode, LaunchedHost } from "../host";
+import { isDriveableHost, type AttachedHost, type DriveableHost, type DumpNode, type LaunchedHost } from "../host";
 import { sleep } from "../../scripts/conformance-utils.mjs";
 import { centerOf, parsePoint, resolve } from "../selectors";
 
@@ -14,12 +15,11 @@ function shortId(node: DumpNode): string {
 }
 
 export async function runDo(host: Host, sub: string, args: string[], json: boolean): Promise<number> {
-    if (host.mode !== "launch") {
-        console.error("  do commands need a driveable target — use --launch <entry.tsx>, --bundle <app.hbc>, or --session <dir>");
-        console.error("  (an attached running process isn't ours to drive)");
+    if (!isDriveableHost(host)) {
+        console.error("  do commands need a driveable target: use --launch, --bundle, --session, or attach to an app with RNGPUI_CONTROL_SOCKET metadata");
         return 1;
     }
-    const launched = host;
+    const driveable = host;
 
     switch (sub) {
         case "tap": {
@@ -35,7 +35,7 @@ export async function runDo(host: Host, sub: string, args: string[], json: boole
             if (pt) {
                 ({ x, y } = pt);
             } else {
-                const dump = await launched.dump();
+                const dump = await driveable.dump();
                 const { best } = resolve(dump, selector);
                 if (!best) {
                     console.error(`  no node matched "${selector}"`);
@@ -49,7 +49,7 @@ export async function runDo(host: Host, sub: string, args: string[], json: boole
                 ({ x, y } = center);
                 label = `${shortId(best.node)} #${best.node.globalId}`;
             }
-            const response = await launched.request<ControlResponse>({ $cmd: "tap", x, y });
+            const response = await driveable.request<ControlResponse>({ $cmd: "tap", x, y });
             if (!response.ok) {
                 console.error(`  tap failed: ${response.error || "no native target"}`);
                 return 1;
@@ -66,7 +66,7 @@ export async function runDo(host: Host, sub: string, args: string[], json: boole
                 console.error("  usage: rngpui do type <text>");
                 return 1;
             }
-            const response = await launched.request<ControlResponse>({ $cmd: "type", text });
+            const response = await driveable.request<ControlResponse>({ $cmd: "type", text });
             if (!response.ok) {
                 console.error(`  type failed: ${response.error || "no focused input"}`);
                 return 1;
@@ -83,7 +83,7 @@ export async function runDo(host: Host, sub: string, args: string[], json: boole
                 console.error("  usage: rngpui do key <key>   (e.g. enter, backspace, space, a)");
                 return 1;
             }
-            const response = await launched.request<ControlResponse>({ $cmd: "key", key });
+            const response = await driveable.request<ControlResponse>({ $cmd: "key", key });
             if (!response.ok) {
                 console.error(`  key failed: ${response.error || "no focused input"}`);
                 return 1;
@@ -112,7 +112,7 @@ export async function runDo(host: Host, sub: string, args: string[], json: boole
             if (pt) {
                 ({ x, y } = pt);
             } else {
-                const dump = await launched.dump();
+                const dump = await driveable.dump();
                 const { best } = resolve(dump, target);
                 const center = best ? centerOf(best.node) : null;
                 if (!center) {
@@ -121,7 +121,7 @@ export async function runDo(host: Host, sub: string, args: string[], json: boole
                 }
                 ({ x, y } = center);
             }
-            const response = await launched.request<ControlResponse>({ $cmd: "scrollAt", x, y, dx: d.x, dy: d.y });
+            const response = await driveable.request<ControlResponse>({ $cmd: "scrollAt", x, y, dx: d.x, dy: d.y });
             if (!response.ok) {
                 console.error(`  scroll failed: ${response.error || "no scroll container"}`);
                 return 1;
@@ -140,10 +140,10 @@ export async function runDo(host: Host, sub: string, args: string[], json: boole
                 console.error("  usage: rngpui do drag <selector|x,y> <selector|x,y> [steps]");
                 return 1;
             }
-            const start = await resolveDrivePoint(launched, from);
-            const end = await resolveDrivePoint(launched, to);
+            const start = await resolveDrivePoint(driveable, from);
+            const end = await resolveDrivePoint(driveable, to);
             if (!start || !end) return 1;
-            const startResponse = await launched.request<ControlResponse>({
+            const startResponse = await driveable.request<ControlResponse>({
                 $cmd: "dragAt",
                 phase: "start",
                 x: start.x,
@@ -159,9 +159,9 @@ export async function runDo(host: Host, sub: string, args: string[], json: boole
                 const t = i / steps;
                 const x = start.x + (end.x - start.x) * t;
                 const y = start.y + (end.y - start.y) * t;
-                const response = await launched.request<ControlResponse>({ $cmd: "dragAt", phase: "move", x, y });
+                const response = await driveable.request<ControlResponse>({ $cmd: "dragAt", phase: "move", x, y });
                 if (!response.ok) {
-                    await launched.request<ControlResponse>({ $cmd: "dragAt", phase: "end", x, y });
+                    await driveable.request<ControlResponse>({ $cmd: "dragAt", phase: "end", x, y });
                     console.error(`  drag move failed: ${response.error || "no native target"}`);
                     return 1;
                 }
@@ -169,7 +169,7 @@ export async function runDo(host: Host, sub: string, args: string[], json: boole
                 lastTargetId = response.targetId;
                 await sleep(16);
             }
-            await launched.request<ControlResponse>({ $cmd: "dragAt", phase: "end", x: end.x, y: end.y });
+            await driveable.request<ControlResponse>({ $cmd: "dragAt", phase: "end", x: end.x, y: end.y });
             await sleep(150);
             if (json) console.log(JSON.stringify({ dragged: { from: start, to: end, steps, activations } }));
             else console.log(`  dragged ${steps} steps from ${start.x.toFixed(0)},${start.y.toFixed(0)} to ${end.x.toFixed(0)},${end.y.toFixed(0)}`);
@@ -183,10 +183,10 @@ export async function runDo(host: Host, sub: string, args: string[], json: boole
     }
 }
 
-async function resolveDrivePoint(launched: LaunchedHost, selector: string): Promise<{ x: number; y: number } | null> {
+async function resolveDrivePoint(driveable: DriveableHost, selector: string): Promise<{ x: number; y: number } | null> {
     const pt = parsePoint(selector);
     if (pt) return pt;
-    const dump = await launched.dump();
+    const dump = await driveable.dump();
     const { best } = resolve(dump, selector);
     const center = best ? centerOf(best.node) : null;
     if (!center) {

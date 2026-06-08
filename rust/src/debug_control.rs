@@ -109,6 +109,16 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
             y: number(value, "y")?,
             reply,
         }),
+        "dragAt" => Ok(Incoming::DebugDragAt {
+            phase: value
+                .get("phase")
+                .and_then(Value::as_str)
+                .ok_or("dragAt command needs phase")?
+                .to_string(),
+            x: number(value, "x")?,
+            y: number(value, "y")?,
+            reply,
+        }),
         "scrollAt" => Ok(Incoming::DebugScrollAt {
             x: number(value, "x")?,
             y: number(value, "y")?,

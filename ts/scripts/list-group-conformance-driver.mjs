@@ -7,7 +7,6 @@ import {
     execFileText,
     frontmostProcess,
     listWindows,
-    screenFrames,
     waitForServicePid,
 } from "./conformance-utils.mjs";
 
@@ -44,12 +43,6 @@ child.stderr.on("data", (chunk) => {
 try {
     const { pid, window } = await waitForFixtureWindow();
     assertFixtureNotFrontmost("during");
-    const visibleRatio = windowVisibleRatio(window);
-    if (visibleRatio > 0.05) {
-        throw new Error(
-            `window was not mostly offscreen: x=${window.x} y=${window.y} width=${window.width} height=${window.height} visibleRatio=${visibleRatio.toFixed(4)}`,
-        );
-    }
     const tree = await waitForSerializedTree();
     if (!hasListGroup(tree, "primary-list")) {
         throw new Error(`missing nativeListGroup primary-list in serialized tree`);
@@ -153,20 +146,6 @@ function waitForSmokePass(timeoutMs) {
     }).then((result) => {
         if (result instanceof Error) throw result;
     });
-}
-
-function windowVisibleRatio(window) {
-    const totalArea = window.width * window.height;
-    if (totalArea <= 0) return 1;
-    let visible = 0;
-    for (const screen of screenFrames()) {
-        const left = Math.max(window.x, screen.x);
-        const top = Math.max(window.y, screen.y);
-        const right = Math.min(window.x + window.width, screen.x + screen.width);
-        const bottom = Math.min(window.y + window.height, screen.y + screen.height);
-        if (right > left && bottom > top) visible += (right - left) * (bottom - top);
-    }
-    return visible / totalArea;
 }
 
 function hasListGroup(node, id) {

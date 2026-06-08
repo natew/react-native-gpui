@@ -1012,6 +1012,12 @@ pub(crate) enum Incoming {
         y: f32,
         reply: flume::Sender<serde_json::Value>,
     },
+    DebugDragAt {
+        phase: String,
+        x: f32,
+        y: f32,
+        reply: flume::Sender<serde_json::Value>,
+    },
     DebugScrollAt {
         x: f32,
         y: f32,
@@ -1755,6 +1761,82 @@ fn main() {
                                         "type": "tap",
                                         "error": "no tappable node at point",
                                     }));
+                                }
+                            }
+                            Incoming::DebugDragAt { phase, x, y, reply } => {
+                                let target = inspector::tap_target_at(&this.root, x, y);
+                                match phase.as_str() {
+                                    "start" => {
+                                        if let Some(target) = target {
+                                            elements::synth_drag_start(
+                                                target.id,
+                                                &target.events,
+                                                target.native_list_group.as_deref(),
+                                                target.bounds,
+                                                x,
+                                                y,
+                                            );
+                                            cx.notify();
+                                            let _ = reply.send(serde_json::json!({
+                                                "ok": true,
+                                                "type": "dragAt",
+                                                "phase": phase,
+                                                "targetId": target.id,
+                                            }));
+                                        } else {
+                                            let _ = reply.send(serde_json::json!({
+                                                "ok": false,
+                                                "type": "dragAt",
+                                                "phase": phase,
+                                                "error": "no draggable node at point",
+                                            }));
+                                        }
+                                    }
+                                    "move" => {
+                                        if let Some(target) = target {
+                                            let activated = elements::synth_drag_move(
+                                                target.id,
+                                                &target.events,
+                                                target.native_list_group.as_deref(),
+                                                target.bounds,
+                                                x,
+                                                y,
+                                            );
+                                            cx.notify();
+                                            let _ = reply.send(serde_json::json!({
+                                                "ok": true,
+                                                "type": "dragAt",
+                                                "phase": phase,
+                                                "targetId": target.id,
+                                                "activated": activated,
+                                            }));
+                                        } else {
+                                            let _ = reply.send(serde_json::json!({
+                                                "ok": false,
+                                                "type": "dragAt",
+                                                "phase": phase,
+                                                "error": "no draggable node at point",
+                                            }));
+                                        }
+                                    }
+                                    "end" => {
+                                        elements::synth_drag_end();
+                                        cx.notify();
+                                        let _ = reply.send(serde_json::json!({
+                                            "ok": true,
+                                            "type": "dragAt",
+                                            "phase": phase,
+                                            "targetId": target.map(|target| target.id),
+                                        }));
+                                    }
+                                    _ => {
+                                        let _ = reply.send(serde_json::json!({
+                                            "ok": false,
+                                            "type": "dragAt",
+                                            "phase": phase,
+                                            "error": "phase must be start, move, or end",
+                                        }));
+                                    }
                                 }
                             }
                             Incoming::DebugScrollAt {

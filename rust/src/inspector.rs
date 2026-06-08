@@ -160,6 +160,7 @@ struct InspectorHit {
     target: NodeSummary,
     bounds: Rect,
     events: Vec<String>,
+    native_list_group: Option<String>,
     value: Option<String>,
     style: Vec<String>,
     path: Vec<NodeSummary>,
@@ -184,6 +185,7 @@ pub struct TapTarget {
     pub id: u64,
     pub events: Vec<String>,
     pub bounds: (f32, f32, f32, f32),
+    pub native_list_group: Option<String>,
     pub focusable_input: bool,
 }
 
@@ -509,6 +511,7 @@ impl SnapshotMetadata {
             target: self.target,
             bounds,
             events: self.events,
+            native_list_group: None,
             value: self.value,
             style: self.style,
             path: self.path,
@@ -657,6 +660,7 @@ pub fn tap_target_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<TapTarg
             id: hit.target.id,
             focusable_input: is_input_type(&hit.target.element_type),
             events: hit.events,
+            native_list_group: hit.native_list_group,
             bounds: (
                 hit.bounds.x,
                 hit.bounds.y,
@@ -672,6 +676,7 @@ pub fn tap_target_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<TapTarg
         id: hit.target.id,
         focusable_input: is_input_type(&hit.target.element_type),
         events: hit.events,
+        native_list_group: hit.native_list_group,
         bounds: (
             hit.bounds.x,
             hit.bounds.y,
@@ -719,6 +724,7 @@ fn collect_hits(
             target: summary(element),
             bounds,
             events: element.events.clone(),
+            native_list_group: element.native_list_group.clone(),
             value: snippet(element.value.as_deref(), 120),
             style: style_facts(element),
             path: path.clone(),

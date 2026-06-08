@@ -7,7 +7,7 @@
 //   rngpui do tap "Run" --launch examples/kitchen-sink.tsx
 //
 // GET commands introspect (tree / describe / layout / style / color / point); DO
-// commands drive (tap / type / key / scroll). Selectors substring-match testID /
+// commands drive (tap / type / key / scroll / drag). Selectors substring-match testID /
 // identifier / nativeID / label / text / type, or `#<globalId>`, or `x,y`. `--json`
 // for machine output.
 
@@ -43,6 +43,7 @@ do (drive — needs --launch):
   do type <text>                 type into the focused input
   do key <key>                   send one key (enter, backspace, space, a, …)
   do scroll <selector|x,y> <dx,dy>  scroll the container at the point by a delta
+  do drag <from> <to> [steps]    synthesize an owned offscreen press-drag
 
 selectors:
   #42            globalId 42

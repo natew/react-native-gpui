@@ -74,12 +74,24 @@ struct ActivePressDrag {
     start_cancelled: bool,
 }
 
+#[derive(Clone, Debug)]
+struct DragReleaseTarget {
+    id: u64,
+    events: Vec<String>,
+    bounds: Bounds<Pixels>,
+    position: Point<Pixels>,
+}
+
 static SCROLL: Lazy<Mutex<HashMap<u64, ScrollOffset>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static SCROLL_TO_END: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static ACTIVE_MOUSE_TARGET: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
 static CAPTURED_MOUSE_UP_TARGET: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
 static ACTIVE_PRESS_DRAG: Lazy<Mutex<Option<ActivePressDrag>>> = Lazy::new(|| Mutex::new(None));
+static SYNTH_DRAG_START_TARGET: Lazy<Mutex<Option<DragReleaseTarget>>> =
+    Lazy::new(|| Mutex::new(None));
+static SYNTH_DRAG_LAST_TARGET: Lazy<Mutex<Option<DragReleaseTarget>>> =
+    Lazy::new(|| Mutex::new(None));
 static NATIVE_LAYOUT_OVERRIDES: Lazy<Mutex<HashMap<String, NativeLayoutOverride>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static NATIVE_LAYOUT_FRAMES: Lazy<Mutex<HashMap<String, NativeLayoutFrame>>> =
@@ -549,6 +561,294 @@ pub fn synth_tap(id: u64, events: &[String], bounds: (f32, f32, f32, f32), x: f3
     finish_pointer_gesture();
 }
 
+/// start a synthetic drag on an owned debug-session target. this follows the same
+/// state machine as a live left mouse-down, without posting OS-level input or
+/// stealing focus from the user.
+pub fn synth_drag_start(
+    id: u64,
+    events: &[String],
+    group: Option<&str>,
+    bounds: (f32, f32, f32, f32),
+    x: f32,
+    y: f32,
+) {
+    let position = point(px(x), px(y));
+    let bounds = Bounds {
+        origin: point(px(bounds.0), px(bounds.1)),
+        size: gpui::size(px(bounds.2), px(bounds.3)),
+    };
+    let press_action = events_have_press_action(events);
+    finish_pointer_gesture();
+    *ACTIVE_MOUSE_TARGET.lock().unwrap() = Some(id);
+    *CAPTURED_MOUSE_UP_TARGET.lock().unwrap() = None;
+    let target = DragReleaseTarget {
+        id,
+        events: events.to_vec(),
+        bounds,
+        position,
+    };
+    *SYNTH_DRAG_START_TARGET.lock().unwrap() = Some(target.clone());
+    *SYNTH_DRAG_LAST_TARGET.lock().unwrap() = Some(target);
+    if press_action {
+        *ACTIVE_PRESS_DRAG.lock().unwrap() = Some(ActivePressDrag {
+            start_id: id,
+            group: group.map(str::to_string),
+            did_activate: false,
+            left_start: false,
+            start_events: events.to_vec(),
+            start_bounds: bounds,
+            start_cancelled: false,
+        });
+    }
+    emit_mouse_if(
+        id,
+        events.iter().any(|event| event == "mouseDown"),
+        "mouseDown",
+        position,
+        bounds,
+        Modifiers::default(),
+    );
+    emit_mouse_if(
+        id,
+        events.iter().any(|event| event == "pointerDown"),
+        "pointerDown",
+        position,
+        bounds,
+        Modifiers::default(),
+    );
+    emit_mouse_if(
+        id,
+        events.iter().any(|event| event == "touchStart"),
+        "touchStart",
+        position,
+        bounds,
+        Modifiers::default(),
+    );
+    emit_mouse_if(
+        id,
+        events
+            .iter()
+            .any(|event| event == "startShouldSetResponderCapture"),
+        "startShouldSetResponderCapture",
+        position,
+        bounds,
+        Modifiers::default(),
+    );
+    emit_mouse_if(
+        id,
+        events
+            .iter()
+            .any(|event| event == "startShouldSetResponder"),
+        "startShouldSetResponder",
+        position,
+        bounds,
+        Modifiers::default(),
+    );
+    emit_mouse_if(
+        id,
+        events.iter().any(|event| event == "responderStart"),
+        "responderStart",
+        position,
+        bounds,
+        Modifiers::default(),
+    );
+    emit_mouse_if(
+        id,
+        events.iter().any(|event| event == "responderGrant"),
+        "responderGrant",
+        position,
+        bounds,
+        Modifiers::default(),
+    );
+    emit_mouse_if(
+        id,
+        events.iter().any(|event| event == "pressIn"),
+        "pressIn",
+        position,
+        bounds,
+        Modifiers::default(),
+    );
+}
+
+/// move a synthetic drag over a target. grouped press targets activate through
+/// `activate_drag_press_if_needed`, the same path live mouse movement uses when a
+/// pressed pointer sweeps into another row.
+pub fn synth_drag_move(
+    id: u64,
+    events: &[String],
+    group: Option<&str>,
+    bounds: (f32, f32, f32, f32),
+    x: f32,
+    y: f32,
+) -> bool {
+    let position = point(px(x), px(y));
+    let bounds = Bounds {
+        origin: point(px(bounds.0), px(bounds.1)),
+        size: gpui::size(px(bounds.2), px(bounds.3)),
+    };
+    let group = group.map(str::to_string);
+    let entered = {
+        let mut last = SYNTH_DRAG_LAST_TARGET.lock().unwrap();
+        let changed = last.as_ref().is_none_or(|target| target.id != id);
+        *last = Some(DragReleaseTarget {
+            id,
+            events: events.to_vec(),
+            bounds,
+            position,
+        });
+        changed
+    };
+    let activated = if entered && events_have_press_action(events) {
+        activate_drag_press_if_needed(id, &group, events, position, bounds, Modifiers::default())
+    } else {
+        false
+    };
+    let active_target = *ACTIVE_MOUSE_TARGET.lock().unwrap();
+    if target_receives_captured_pointer_event(active_target, id, true) {
+        emit_mouse_if(
+            id,
+            events.iter().any(|event| event == "mouseMove"),
+            "mouseMove",
+            position,
+            bounds,
+            Modifiers::default(),
+        );
+        emit_mouse_if(
+            id,
+            events.iter().any(|event| event == "pointerMove"),
+            "pointerMove",
+            position,
+            bounds,
+            Modifiers::default(),
+        );
+        emit_mouse_if(
+            id,
+            events.iter().any(|event| event == "touchMove"),
+            "touchMove",
+            position,
+            bounds,
+            Modifiers::default(),
+        );
+        emit_mouse_if(
+            id,
+            events.iter().any(|event| event == "responderMove"),
+            "responderMove",
+            position,
+            bounds,
+            Modifiers::default(),
+        );
+    }
+    activated
+}
+
+/// finish a synthetic drag with the same release cleanup the live mouse-up path emits.
+pub fn synth_drag_end() {
+    let start = SYNTH_DRAG_START_TARGET.lock().unwrap().clone();
+    let last = SYNTH_DRAG_LAST_TARGET.lock().unwrap().clone();
+    let active_target = *ACTIVE_MOUSE_TARGET.lock().unwrap();
+    let mut target = match (active_target, start, last) {
+        (Some(active_id), Some(start), last) if active_id == start.id => {
+            let position = last
+                .as_ref()
+                .map(|target| target.position)
+                .unwrap_or(start.position);
+            DragReleaseTarget { position, ..start }
+        }
+        (Some(active_id), _, Some(last)) if active_id == last.id => last,
+        (_, _, Some(last)) => last,
+        (_, Some(start), _) => start,
+        _ => {
+            finish_pointer_gesture();
+            return;
+        }
+    };
+    if let Some(last) = SYNTH_DRAG_LAST_TARGET.lock().unwrap().clone() {
+        target.position = last.position;
+    }
+    let captured_up_target = *CAPTURED_MOUSE_UP_TARGET.lock().unwrap();
+    let captured = active_target == Some(target.id);
+    let suppress_action = captured && press_drag_should_suppress_captured_action(target.id);
+    let inside = target.bounds.contains(&target.position);
+    if target_receives_pointer_up_event(active_target, captured_up_target, target.id, inside) {
+        if captured {
+            *ACTIVE_MOUSE_TARGET.lock().unwrap() = None;
+            *CAPTURED_MOUSE_UP_TARGET.lock().unwrap() = Some(target.id);
+            *ACTIVE_PRESS_DRAG.lock().unwrap() = None;
+        }
+        emit_mouse_if(
+            target.id,
+            target.events.iter().any(|event| event == "mouseUp") && !suppress_action,
+            "mouseUp",
+            target.position,
+            target.bounds,
+            Modifiers::default(),
+        );
+        emit_mouse_if(
+            target.id,
+            target.events.iter().any(|event| event == "pointerUp") && !suppress_action,
+            "pointerUp",
+            target.position,
+            target.bounds,
+            Modifiers::default(),
+        );
+        emit_mouse_if(
+            target.id,
+            target.events.iter().any(|event| event == "touchEnd") && !suppress_action,
+            "touchEnd",
+            target.position,
+            target.bounds,
+            Modifiers::default(),
+        );
+        emit_mouse_if(
+            target.id,
+            target
+                .events
+                .iter()
+                .any(|event| event == "responderRelease")
+                && !suppress_action,
+            "responderRelease",
+            target.position,
+            target.bounds,
+            Modifiers::default(),
+        );
+        emit_mouse_if(
+            target.id,
+            target.events.iter().any(|event| event == "responderEnd"),
+            "responderEnd",
+            target.position,
+            target.bounds,
+            Modifiers::default(),
+        );
+        emit_mouse_if(
+            target.id,
+            target.events.iter().any(|event| event == "pressOut") && !suppress_action,
+            "pressOut",
+            target.position,
+            target.bounds,
+            Modifiers::default(),
+        );
+        if inside {
+            emit_mouse_if(
+                target.id,
+                target.events.iter().any(|event| event == "press") && !suppress_action,
+                "press",
+                target.position,
+                target.bounds,
+                Modifiers::default(),
+            );
+            emit_mouse_if(
+                target.id,
+                target.events.iter().any(|event| event == "click") && !suppress_action,
+                "click",
+                target.position,
+                target.bounds,
+                Modifiers::default(),
+            );
+        }
+    }
+    finish_pointer_gesture();
+}
+
 fn emit_press_cancel_sequence(
     id: u64,
     events: &[String],
@@ -624,6 +924,8 @@ pub fn finish_pointer_gesture() {
     *ACTIVE_MOUSE_TARGET.lock().unwrap() = None;
     *CAPTURED_MOUSE_UP_TARGET.lock().unwrap() = None;
     *ACTIVE_PRESS_DRAG.lock().unwrap() = None;
+    *SYNTH_DRAG_START_TARGET.lock().unwrap() = None;
+    *SYNTH_DRAG_LAST_TARGET.lock().unwrap() = None;
 }
 
 /// (clip, scroll) for an overflow value.

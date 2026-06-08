@@ -47,7 +47,9 @@ mod style;
 
 use elements::webview::WebViewContent;
 use elements::{AccessibilityInfo, ReactElement, create_element};
-use elements::{NativeResizeEdge, NativeResizeSpec, TerminalFrame, TerminalFrameKind};
+use elements::{
+    NativeResizeEdge, NativeResizeSpec, SystemShadowSpec, TerminalFrame, TerminalFrameKind,
+};
 use raw_window_handle::HasWindowHandle;
 use style::{Dim, ElementStyle};
 
@@ -104,6 +106,23 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         .get("src")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    // <SystemView> native surface props: NSVisualEffectView material, NSGlassEffectView
+    // variant, tint overlay color, and a native outer drop shadow.
+    let system_material = obj
+        .get("systemMaterial")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let system_glass_variant = obj
+        .get("systemGlassVariant")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let system_tint = obj
+        .get("systemTint")
+        .and_then(|v| v.as_str())
+        .and_then(crate::style::parse_css_color);
+    let system_shadow = obj.get("systemShadow").and_then(parse_system_shadow);
     let value = obj
         .get("value")
         .and_then(|v| v.as_str())
@@ -199,6 +218,10 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         number_of_lines,
         runs,
         src,
+        system_material,
+        system_glass_variant,
+        system_tint,
+        system_shadow,
         value,
         secure_text_entry,
         editable,
@@ -272,6 +295,40 @@ fn parse_native_resize(value: &serde_json::Value) -> Option<NativeResizeSpec> {
     })
 }
 
+// Parse `<SystemView shadow={{ color, radius, offsetX, offsetY, opacity }}>` into a
+// SystemShadowSpec. Sensible defaults: black, radius 0, no offset, opacity 0.25 (or
+// baked into the color's alpha when no explicit `opacity` is given).
+fn parse_system_shadow(value: &serde_json::Value) -> Option<SystemShadowSpec> {
+    let obj = value.as_object()?;
+    let color = obj
+        .get("color")
+        .and_then(|v| v.as_str())
+        .and_then(crate::style::parse_css_color)
+        .unwrap_or(gpui::Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.0,
+            a: 1.0,
+        });
+    let radius = obj.get("radius").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let offset_x = obj.get("offsetX").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let offset_y = obj.get("offsetY").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    // explicit `opacity` wins; otherwise fall back to the color's own alpha, then 0.25.
+    let opacity = obj
+        .get("opacity")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32)
+        .unwrap_or_else(|| if color.a < 1.0 { color.a } else { 0.25 })
+        .clamp(0.0, 1.0);
+    Some(SystemShadowSpec {
+        color,
+        radius,
+        offset_x,
+        offset_y,
+        opacity,
+    })
+}
+
 fn parse_point_env(name: &str) -> Option<Point<Pixels>> {
     let value = std::env::var(name).ok()?;
     let mut parts = value.split(',').map(str::trim);
@@ -281,6 +338,33 @@ fn parse_point_env(name: &str) -> Option<Point<Pixels>> {
         return None;
     }
     Some(point(px(x), px(y)))
+}
+
+// Compute a window origin anchored to the active display (bottom-center, center,
+// …), so the launcher never has to know the screen size — gpui knows it natively.
+// Driven by RNGPUI_WINDOW_ANCHOR; the gap from the screen edge is
+// RNGPUI_WINDOW_MARGIN (default 72px). None when no anchor is set or no display.
+fn anchored_window_origin(win_w: f32, win_h: f32, cx: &App) -> Option<Point<Pixels>> {
+    let anchor = std::env::var("RNGPUI_WINDOW_ANCHOR").ok()?;
+    let display = cx.primary_display()?;
+    let b = display.bounds();
+    let dx = f32::from(b.origin.x);
+    let dy = f32::from(b.origin.y);
+    let dw = f32::from(b.size.width);
+    let dh = f32::from(b.size.height);
+    let margin = std::env::var("RNGPUI_WINDOW_MARGIN")
+        .ok()
+        .and_then(|m| m.trim().parse::<f32>().ok())
+        .unwrap_or(72.0);
+    let (x, y) = match anchor.trim() {
+        "bottom-center" => (dx + (dw - win_w) / 2.0, dy + dh - win_h - margin),
+        "bottom-left" => (dx + margin, dy + dh - win_h - margin),
+        "bottom-right" => (dx + dw - win_w - margin, dy + dh - win_h - margin),
+        "center" => (dx + (dw - win_w) / 2.0, dy + (dh - win_h) / 2.0),
+        "top-center" => (dx + (dw - win_w) / 2.0, dy + margin),
+        _ => return None,
+    };
+    Some(point(px(x.max(dx)), px(y.max(dy))))
 }
 
 fn parse_accessibility(value: &serde_json::Value) -> Option<AccessibilityInfo> {
@@ -505,6 +589,16 @@ fn collect_webviews(
     }
     for c in &el.children {
         collect_webviews(c, hidden, out);
+    }
+}
+
+/// Collect ids of every `<SystemView>` node, to tear down native views for absent ones.
+fn collect_system_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
+    if el.element_type == "system" {
+        out.insert(el.global_id);
+    }
+    for c in &el.children {
+        collect_system_ids(c, out);
     }
 }
 
@@ -794,6 +888,15 @@ impl Render for ServiceApp {
             }
         }
         elements::webview::set_webviews(self.webviews.clone(), webview_content);
+
+        // Parallel lifecycle for <SystemView>: tear down the native surface/tint/shadow
+        // views for any id that left the tree (card closed/removed). The views themselves
+        // are created lazily in the element's prepaint, so retaining present ids is all
+        // we do here.
+        let mut system_ids = HashSet::new();
+        collect_system_ids(&self.root, &mut system_ids);
+        elements::system::retain_system_views(&system_ids);
+
         if self.inspector.enabled() {
             inspector::refresh_snapshot_cache(&self.root);
         }
@@ -907,6 +1010,10 @@ fn fallback_root() -> Arc<ReactElement> {
         number_of_lines: None,
         runs: Vec::new(),
         src: None,
+        system_material: None,
+        system_glass_variant: None,
+        system_tint: None,
+        system_shadow: None,
         value: None,
         secure_text_entry: false,
         editable: true,
@@ -1355,6 +1462,13 @@ fn main() {
         let (win_w, win_h) = parse_point_env("RNGPUI_WINDOW_SIZE")
             .map(|p| (f32::from(p.x), f32::from(p.y)))
             .unwrap_or((win_w, win_h));
+        // anchor to the active display (bottom-center, center, …) when requested;
+        // gpui knows the real screen, so the launcher never computes coordinates.
+        let window_origin = if offscreen_test_window {
+            window_origin
+        } else {
+            anchored_window_origin(win_w, win_h, cx).unwrap_or(window_origin)
+        };
         let app_root = fill_root(initial);
         bridge::ready(win_w, win_h);
 
@@ -1379,7 +1493,9 @@ fn main() {
                 origin: window_origin,
                 size: size(px(win_w), px(win_h)),
             })),
-            titlebar: if test_mode {
+            // borderless/HUD mode (RNGPUI_BORDERLESS) drops the titlebar + traffic
+            // lights entirely, for a floating spotlight-style window.
+            titlebar: if test_mode || std::env::var("RNGPUI_BORDERLESS").is_ok() {
                 None
             } else {
                 Some(TitlebarOptions {

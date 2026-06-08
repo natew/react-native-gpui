@@ -120,6 +120,112 @@ export interface SvgProps extends AccessibilityProps {
 /** `<Svg name="branch.svg" />` — a monochrome icon tinted by `style.color`. */
 export const Svg = "Svg" as unknown as FC<SvgProps>;
 
+/**
+ * The classic `NSVisualEffectView` semantic materials (the full AppKit set). Used for
+ * a `<SystemView>` backdrop blur on every macOS version.
+ */
+export type SystemViewMaterial =
+    | "titlebar"
+    | "selection"
+    | "menu"
+    | "popover"
+    | "sidebar"
+    | "headerView"
+    | "sheet"
+    | "windowBackground"
+    | "hudWindow"
+    | "fullScreenUI"
+    | "toolTip"
+    | "contentBackground"
+    | "underWindowBackground"
+    | "underPageBackground";
+
+/**
+ * macOS 26 `NSGlassEffectView` liquid-glass variants (the full set from the
+ * liquid-glass plugin's `GlassMaterialVariant`). Falls back to `material` below 26.
+ */
+export type SystemViewGlassVariant =
+    | "regular"
+    | "clear"
+    | "dock"
+    | "appIcons"
+    | "widgets"
+    | "text"
+    | "avplayer"
+    | "facetime"
+    | "controlCenter"
+    | "notificationCenter"
+    | "monogram"
+    | "bubbles"
+    | "identity"
+    | "focusBorder"
+    | "focusPlatter"
+    | "keyboard"
+    | "sidebar"
+    | "abuttedSidebar"
+    | "inspector"
+    | "control"
+    | "loupe"
+    | "slider"
+    | "camera"
+    | "cartouchePopover";
+
+/** a `<SystemView>` native outer drop shadow (drawn below the surface, spills outward). */
+export interface SystemViewShadow {
+    /** shadow color — accepts hex `#RRGGBB` / `#RRGGBBAA` (alpha used if `opacity` omitted). */
+    color?: ColorValue;
+    /** blur radius in px. */
+    radius?: number;
+    /** horizontal offset in px (+x right). */
+    offsetX?: number;
+    /** vertical offset in px (+y down). */
+    offsetY?: number;
+    /** 0..1 shadow opacity (overrides any alpha baked into `color`). */
+    opacity?: number;
+}
+
+export interface SystemViewProps extends AccessibilityProps {
+    children?: ReactNode;
+    style?: StyleProp<ViewStyle>;
+    /**
+     * `NSVisualEffectView` backdrop material (the full AppKit semantic set). When
+     * omitted (and no `glassVariant`), the surface carries NO blur — only the optional
+     * tint and/or shadow. An unknown value falls back to the HUD material.
+     */
+    material?: SystemViewMaterial;
+    /**
+     * macOS 26 `NSGlassEffectView` liquid-glass variant. When set and available
+     * (macOS 26+), the surface is a glass view with this variant; otherwise it falls
+     * back to `material` (or the HUD material). `blendingMode` is always BehindWindow.
+     */
+    glassVariant?: SystemViewGlassVariant;
+    /** optional tint overlaid on the surface so foreground text stays legible. */
+    tint?: ColorValue;
+    /** optional native outer drop shadow (spills outside the rounded rect). */
+    shadow?: SystemViewShadow;
+    onLayout?: (event: LayoutChangeEvent) => void;
+}
+
+/**
+ * `<SystemView>` — a native macOS surface parked behind the (transparent) app window
+ * within just this element's rounded rect. It can composite a backdrop blur
+ * (`material` / `glassVariant`), a `tint`, and a true outer drop `shadow`, any of which
+ * are optional. Transparent window regions stay crisp; the surface follows the
+ * element's layout bounds and RN opacity animations. Place one absolutely-filling a
+ * card's background:
+ *
+ *   <View style={{ borderRadius: 16, overflow: "hidden" }}>
+ *     <SystemView
+ *       material="hudWindow"
+ *       tint="#ffffff14"
+ *       shadow={{ color: "#000000", radius: 24, offsetY: 8, opacity: 0.35 }}
+ *       style={[StyleSheet.absoluteFill, { borderRadius: 16 }]}
+ *     />
+ *     <Text>foreground stays crisp</Text>
+ *   </View>
+ */
+export const SystemView = "SystemView" as unknown as FC<SystemViewProps>;
+
 export interface WebViewMessageEvent {
     nativeEvent: { data: string };
 }

@@ -152,7 +152,7 @@ function cssNumber(value: unknown): number | undefined {
     return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function cssColorString(value: unknown): string | undefined {
+export function cssColorString(value: unknown): string | undefined {
     if (typeof value !== "string") return undefined;
     return value.replace(/\b(rgba?|hsla?)\(([^)]*)\)/gi, (_match, fn, inner) => {
         return `${fn}(${String(inner).replace(/\s*,\s*/g, ",").replace(/\s+/g, " ").trim()})`;

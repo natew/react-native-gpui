@@ -250,8 +250,11 @@ fn webview_object(view: &wry::WebView) -> id {
     (&*webview) as *const _ as id
 }
 
+// Shared with blur.rs: resolve gpui's Metal NSView's parent + the Metal view itself,
+// installing the transparent-window backing if needed. Both native-underlay elements
+// (webview, blur) park their child views in this parent BELOW the Metal view.
 #[cfg(target_os = "macos")]
-fn webview_parent(window: &mut Window) -> Option<(id, id)> {
+pub(crate) fn webview_parent(window: &mut Window) -> Option<(id, id)> {
     let gpui_view = raw_ns_view(window)?;
 
     unsafe {
@@ -585,8 +588,10 @@ fn position_webview_host(
     }
 }
 
+// Shared with blur.rs: per-frame change detection so we only re-setFrame native
+// views when their geometry actually moved (avoids CoreAnimation churn / flicker).
 #[cfg(target_os = "macos")]
-fn bounds_close(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
+pub(crate) fn bounds_close(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
     const EPS: f64 = 0.01;
     (a.0 - b.0).abs() < EPS
         && (a.1 - b.1).abs() < EPS
@@ -648,8 +653,17 @@ fn webview_shadow_style(style: &ElementStyle) -> Option<WebViewShadow> {
     })
 }
 
+// Shared with blur.rs: set a child view's frame in the parent's coordinate space,
+// flipping y when the parent uses AppKit's default bottom-left origin.
 #[cfg(target_os = "macos")]
-unsafe fn set_child_frame(parent: id, child: id, x: f64, y: f64, width: f64, height: f64) {
+pub(crate) unsafe fn set_child_frame(
+    parent: id,
+    child: id,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) {
     let flipped: bool = msg_send![parent, isFlipped];
     let origin_y = if flipped {
         y
@@ -661,8 +675,10 @@ unsafe fn set_child_frame(parent: id, child: id, x: f64, y: f64, width: f64, hei
     let _: () = msg_send![child, setFrame: frame];
 }
 
+// Shared with blur.rs: make an NSView layer-backed + fully transparent so gpui's
+// Metal content and the desktop behind both show through where nothing is drawn.
 #[cfg(target_os = "macos")]
-unsafe fn configure_transparent_view(view: id) {
+pub(crate) unsafe fn configure_transparent_view(view: id) {
     if view == nil {
         return;
     }
@@ -944,8 +960,9 @@ unsafe fn apply_webview_base_color(webview: id, color: Option<Hsla>) {
     }
 }
 
+// Shared with blur.rs: convert a gpui Hsla into straight sRGB components for NSColor.
 #[cfg(target_os = "macos")]
-fn hsla_to_srgb(color: Hsla) -> (f64, f64, f64, f64) {
+pub(crate) fn hsla_to_srgb(color: Hsla) -> (f64, f64, f64, f64) {
     let h = f64::from(color.h.rem_euclid(1.0));
     let s = f64::from(color.s.clamp(0.0, 1.0));
     let l = f64::from(color.l.clamp(0.0, 1.0));

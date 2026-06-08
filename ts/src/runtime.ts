@@ -22,6 +22,20 @@ export type SerializedNode = {
     src?: string;
     name?: string;
     placeholder?: string;
+    /** `<SystemView>` NSVisualEffectView material name */
+    systemMaterial?: string;
+    /** `<SystemView>` NSGlassEffectView liquid-glass variant name (macOS 26+) */
+    systemGlassVariant?: string;
+    /** `<SystemView>` optional tint overlay, as a CSS color string */
+    systemTint?: string;
+    /** `<SystemView>` optional native outer drop shadow */
+    systemShadow?: {
+        color?: string;
+        radius?: number;
+        offsetX?: number;
+        offsetY?: number;
+        opacity?: number;
+    };
     events?: string[];
     children?: SerializedNode[];
     /** inline styled runs for `<Text>` with nested `<Text>` children */

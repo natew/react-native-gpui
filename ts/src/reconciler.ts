@@ -1,7 +1,8 @@
 import { createContext } from "react";
 import ReactReconciler from "react-reconciler";
 import { DefaultEventPriority, NoEventPriority } from "react-reconciler/constants";
-import { normalizeStyle } from "./StyleSheet";
+import { cssColorString, normalizeStyle } from "./StyleSheet";
+import { resolveColorValue } from "./colors";
 import type { SerializedAccessibility, SerializedNode } from "./runtime";
 
 // ── ids + instances ─────────────────────────────────────────────────
@@ -80,6 +81,7 @@ let serHit = 0;
 let serMiss = 0;
 let commitUpdates = 0;
 let creates = 0;
+const serMissByGroup: Record<string, number> = {};
 
 // Mark a node and its ancestors dirty: an ancestor's cached SerializedNode
 // embeds its children's nodes, so a child change must invalidate the chain up to
@@ -843,6 +845,10 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
 
     const props = inst.props;
     const listGroup = stringProp(props, "nativeListGroup") ?? inheritedListGroup;
+    if (SERIALIZE_TRACE) {
+        const g = listGroup ?? "(none)";
+        serMissByGroup[g] = (serMissByGroup[g] ?? 0) + 1;
+    }
     const baseStyle = (normalizePropsStyle(props) ?? {}) as Record<string, unknown>;
     const hoverStyle =
         props.hoverStyle && hoveredIds.has(inst.id)
@@ -892,6 +898,20 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
             const src = props.source as { uri?: string; html?: string } | undefined;
             if (src?.uri) node.src = src.uri;
             if (src?.html) node.text = src.html;
+            break;
+        }
+        case "SystemView": {
+            node.type = "system";
+            const material = stringProp(props, "material");
+            if (material) node.systemMaterial = material;
+            const glassVariant = stringProp(props, "glassVariant");
+            if (glassVariant) node.systemGlassVariant = glassVariant;
+            if (props.tint != null) {
+                const tint = cssColorString(resolveColorValue(props.tint));
+                if (tint) node.systemTint = tint;
+            }
+            const shadow = normalizeSystemShadow(props.shadow);
+            if (shadow) node.systemShadow = shadow;
             break;
         }
         case "GhosttyTerminal": {
@@ -967,6 +987,22 @@ function normalizeNativeResize(value: unknown): SerializedNode["nativeResize"] |
     return out;
 }
 
+function normalizeSystemShadow(value: unknown): SerializedNode["systemShadow"] | undefined {
+    if (!value || typeof value !== "object") return undefined;
+    const spec = value as Record<string, unknown>;
+    const out: NonNullable<SerializedNode["systemShadow"]> = {};
+    if (spec.color != null) {
+        const color = cssColorString(resolveColorValue(spec.color));
+        if (color) out.color = color;
+    }
+    if (typeof spec.radius === "number") out.radius = spec.radius;
+    if (typeof spec.offsetX === "number") out.offsetX = spec.offsetX;
+    if (typeof spec.offsetY === "number") out.offsetY = spec.offsetY;
+    if (typeof spec.opacity === "number") out.opacity = spec.opacity;
+    // emit only when something is actually set, so a `shadow={{}}` doesn't draw.
+    return Object.keys(out).length ? out : undefined;
+}
+
 function normalizeTerminalFrames(value: unknown): NonNullable<SerializedNode["terminalFrames"]> {
     if (!Array.isArray(value)) return [];
     const out: NonNullable<SerializedNode["terminalFrames"]> = [];
@@ -1011,6 +1047,7 @@ export function serializeContainer(c: Container): SerializedNode {
         serMiss = 0;
         commitUpdates = 0;
         creates = 0;
+        for (const k of Object.keys(serMissByGroup)) delete serMissByGroup[k];
     }
     const byHost = new Map<string, Instance[]>();
     for (const child of c.children) collectPortals(child, byHost);
@@ -1024,7 +1061,11 @@ export function serializeContainer(c: Container): SerializedNode {
         children: serializeChildren(c.children, context),
     };
     if (SERIALIZE_TRACE && (serMiss > 0 || updThisCommit > 0 || creThisCommit > 0)) {
-        console.error(`[ser] updates=${updThisCommit} creates=${creThisCommit} miss=${serMiss} hit=${serHit}`);
+        const groups = Object.entries(serMissByGroup)
+            .sort((a, b) => b[1] - a[1])
+            .map(([g, n]) => `${g}:${n}`)
+            .join(" ");
+        console.error(`[ser] updates=${updThisCommit} creates=${creThisCommit} miss=${serMiss} hit=${serHit} | ${groups}`);
     }
     return root;
 }

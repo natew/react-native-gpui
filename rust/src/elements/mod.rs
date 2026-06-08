@@ -2,6 +2,7 @@ mod div;
 mod image;
 pub mod input;
 mod svg;
+pub mod system;
 mod terminal;
 mod text;
 pub mod webview;
@@ -15,6 +16,7 @@ pub use div::{
 pub use image::ReactImageElement;
 pub use input::ReactInputElement;
 pub use svg::ReactSvgElement;
+pub use system::ReactSystemElement;
 pub use terminal::ReactGhosttyTerminalElement;
 pub use text::ReactTextElement;
 pub use webview::ReactWebViewElement;
@@ -99,6 +101,20 @@ pub struct TerminalFrame {
     pub rows: Option<u16>,
 }
 
+/// A `<SystemView>` native outer drop shadow, parsed from the `shadow` prop. Colors
+/// are an Hsla (alpha unused — opacity is carried separately the way CALayer wants it);
+/// `offset_*` are in CSS screen-space (+y down), translated to layer geometry by the
+/// element. `radius` is the CSS blur radius. `system.rs` resolves this into its native
+/// CALayer-shadow representation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SystemShadowSpec {
+    pub color: Hsla,
+    pub radius: f32,
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub opacity: f32,
+}
+
 /// The core element struct that represents a node in the element tree.
 #[derive(Clone)]
 pub struct ReactElement {
@@ -111,6 +127,16 @@ pub struct ReactElement {
     pub runs: Vec<TextRun>,
     /// image / webview source uri (for `<Image>` / `<WebView>`).
     pub src: Option<String>,
+    /// NSVisualEffectView material name for `<SystemView>` (the AppKit semantic set:
+    /// "titlebar" | "selection" | "menu" | … | "underPageBackground"). None → no blur.
+    pub system_material: Option<String>,
+    /// NSGlassEffectView liquid-glass variant name for `<SystemView>` (macOS 26+):
+    /// "regular" | "clear" | … | "cartouchePopover". None → use `system_material`.
+    pub system_glass_variant: Option<String>,
+    /// optional tint color overlaid on a `<SystemView>` so foreground text stays legible.
+    pub system_tint: Option<Hsla>,
+    /// optional native outer drop shadow for `<SystemView>`, drawn below the surface.
+    pub system_shadow: Option<SystemShadowSpec>,
     /// text input value from react props.
     pub value: Option<String>,
     /// whether text input values render as password/secret text.
@@ -188,6 +214,7 @@ pub fn create_element(
         "svg" => ReactSvgElement::new(element, window_id, parent_style).into_any_element(),
         "image" => ReactImageElement::new(element, window_id, parent_style).into_any_element(),
         "webview" => ReactWebViewElement::new(element).into_any_element(),
+        "system" => ReactSystemElement::new(element).into_any_element(),
         "ghostty-terminal" => {
             ReactGhosttyTerminalElement::new(element, window_id).into_any_element()
         }

@@ -43,6 +43,12 @@ pub fn install(window: &mut Window) {
 
         configure_transparent_window(ns_window, content_view, ns_view);
 
+        // RNGPUI_NO_VIBRANCY: keep the window transparent but skip the blur/vibrancy
+        // view, so transparent regions show the desktop crisply (no frosted glass).
+        if std::env::var("RNGPUI_NO_VIBRANCY").is_ok() {
+            return;
+        }
+
         let key = content_view as usize;
         if !remember_content_view(key) {
             return;
@@ -293,7 +299,14 @@ unsafe fn configure_transparent_window(ns_window: id, content_view: id, ns_view:
     if ns_window != nil {
         let _: () = msg_send![ns_window, setOpaque: NO];
         let _: () = msg_send![ns_window, setBackgroundColor: clear_color];
-        let _: () = msg_send![ns_window, setHasShadow: YES];
+        // a transparent HUD draws its own in-content shadows; the macOS window shadow
+        // would trace each opaque card's silhouette and leave a hard outline at its edge.
+        let has_shadow = if std::env::var("RNGPUI_NO_VIBRANCY").is_ok() {
+            NO
+        } else {
+            YES
+        };
+        let _: () = msg_send![ns_window, setHasShadow: has_shadow];
         let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: YES];
     }
 

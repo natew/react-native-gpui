@@ -75,6 +75,12 @@ thread_local! {
     static WEBVIEW_LAST_BOUNDS: RefCell<HashMap<u64, (f64, f64, f64, f64)>> = RefCell::new(HashMap::new());
     #[cfg(target_os = "macos")]
     static WEBVIEW_LAST_HOST_STYLES: RefCell<HashMap<u64, WebViewHostStyle>> = RefCell::new(HashMap::new());
+    // last (width, height, shadow) the decor was actually applied at, so a resize
+    // (size changes, shadow style does not) only re-traces the size-dependent
+    // shadowPath and skips re-setting color/opacity/radius/offset (which each
+    // allocate an NSColor/CGColor) every frame. see apply_webview_decor.
+    #[cfg(target_os = "macos")]
+    static WEBVIEW_LAST_DECOR_APPLIED: RefCell<HashMap<u64, (f64, f64, WebViewShadow)>> = RefCell::new(HashMap::new());
 }
 
 // Webviews composite *behind* gpui's Metal layer (see `ensure_host_view`), so the
@@ -730,33 +736,58 @@ fn apply_webview_decor(id: u64, width: f64, height: f64, style: &ElementStyle) {
             let _: () = msg_send![layer, setShadowOpacity: 0.0f32];
             let _: () = msg_send![layer, setShadowPath: nil];
             let _: () = msg_send![view, setHidden: YES];
+            WEBVIEW_LAST_DECOR_APPLIED.with(|m| m.borrow_mut().remove(&id));
             return;
         };
 
-        let ns_color: id = msg_send![
-            class!(NSColor),
-            colorWithSRGBRed: shadow.color.0 as f64
-            green: shadow.color.1 as f64
-            blue: shadow.color.2 as f64
-            alpha: 1.0f64
-        ];
-        let cg_color: id = msg_send![ns_color, CGColor];
-        let _: () = msg_send![layer, setShadowColor: cg_color];
-        let _: () = msg_send![layer, setShadowOpacity: shadow.opacity];
-        let _: () = msg_send![layer, setShadowRadius: shadow.radius as f64];
-        let offset = NSSize::new(shadow.offset_x as f64, shadow.offset_y as f64);
-        let _: () = msg_send![layer, setShadowOffset: offset];
+        // Split the work: a window/divider resize changes the SIZE every frame but
+        // leaves the shadow STYLE (color/opacity/radius/offset) untouched. Re-setting
+        // the style each frame allocates an NSColor + CGColor and fires four extra
+        // msg_sends per frame for nothing — the decoration regression that made resize
+        // lag. So only re-set style when it actually changed, and only re-trace the
+        // size-dependent shadowPath when the size (or corner) changed.
+        let (style_same, size_same) =
+            WEBVIEW_LAST_DECOR_APPLIED.with(|m| match m.borrow().get(&id) {
+                Some((lw, lh, last)) => (
+                    *last == shadow,
+                    (lw - width).round() == 0.0 && (lh - height).round() == 0.0,
+                ),
+                None => (false, false),
+            });
+        if style_same && size_same {
+            return; // nothing visual changed — skip the shadow re-rasterization entirely
+        }
 
-        // a rounded-rect path in the layer's own space (origin 0,0) matching the webview
-        // corner radius, so the shadow is a crisp rounded-card silhouette.
-        let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height));
-        let r = shadow.corner_radius.max(0.0) as f64;
-        let path: id = CGPathCreateWithRoundedRect(rect, r, r, std::ptr::null());
-        let _: () = msg_send![layer, setShadowPath: path];
-        if path != nil {
-            CGPathRelease(path);
+        if !style_same {
+            let ns_color: id = msg_send![
+                class!(NSColor),
+                colorWithSRGBRed: shadow.color.0 as f64
+                green: shadow.color.1 as f64
+                blue: shadow.color.2 as f64
+                alpha: 1.0f64
+            ];
+            let cg_color: id = msg_send![ns_color, CGColor];
+            let _: () = msg_send![layer, setShadowColor: cg_color];
+            let _: () = msg_send![layer, setShadowOpacity: shadow.opacity];
+            let _: () = msg_send![layer, setShadowRadius: shadow.radius as f64];
+            let offset = NSSize::new(shadow.offset_x as f64, shadow.offset_y as f64);
+            let _: () = msg_send![layer, setShadowOffset: offset];
+        }
+
+        // the rounded-rect shadowPath depends only on size + corner (corner lives in
+        // `shadow`, so a corner change shows up as !style_same). re-tracing it is what
+        // forces CA to re-rasterize the blur, so gate it on a real size/corner change.
+        if !size_same || !style_same {
+            let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height));
+            let r = shadow.corner_radius.max(0.0) as f64;
+            let path: id = CGPathCreateWithRoundedRect(rect, r, r, std::ptr::null());
+            let _: () = msg_send![layer, setShadowPath: path];
+            if path != nil {
+                CGPathRelease(path);
+            }
         }
         let _: () = msg_send![view, setHidden: NO];
+        WEBVIEW_LAST_DECOR_APPLIED.with(|m| m.borrow_mut().insert(id, (width, height, shadow)));
 
         if std::env::var("RNGPUI_WEBVIEW_GEOMETRY_DEBUG").is_ok() {
             eprintln!(

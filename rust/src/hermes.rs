@@ -14,6 +14,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::net::TcpStream;
+use std::os::unix::process::CommandExt;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -189,6 +190,21 @@ extern "C" fn host_close(ud: *mut c_void, _arg: *const c_char) {
 extern "C" fn host_exit(_ud: *mut c_void, arg: *const c_char) {
     let code = arg_str(arg).parse::<i32>().unwrap_or(0);
     std::process::exit(code);
+}
+
+extern "C" fn host_reload_app(_ud: *mut c_void, _arg: *const c_char) {
+    let exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("[hermes] reload current_exe failed: {error}");
+            std::process::exit(1);
+        }
+    };
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    eprintln!("[hermes] reloading app bundle via exec");
+    let error = std::process::Command::new(exe).args(args).exec();
+    eprintln!("[hermes] reload exec failed: {error}");
+    std::process::exit(1);
 }
 
 // ── fetch (HTTP via ureq, on a worker thread, result posted back to JS) ──────
@@ -516,6 +532,7 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
             install_void(rt, "__rngpui_applyTree", host_apply_tree, ud);
             install_void(rt, "__rngpui_log", host_log, ud);
             install_void(rt, "__rngpui_exit", host_exit, ud);
+            install_void(rt, "__rngpui_reloadApp", host_reload_app, ud);
             install_void(rt, "__rngpui_setTimer", host_set_timer, ud);
             install_void(rt, "__rngpui_clearTimer", host_clear_timer, ud);
             install_void(rt, "__rngpui_close", host_close, ud);
@@ -529,8 +546,9 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
 
             let env = std::env::vars().collect::<HashMap<String, String>>();
             let env_script = format!(
-                "globalThis.process={{env:{}}};",
-                serde_json::to_string(&env).unwrap_or_else(|_| "{}".to_string())
+                "globalThis.process={{env:{},pid:{}}};",
+                serde_json::to_string(&env).unwrap_or_else(|_| "{}".to_string()),
+                std::process::id()
             );
             if let Err(e) = eval(rt, env_script.as_bytes(), "host-env.js") {
                 eprintln!("[hermes] env eval failed: {e}");

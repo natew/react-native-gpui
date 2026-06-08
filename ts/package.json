@@ -56,6 +56,7 @@
         "rngpui": "bun run cli/bin.ts",
         "conformance:describe": "node scripts/describe-conformance.mjs",
         "conformance:drive": "node scripts/drive-conformance.mjs",
+        "conformance:reload": "node scripts/reload-conformance.mjs",
         "conformance:startup": "node scripts/startup-conformance.mjs",
         "prepublishOnly": "npm run build"
     },

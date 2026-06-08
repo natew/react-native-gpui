@@ -221,6 +221,14 @@ impl InspectorState {
         self.enabled
     }
 
+    pub fn set_enabled(&mut self, enabled: bool) -> bool {
+        if self.enabled == enabled {
+            return false;
+        }
+        self.enabled = enabled;
+        if !enabled { self.deactivate() } else { true }
+    }
+
     pub fn handle_modifiers(
         &mut self,
         root: &Arc<ReactElement>,

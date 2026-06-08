@@ -31,6 +31,7 @@ const tasks = [
     { name: "input", command: "node", args: ["scripts/input-conformance-driver.mjs"], cwd: root, timeoutMs: 12_000 },
     { name: "list-group", command: "node", args: ["scripts/list-group-conformance-driver.mjs"], cwd: root, timeoutMs: 20_000 },
     { name: "inspector", command: "node", args: ["scripts/inspector-conformance.mjs"], cwd: root, timeoutMs: 12_000 },
+    { name: "reload", command: "node", args: ["scripts/reload-conformance.mjs"], cwd: root, timeoutMs: 18_000 },
     { name: "text-lines", command: "bun", args: ["run", "scripts/text-lines-conformance.mjs"], cwd: root },
     { name: "rounded-overflow", command: "bun", args: ["run", "scripts/rounded-overflow-conformance.mjs"], cwd: root },
     { name: "animation-diff", command: "bun", args: ["run", "scripts/animation-frame-diff.mjs"], cwd: root },

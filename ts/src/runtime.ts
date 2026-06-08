@@ -121,7 +121,7 @@ export function setEventBatcher(fn: ((run: () => void) => void) | undefined): vo
     eventBatcher = fn;
 }
 
-export function startBridge(initial: SerializedNode, _options: BridgeOptions = {}): Bridge {
+export function startBridge(initial: SerializedNode, options: BridgeOptions = {}): Bridge {
     const listeners: Array<(e: BridgeEvent) => void> = [];
 
     const deliver = (evt: BridgeEvent) => {
@@ -160,6 +160,9 @@ export function startBridge(initial: SerializedNode, _options: BridgeOptions = {
 
     // push the first tree during bundle evaluation so the native host can size the window.
     send(initial);
+    if (options.inspector) {
+        send({ $cmd: "inspector", enabled: true });
+    }
 
     return {
         update: send,

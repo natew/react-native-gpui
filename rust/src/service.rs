@@ -958,6 +958,9 @@ pub(crate) enum Incoming {
     Reload {
         id: u64,
     },
+    Inspector {
+        enabled: bool,
+    },
     ScrollTo {
         id: u64,
         x: Option<f32>,
@@ -1026,6 +1029,9 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
                 _ => None,
             },
             "reload" => id.map(|id| Incoming::Reload { id }),
+            "inspector" => Some(Incoming::Inspector {
+                enabled: v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true),
+            }),
             "scrollTo" => id.map(|id| Incoming::ScrollTo {
                 id,
                 x: v.get("x").and_then(|x| x.as_f64()).map(|x| x as f32),
@@ -1671,6 +1677,11 @@ fn main() {
                             Incoming::Reload { id } => {
                                 if let Some(view) = this.webviews.get(&id) {
                                     let _ = view.reload();
+                                }
+                            }
+                            Incoming::Inspector { enabled } => {
+                                if this.inspector.set_enabled(enabled) {
+                                    cx.notify();
                                 }
                             }
                             Incoming::ScrollTo { id, x, y } => {

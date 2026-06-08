@@ -13,6 +13,16 @@
   if (typeof g.process.exit !== 'function') {
     g.process.exit = function (code) { g.__rngpui_exit(String(code == null ? 0 : code | 0)); };
   }
+  if (typeof g.process.kill !== 'function') {
+    g.process.kill = function (pid, signal) {
+      if (+pid !== g.process.pid) throw new Error('rngpui process.kill only supports the current process');
+      if (signal === 'SIGUSR2') {
+        g.__rngpui_reloadApp('');
+        return true;
+      }
+      throw new Error('rngpui process.kill only supports SIGUSR2 reload');
+    };
+  }
 
   // console → host stderr sink.
   function fmt(args) {

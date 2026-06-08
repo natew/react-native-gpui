@@ -620,6 +620,18 @@ pub fn scroll_container_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<u
     found
 }
 
+/// The topmost WebView at a point, when no GPUI surface is painted over it. Used by
+/// `rngpui do scroll` to drive native WebView content in a kept debug session.
+pub fn webview_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<u64> {
+    let position = point(px(x), px(y));
+    let hit = hit_test(root, position)?;
+    if hit.target.element_type == "webview" {
+        Some(hit.target.id)
+    } else {
+        None
+    }
+}
+
 /// The topmost node at a point that listens for a press/click gesture, plus its
 /// events and bounds — used to synthesize a `do tap`. Walks up the hit path so a tap
 /// on a label inside a Pressable still finds the Pressable's handlers.

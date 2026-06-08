@@ -1759,6 +1759,20 @@ fn main() {
                                         "type": "scrollAt",
                                         "targetId": id,
                                     }));
+                                } else if let Some(id) = inspector::webview_at(&this.root, x, y) {
+                                    let ok = this
+                                        .webviews
+                                        .get(&id)
+                                        .and_then(|view| {
+                                            elements::webview::webview_scroll_script(dx, dy)
+                                                .map(|script| view.evaluate_script(&script).is_ok())
+                                        })
+                                        .unwrap_or(false);
+                                    let _ = reply.send(serde_json::json!({
+                                        "ok": ok,
+                                        "type": "scrollAt",
+                                        "targetId": id,
+                                    }));
                                 } else {
                                     let _ = reply.send(serde_json::json!({
                                         "ok": false,

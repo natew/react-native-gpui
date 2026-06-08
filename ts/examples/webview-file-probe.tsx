@@ -2,7 +2,7 @@
  * Load an arbitrary HTML file in a native WebView. Useful for isolating page
  * payload issues from app layout issues:
  *
- *   RNGPUI_HTML_FILE=/tmp/page.html RNGPUI_WEBVIEW_DEBUG=1 bun run examples/webview-file-probe.tsx
+ *   RNGPUI_HTML_FILE=/tmp/page.html RNGPUI_WEBVIEW_DEBUG=1 node scripts/run-hermes-example.mjs examples/webview-file-probe.tsx --interactive
  */
 import { readFileSync } from "node:fs";
 import { AppRegistry, Text, View, WebView } from "../src/index";

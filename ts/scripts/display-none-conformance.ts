@@ -2,7 +2,7 @@ import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import { conformanceEnv } from "./conformance-utils.mjs";
 
-const child = spawn("bun", ["run", "examples/display-none-conformance.tsx"], {
+const child = spawn("node", ["scripts/run-hermes-example.mjs", "examples/display-none-conformance.tsx"], {
     cwd: fileURLToPath(new URL("..", import.meta.url)),
     env: conformanceEnv(),
     stdio: ["ignore", "pipe", "pipe"],

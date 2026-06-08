@@ -12,7 +12,7 @@ const previousClipboard = await readClipboard();
 await writeClipboard(sentinel);
 let fixturePid = 0;
 
-const child = spawn("bun", ["run", "examples/inspector-devtools.tsx"], {
+const child = spawn("node", ["scripts/run-hermes-example.mjs", "examples/inspector-devtools.tsx"], {
     cwd: root,
     env: conformanceEnv({
         RNGPUI_SERVICE_PID_FILE: pidPath,

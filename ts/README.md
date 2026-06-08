@@ -31,20 +31,26 @@ AppRegistry.runApplication("App");
 ```
 
 ```sh
-bun run app.tsx     # or: node --loader tsx app.tsx
+bun run scripts/bundle-hermes.mjs app.tsx /tmp/app.js --bytecode
+RNGPUI_BUNDLE=/tmp/app.hbc native/rngpui-service
 ```
 
 ## How it works
 
 ```
-React tree ──► react-reconciler ──► serialized node tree ──► (stdin, JSON lines)
+React tree ──► react-reconciler ──► serialized node tree ──► __rngpui_applyTree()
                                                                     │
-                                                              rngpui-service  (Rust + GPUI)
+                                                              rngpui-service
+                                                         Rust + GPUI + Hermes
                                                                     │
-   onPress / onChangeText / onLayout / resize  ◄──── events (stdout, JSON lines)
+   onPress / onChangeText / onLayout / resize  ◄──── __rngpui_onHostEvent()
 ```
 
-The TypeScript side reconciles your components into a flat node tree and streams it to a small native binary (`rngpui-service`) which renders it with GPUI and streams UI events back. Stable element ids keep native state (text-input contents, scroll offsets, web views) alive across re-renders.
+The TypeScript side is bundled to Hermes bytecode and evaluated inside the native
+service. React reconciles your components into a flat node tree; host globals pass
+commits and UI events in memory between Hermes and GPUI. Stable element ids keep
+native state (text-input contents, scroll offsets, web views) alive across
+re-renders.
 
 ## Components
 
@@ -56,7 +62,7 @@ APIs: `StyleSheet`, `Dimensions`, `useWindowDimensions`, `Platform`, `PixelRatio
 
 - **Real text input** (`TextInput`) is backed by [gpui-component](https://github.com/longbridge/gpui-component)'s editor: selection, IME, copy/paste, word motion, multiline.
 - **Text truncation** follows React Native's `numberOfLines`: one-line labels truncate with ellipsis, and multi-line labels are line-clamped.
-- **Native portals** (`PortalProvider`, `Portal`, `PortalHost`) render overlay content at the matching host during GPUI serialization, so Tamagui Dialog/Popover/Sheet can avoid legacy state-driven portal fallbacks.
+- **Native portals** (`PortalProvider`, `Portal`, `PortalHost`) render overlay content at the matching host during GPUI serialization, so Tamagui Dialog/Popover/Sheet can avoid extra state-driven portal fallbacks.
 - **RN-style measurement** (`measure`, `measureInWindow`, `measureLayout`) is exposed on host refs. Floating overlay libraries such as Tamagui's Popover/Select can measure trigger and content nodes without app-specific adapters.
 - **RN Animated** runs JS-frame animations through React commits; animated styles resolve to plain GPUI styles each frame.
 - **Native layout overrides** (`nativeLayoutKey`, `nativeResize`, `NativeLayout`) let narrow chrome interactions such as pane resizing mutate GPUI layout in the native service without a React commit per pointer frame.
@@ -117,7 +123,8 @@ window.addEventListener("message", (e) => { /* host postMessage */ })
 
 ## Building from source
 
-This package ships a prebuilt `rngpui-service` binary in `native/`. To build it yourself you need a Rust toolchain:
+This package ships a prebuilt `rngpui-service` binary in `native/`. To build it
+yourself you need a Rust toolchain and the local Hermes build at `~/github/hermes`:
 
 ```sh
 npm run build        # builds the Rust service, copies it into native/, then tsc → dist/
@@ -126,21 +133,19 @@ npm run typecheck
 ```
 
 Point the runtime at a specific binary with `RNGPUI_SERVICE=/path/to/rngpui-service`.
-Set `RNGPUI_DUMP_TREE=/tmp/tree.json` to write the latest serialized native tree
-for conformance debugging.
 Set `RNGPUI_INSPECTOR=1` to force-enable the native inspector for any app.
 
 ## Examples
 
 ```sh
-bun run examples/kitchen-sink.tsx     # the full component surface + self-validating layout
+bun run kitchen                      # the full component surface + self-validating layout
 bun run conformance:animation        # Animated frame progression fixture
 bun run conformance:animation:diff   # deterministic Animated PNG frame diff
 bun run conformance:input            # TextInput typing, Return submit, Shift+Return newline
 bun run conformance:portal           # Portal overlay and TextInput-in-portal behavior
 bun run conformance:native-layout    # native layout override without React width state
-bun run conformance:text-lines        # visual fixture for Text numberOfLines
-bun run examples/superconductor.tsx   # native shell + WebView content hybrid
+bun run conformance:text-lines       # visual fixture for Text numberOfLines
+bun run superconductor               # native shell + WebView content hybrid
 ```
 
 Visual regressions can use the built-in PNG comparator:

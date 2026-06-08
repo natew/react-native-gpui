@@ -26,7 +26,7 @@ const overlayColor = [0xff, 0x00, 0x7a];
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
-const child = spawn("bun", ["examples/webview-overlay-conformance.tsx"], {
+const child = spawn("node", ["scripts/run-hermes-example.mjs", "examples/webview-overlay-conformance.tsx"], {
     cwd: root,
     env: conformanceEnv({ RNGPUI_SERVICE_PID_FILE: servicePidPath }),
     stdio: ["ignore", "pipe", "pipe"],

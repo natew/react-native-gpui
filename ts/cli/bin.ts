@@ -11,18 +11,22 @@
 // identifier / nativeID / label / text / type, or `#<globalId>`, or `x,y`. `--json`
 // for machine output.
 
-import { attachHost, launchHost, type AttachedHost, type LaunchedHost } from "./host";
+import { attachHost, attachSession, closeSession, launchHost, type AttachedHost, type LaunchedHost } from "./host";
 import { runGet } from "./commands/get";
 import { runDo } from "./commands/do";
 
 const HELP = `rngpui — react-native-gpui developer CLI
 
 usage:
-  rngpui <get|do> <subcommand> [selector] [--launch <entry.tsx> | --attach] [--json]
+  rngpui <get|do> <subcommand> [selector] [--launch <entry.tsx> | --bundle <app.hbc> | --session <dir> | --attach] [--json]
+  rngpui close --session <dir>
 
 target (pick one; defaults to --attach):
-  --launch <entry.tsx>   spawn the entry offscreen + non-activating, drive + dump it
-  --attach               capture/describe the running rngpui window read-only
+  --launch <entry.tsx>   compile the entry to Hermes bytecode, then spawn rngpui-service
+  --bundle <app.hbc>     spawn rngpui-service against an existing Hermes bundle
+  --keep                 keep the launched service alive and print its session dir
+  --session <dir>        reuse a kept driveable session for do-then-get workflows
+  --attach               capture a running rngpui window read-only
   --size <WxH>           launched window size (default 1280x860)
 
 get (introspect — read-only):
@@ -47,7 +51,10 @@ selectors:
 
 examples:
   rngpui get describe stage --launch examples/superconductor.tsx
-  rngpui do tap left-session:s2 --launch native-shell/app.tsx
+  rngpui get tree --launch examples/kitchen-sink.tsx --keep
+  rngpui do tap count-button --session /tmp/rngpui-cli-abc123
+  rngpui get describe count-label --session /tmp/rngpui-cli-abc123
+  rngpui close --session /tmp/rngpui-cli-abc123
   rngpui get color 640,400 --attach --json
 `;
 
@@ -60,8 +67,9 @@ function parseArgs(argv: string[]) {
         if (a === "--json") flags.json = true;
         else if (a === "--attach") flags.attach = true;
         else if (a === "--launch") flags.launch = args[++i] ?? "";
-        else if (a === "--launch-cmd") flags.launchCmd = args[++i] ?? "";
-        else if (a === "--cwd") flags.cwd = args[++i] ?? "";
+        else if (a === "--bundle") flags.bundle = args[++i] ?? "";
+        else if (a === "--session") flags.session = args[++i] ?? "";
+        else if (a === "--keep") flags.keep = true;
         else if (a === "--size") flags.size = args[++i] ?? "";
         else if (a === "-h" || a === "--help") flags.help = true;
         else positional.push(a);
@@ -79,6 +87,18 @@ async function main(): Promise<number> {
     const [group, sub, ...rest] = positional;
     const json = flags.json === true;
 
+    if (group === "close") {
+        const session = flags.session || process.env.RNGPUI_SESSION;
+        if (!session) {
+            console.error("  close needs --session <dir> or RNGPUI_SESSION");
+            return 1;
+        }
+        closeSession(String(session));
+        if (!json) console.log(`  closed ${session}`);
+        else console.log(JSON.stringify({ closed: String(session) }));
+        return 0;
+    }
+
     if (group !== "get" && group !== "do") {
         console.error(`  unknown command group: ${group}`);
         console.error("  run `rngpui --help` for the surface.");
@@ -91,21 +111,30 @@ async function main(): Promise<number> {
 
     let host: LaunchedHost | AttachedHost | null = null;
     try {
-        if (flags.launchCmd !== undefined) {
+        const session = flags.session || process.env.RNGPUI_SESSION;
+        if (session) {
+            host = await attachSession(String(session));
+        } else if (flags.bundle !== undefined) {
             host = await launchHost("", {
-                launchCmd: String(flags.launchCmd),
-                cwd: flags.cwd ? String(flags.cwd) : undefined,
+                bundle: String(flags.bundle),
+                keep: flags.keep === true,
                 size: flags.size ? String(flags.size) : undefined,
             });
         } else if (flags.launch !== undefined) {
-            host = await launchHost(String(flags.launch), { size: flags.size ? String(flags.size) : undefined });
+            host = await launchHost(String(flags.launch), {
+                keep: flags.keep === true,
+                size: flags.size ? String(flags.size) : undefined,
+            });
         } else {
             // default + explicit --attach both land here
             host = await attachHost();
         }
 
-        if (group === "get") return await runGet(host, sub, rest, json);
-        return await runDo(host, sub, rest, json);
+        const code = group === "get" ? await runGet(host, sub, rest, json) : await runDo(host, sub, rest, json);
+        if (flags.keep === true && host.mode === "launch") {
+            console.error(`[rngpui] session ${host.sessionDir}`);
+        }
+        return code;
     } catch (err) {
         console.error(`  ${err instanceof Error ? err.message : String(err)}`);
         return 1;

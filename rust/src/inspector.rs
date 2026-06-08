@@ -179,6 +179,14 @@ struct SnapshotMetadata {
     depth: usize,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct TapTarget {
+    pub id: u64,
+    pub events: Vec<String>,
+    pub bounds: (f32, f32, f32, f32),
+    pub focusable_input: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct InspectorState {
     enabled: bool,
@@ -607,46 +615,54 @@ pub fn scroll_container_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<u
 /// The topmost node at a point that listens for a press/click gesture, plus its
 /// events and bounds — used to synthesize a `do tap`. Walks up the hit path so a tap
 /// on a label inside a Pressable still finds the Pressable's handlers.
-pub fn tap_target_at(
-    root: &Arc<ReactElement>,
-    x: f32,
-    y: f32,
-) -> Option<(u64, Vec<String>, (f32, f32, f32, f32))> {
+pub fn tap_target_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<TapTarget> {
     let position = point(px(x), px(y));
     let hit = hit_test(root, position)?;
     // the hit itself is the deepest interactive node when one exists (rank 100), but a
     // text leaf can win when nothing interactive is under the point; in that case walk
     // the captured path outward to the nearest press-handling ancestor.
     const PRESS: &[&str] = &[
-        "press", "click", "pressIn", "pressOut", "longPress", "mouseDown", "pointerDown",
+        "press",
+        "click",
+        "pressIn",
+        "pressOut",
+        "longPress",
+        "mouseDown",
+        "pointerDown",
         "touchStart",
     ];
     let listens_press = |events: &[String]| events.iter().any(|e| PRESS.contains(&e.as_str()));
     if listens_press(&hit.events) {
-        return Some((
-            hit.target.id,
-            hit.events,
-            (
+        return Some(TapTarget {
+            id: hit.target.id,
+            focusable_input: is_input_type(&hit.target.element_type),
+            events: hit.events,
+            bounds: (
                 hit.bounds.x,
                 hit.bounds.y,
                 hit.bounds.width,
                 hit.bounds.height,
             ),
-        ));
+        });
     }
     // no press handler directly under the point — fall back to the topmost node so the
     // caller can still report what is there (a tap on a non-interactive node is a no-op
     // event-wise, which the CLI surfaces).
-    Some((
-        hit.target.id,
-        hit.events,
-        (
+    Some(TapTarget {
+        id: hit.target.id,
+        focusable_input: is_input_type(&hit.target.element_type),
+        events: hit.events,
+        bounds: (
             hit.bounds.x,
             hit.bounds.y,
             hit.bounds.width,
             hit.bounds.height,
         ),
-    ))
+    })
+}
+
+fn is_input_type(element_type: &str) -> bool {
+    matches!(element_type, "textinput" | "textarea")
 }
 
 fn collect_hits(

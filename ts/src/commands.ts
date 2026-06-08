@@ -1,6 +1,6 @@
 // Host → native imperative commands. These don't go through the React commit/tree;
-// they're sent straight to the service over stdin and applied by the native app.
-// The render layer wires the sink to the bridge; components call `sendCommand`.
+// the embedded Hermes runtime hands them to the native service as host calls.
+// Components call `sendCommand`; the render layer wires the sink to the bridge.
 export type AppCommandBinding = {
     id: string;
     key: string;

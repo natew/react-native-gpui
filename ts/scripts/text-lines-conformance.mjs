@@ -21,7 +21,7 @@ const expectedPasses = [
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
-const child = spawn("bun", ["examples/number-of-lines-conformance.tsx"], {
+const child = spawn("node", ["scripts/run-hermes-example.mjs", "examples/number-of-lines-conformance.tsx"], {
     cwd: root,
     env: conformanceEnv({ RNGPUI_SERVICE_PID_FILE: pidPath }),
     stdio: ["ignore", "pipe", "pipe"],

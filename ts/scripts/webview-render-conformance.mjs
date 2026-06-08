@@ -14,7 +14,7 @@ const servicePidPath = `${outDir}/service.pid`;
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
-const child = spawn("bun", ["examples/webview-probe.tsx"], {
+const child = spawn("node", ["scripts/run-hermes-example.mjs", "examples/webview-probe.tsx"], {
     cwd: root,
     env: conformanceEnv({
         RNGPUI_SERVICE_PID_FILE: servicePidPath,

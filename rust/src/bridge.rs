@@ -1,17 +1,14 @@
-//! The Rust→JS event channel. Everything the service tells the JS side travels as
-//! one newline-delimited JSON object per line on stdout. `runtime.ts` parses these
-//! into `BridgeEvent`s and routes them back to React handlers.
+//! The Rust→JS event channel. In the single-process model the JS runs in an embedded
+//! Hermes runtime on the JS thread (see hermes.rs); events are pushed as JSON strings onto
+//! a `flume` channel that the JS thread's loop drains and dispatches via
+//! `globalThis.__rngpui_onHostEvent`. `runtime.ts` parses these into `BridgeEvent`s and
+//! routes them back to React handlers. The JSON shapes are unchanged from the old stdio bridge.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
 use serde_json::json;
-
-// serialize stdout writes so concurrent emits (render thread + input subscriptions)
-// never interleave a half-written line.
-static OUT: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 // last layout we emitted per node id — the render loop runs every frame, so we only
 // emit `layout` when a node's measured rect actually changes.
@@ -26,11 +23,8 @@ static LAYOUT_SUBSCRIBERS: Lazy<Mutex<std::collections::HashSet<u64>>> =
     Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
 
 pub fn emit_line(line: &str) {
-    let _g = OUT.lock().unwrap();
-    let mut so = std::io::stdout().lock();
-    let _ = so.write_all(line.as_bytes());
-    let _ = so.write_all(b"\n");
-    let _ = so.flush();
+    // queue for the JS thread's loop, which calls __rngpui_onHostEvent(line) on the JS thread.
+    crate::hermes::post("__rngpui_onHostEvent", line.to_string());
 }
 
 fn emit_value(v: serde_json::Value) {
@@ -53,12 +47,6 @@ pub fn appearance(scheme: &str) {
 
 pub fn command(id: &str) {
     emit_value(json!({ "type": "command", "id": id }));
-}
-
-/// An on-demand annotated tree dump (requested over IPC by the `rngpui` CLI) was
-/// written to `path`. `req_id` correlates the ack to the request.
-pub fn dump_ready(req_id: u64, path: &str) {
-    emit_value(json!({ "type": "dumpReady", "reqId": req_id, "path": path }));
 }
 
 /// A gesture event with no payload (press / pressIn / pressOut / longPress / focus / blur).

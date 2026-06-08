@@ -5,7 +5,11 @@
  */
 import { createElement, type ReactElement, type ComponentType } from "react";
 import Reconciler, { setCommitSink, serializeContainer, dispatchEvent, type Container } from "./reconciler";
-import { startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type SerializedNode } from "./runtime";
+import { setEventBatcher, startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type SerializedNode } from "./runtime";
+
+// coalesced event batches (resize/layout/scroll floods) dispatch inside one React update so
+// a window resize produces one re-render per batch instead of one per event.
+setEventBatcher((run) => (Reconciler as { batchedUpdates(fn: (a: unknown) => void, a?: unknown): void }).batchedUpdates(run));
 import { AppCommands, setCommandSink } from "./commands";
 import { Dimensions } from "./Dimensions";
 import { applyNativeColorScheme, setAppearanceUpdateSink } from "./colors";

@@ -1,7 +1,6 @@
 //! On-demand annotated tree dump for the `rngpui` developer CLI.
 //!
-//! The JS runtime owns the authored React tree and writes it (style + a11y, but
-//! NO computed bounds) when `RNGPUI_DUMP_TREE` is set. The native service owns the
+//! The native service owns both the authored React tree (style + a11y) and the
 //! post-layout geometry: every painted element reports its window-coordinate rect
 //! into `bridge::LAST_FRAME` keyed by `globalId` (see `elements::report_layout`).
 //!

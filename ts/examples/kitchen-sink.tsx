@@ -1,9 +1,9 @@
 /**
  * Kitchen sink — exercises the full react-native-gpui surface and self-validates
  * layout. Each measured box logs `LAYOUT <name> expected=WxH got=WxH PASS/FAIL`
- * to stdout via onLayout, so dimensions/sizing can be verified without a screenshot.
+ * via onLayout, so dimensions/sizing can be verified without a screenshot.
  *
- *   bun run examples/kitchen-sink.tsx
+ *   bun run kitchen
  */
 import { useState } from "react";
 import {

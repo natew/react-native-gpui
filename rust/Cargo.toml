@@ -3,9 +3,9 @@ name = "react-native-gpui"
 version = "0.1.20"
 edition = "2024"
 
-# The renderer service: reads a JSON element tree on stdin, renders it with GPUI,
-# and emits events (resize / press / changeText / layout) back on stdout. This is
-# the single native artifact the npm package ships and drives.
+# the renderer service: hosts Hermes on a JS thread, renders committed React trees
+# with GPUI, and posts native events back into JS. this is the single native artifact
+# the npm package ships and drives.
 [[bin]]
 name = "rngpui-service"
 path = "src/service.rs"
@@ -25,10 +25,18 @@ once_cell = "1.20"
 anyhow = "1.0"
 base64 = "0.22"
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "dfac6f3e8e7ff1567a7dead6639ef36c42e4f15a" }
-# sync-send / async-recv channel: the stdin reader thread hands parsed trees to a
-# foreground gpui task that applies them and calls cx.notify() (event-driven render).
+# sync-send / async-recv channel: Hermes and debug-control threads hand parsed trees
+# and commands to a foreground gpui task that applies them and calls cx.notify().
 flume = "0.11"
 raw-window-handle = "0.6"
+# host environment for the embedded JS: HTTP (fetch) + WebSocket (live agentbus data).
+ureq = { version = "2", features = ["json"] }
+tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+url = "2"
+
+[build-dependencies]
+# compiles the Hermes JSI C ABI shim (hermes_shim.cpp + jsi.cpp) — see build.rs.
+cc = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"

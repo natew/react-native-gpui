@@ -1,6 +1,5 @@
 #![allow(unexpected_cfgs)]
 
-use std::io::{self, BufRead};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -33,10 +32,12 @@ static APP_COMMAND_BINDING_SLOTS: Lazy<Mutex<HashSet<AppCommandBindingSlot>>> =
 #[cfg(target_os = "macos")]
 mod ax;
 mod bridge;
-mod dump;
 #[cfg(target_os = "macos")]
 mod capture_png;
+mod debug_control;
+mod dump;
 mod elements;
+mod hermes;
 mod hit_passthrough;
 mod icons;
 mod inspector;
@@ -51,6 +52,22 @@ use raw_window_handle::HasWindowHandle;
 use style::{Dim, ElementStyle};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+// startup timing: process-start instant + a one-shot first-render marker. gated on
+// RNGPUI_STARTUP_TIMING so it's silent in normal runs. used to drive cold start < 200ms.
+static STARTUP: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+static FIRST_RENDER_LOGGED: AtomicBool = AtomicBool::new(false);
+
+fn startup_mark(label: &str) {
+    if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some() {
+        if let Some(t0) = STARTUP.get() {
+            eprintln!(
+                "[startup] {label} +{:.1}ms",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+}
 
 fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::SeqCst)
@@ -342,6 +359,7 @@ fn root_theme_mode(root: &ReactElement) -> ThemeMode {
 
 struct ServiceApp {
     root: Arc<ReactElement>,
+    dump_tree_path: Option<String>,
     last_w: f64,
     last_h: f64,
     // persistent gpui-component input state, one per <TextInput>/<TextArea> id.
@@ -352,9 +370,20 @@ struct ServiceApp {
     // persistent native WebView, one per <WebView> id.
     webviews: HashMap<u64, Rc<wry::WebView>>,
     inspector: inspector::InspectorState,
-    // id of the currently-focused text input, tracked for the `rngpui do type/key`
-    // driver so it can target the focused field without a focus_handle (pub(super)).
+    // id of the currently-focused text input, used by the debug CLI type/key driver.
     focused_input: Option<u64>,
+}
+
+impl ServiceApp {
+    fn write_debug_dump(&self) {
+        let Some(path) = self.dump_tree_path.as_ref() else {
+            return;
+        };
+        let tree = dump::dump_tree(&self.root);
+        if let Ok(json) = serde_json::to_string_pretty(&tree) {
+            let _ = std::fs::write(path, json);
+        }
+    }
 }
 
 type InputSpec = (u64, String, Option<String>, bool, bool);
@@ -529,9 +558,19 @@ impl Render for ServiceApp {
         // reset the per-frame hit-test passthrough registry before this frame's prepaint
         // pass repopulates it (webview rects + occluder rects, for native webview events).
         hit_passthrough::begin_frame();
-        // The tree is applied (and a re-render scheduled) by the stdin pump task in
-        // `main`, not polled here — rendering is fully on-demand: this runs only on a
-        // new tree, input, scroll, or resize, so the app idles at ~0fps.
+        if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some()
+            && !FIRST_RENDER_LOGGED.swap(true, Ordering::SeqCst)
+        {
+            if let Some(t0) = STARTUP.get() {
+                eprintln!(
+                    "[startup] first render +{:.1}ms",
+                    t0.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+        }
+        // The tree is applied (and a re-render scheduled) by the hermes JS thread's
+        // foreground task in `main`, not polled here — rendering is fully on-demand: this
+        // runs only on a new tree, input, scroll, or resize, so the app idles at ~0fps.
         let theme_mode = root_theme_mode(&self.root);
         if Theme::global(cx).mode != theme_mode {
             Theme::change(theme_mode, Some(window), cx);
@@ -762,6 +801,7 @@ impl Render for ServiceApp {
 
         #[cfg(target_os = "macos")]
         ax::sync_tree(window, &self.root);
+        self.write_debug_dump();
 
         let root = create_element(self.root.clone(), 0, None);
         let mut frame = gpui::div()
@@ -906,9 +946,10 @@ enum AppCommandMenuItem {
     },
 }
 
-/// A message from the JS side over stdin: either a new element tree to render, or a
-/// command targeting a live `<WebView>` (host → frame: ref.injectJavaScript / reload).
-enum Incoming {
+/// A message from the JS side or the debug CLI: either a new element tree to render,
+/// a host command targeting a live native element, or a debug request.
+pub(crate) enum Incoming {
+    Quit,
     Tree(Arc<ReactElement>),
     Eval {
         id: u64,
@@ -934,41 +975,45 @@ enum Incoming {
         animate_ms: Option<f32>,
         clear: bool,
     },
+    PickPaths {
+        id: u64,
+        files: bool,
+        directories: bool,
+        multiple: bool,
+        prompt: String,
+    },
     FocusInput {
         id: u64,
     },
     BlurInput,
     AppCommands(AppCommandConfig),
-    /// `rngpui` CLI: write an annotated tree dump (authored facts + computed bounds)
-    /// to `path`, then emit a `dumpReady` ack.
-    Dump {
-        req_id: u64,
-        path: String,
+    DebugDump {
+        reply: flume::Sender<serde_json::Value>,
     },
-    /// `rngpui do tap`: synthesize a press gesture at a window point.
-    Tap {
+    DebugTap {
         x: f32,
         y: f32,
+        reply: flume::Sender<serde_json::Value>,
     },
-    /// `rngpui do scroll`: scroll the topmost scroll container at a point by (dx, dy).
-    ScrollAt {
+    DebugScrollAt {
         x: f32,
         y: f32,
         dx: f32,
         dy: f32,
+        reply: flume::Sender<serde_json::Value>,
     },
-    /// `rngpui do type`: type text into the focused input.
-    TypeText {
+    DebugTypeText {
         text: String,
+        reply: flume::Sender<serde_json::Value>,
     },
-    /// `rngpui do key`: send a single key (with optional modifiers) to the focused input.
-    KeyPress {
+    DebugKeyPress {
         key: String,
+        reply: flume::Sender<serde_json::Value>,
     },
 }
 
-/// Parse one stdin line into an `Incoming`. A `$cmd` object is a webview command;
-/// anything else is parsed as an element tree.
+/// Parse one JS-host payload into an `Incoming`. A `$cmd` object is a native host
+/// command; anything else is parsed as an element tree.
 fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
     if let Some(cmd) = v.get("$cmd").and_then(|c| c.as_str()) {
         let id = v.get("id").and_then(|x| x.as_u64());
@@ -1007,31 +1052,6 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
             "appCommands" => serde_json::from_value(v.clone())
                 .ok()
                 .map(Incoming::AppCommands),
-            "dump" => {
-                let path = v.get("path").and_then(|x| x.as_str())?.to_string();
-                let req_id = v.get("reqId").and_then(|x| x.as_u64()).unwrap_or(0);
-                Some(Incoming::Dump { req_id, path })
-            }
-            "tap" => {
-                let x = v.get("x").and_then(|x| x.as_f64())? as f32;
-                let y = v.get("y").and_then(|x| x.as_f64())? as f32;
-                Some(Incoming::Tap { x, y })
-            }
-            "scrollAt" => {
-                let x = v.get("x").and_then(|x| x.as_f64())? as f32;
-                let y = v.get("y").and_then(|x| x.as_f64())? as f32;
-                let dx = v.get("dx").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
-                let dy = v.get("dy").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
-                Some(Incoming::ScrollAt { x, y, dx, dy })
-            }
-            "type" => {
-                let text = v.get("text").and_then(|x| x.as_str())?.to_string();
-                Some(Incoming::TypeText { text })
-            }
-            "key" => {
-                let key = v.get("key").and_then(|x| x.as_str())?.to_string();
-                Some(Incoming::KeyPress { key })
-            }
             _ => None,
         };
     }
@@ -1120,54 +1140,103 @@ fn build_app_menu_item(item: AppCommandMenuItem) -> MenuItem {
     }
 }
 
-fn main() {
-    // Background thread continuously reads JSON from stdin (one message per line) and
-    // hands each to a flume channel. The first tree bootstraps the window size; the
-    // rest are applied by a foreground task that calls cx.notify() — no polling.
-    let (tree_tx, tree_rx) = flume::unbounded::<Incoming>();
-    std::thread::spawn(move || {
-        let stdin = io::stdin();
-        for line in stdin.lock().lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => break,
-            };
-            if line.trim().is_empty() {
-                continue;
-            }
-            let v: serde_json::Value = match serde_json::from_str(&line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            if let Some(msg) = parse_incoming(&v) {
-                if tree_tx.send(msg).is_err() {
-                    break; // window closed
-                }
-            }
-        }
-    });
-
-    // first tree bootstraps the window; ignore any commands that arrive before it.
-    let initial = loop {
-        match tree_rx.recv() {
-            Ok(Incoming::Tree(t)) => break t,
-            Ok(_) => continue,
-            Err(_) => break fallback_root(),
+/// Read the app bundle named by RNGPUI_BUNDLE — Hermes bytecode (`app.hbc`) or JS source.
+/// Hermes auto-detects HBC vs. source by magic, so either works.
+fn load_bundle() -> Vec<u8> {
+    let path = match std::env::var("RNGPUI_BUNDLE") {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("[hermes] RNGPUI_BUNDLE not set — point it at app.hbc or app.js");
+            std::process::exit(1);
         }
     };
+    match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("[hermes] cannot read bundle {path}: {e}");
+            std::process::exit(1);
+        }
+    }
+}
 
-    // Window opens at the root's declared width/height; after that it fills.
-    let win_w = initial.style.width.and_then(Dim::as_px).unwrap_or(720.0);
-    let win_h = initial.style.height.and_then(Dim::as_px).unwrap_or(800.0);
-    // debug override: RNGPUI_WINDOW_SIZE="w,h" forces a fixed window size — e.g. a
-    // small corner window for non-focus-stealing visual debugging (a backgrounded
-    // window must be unoccluded to render + be screenshotted on macOS).
-    let (win_w, win_h) = parse_point_env("RNGPUI_WINDOW_SIZE")
-        .map(|p| (f32::from(p.x), f32::from(p.y)))
-        .unwrap_or((win_w, win_h));
-    let app_root = fill_root(initial);
+#[cfg(target_os = "macos")]
+fn pick_paths_native(
+    files: bool,
+    directories: bool,
+    multiple: bool,
+    prompt: &str,
+) -> Result<Vec<String>, String> {
+    use cocoa::base::{NO, YES, id, nil};
+    use cocoa::foundation::{NSInteger, NSString, NSUInteger};
+    use objc::{class, msg_send, sel, sel_impl};
+    use std::ffi::CStr;
 
-    bridge::ready(win_w, win_h);
+    unsafe {
+        let panel: id = msg_send![class!(NSOpenPanel), openPanel];
+        let _: () = msg_send![panel, setCanChooseFiles: if files { YES } else { NO }];
+        let _: () = msg_send![panel, setCanChooseDirectories: if directories { YES } else { NO }];
+        let _: () = msg_send![panel, setAllowsMultipleSelection: if multiple { YES } else { NO }];
+        let message = NSString::alloc(nil).init_str(prompt);
+        let _: () = msg_send![panel, setMessage: message];
+
+        let result: NSInteger = msg_send![panel, runModal];
+        if result != 1 {
+            return Ok(Vec::new());
+        }
+
+        let urls: id = msg_send![panel, URLs];
+        let count: NSUInteger = msg_send![urls, count];
+        let mut paths = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let url: id = msg_send![urls, objectAtIndex: index];
+            let path: id = msg_send![url, path];
+            let cstr: *const std::os::raw::c_char = msg_send![path, UTF8String];
+            if !cstr.is_null()
+                && let Ok(path) = CStr::from_ptr(cstr).to_str()
+            {
+                paths.push(path.to_string());
+            }
+        }
+        Ok(paths)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pick_paths_native(
+    _files: bool,
+    _directories: bool,
+    _multiple: bool,
+    _prompt: &str,
+) -> Result<Vec<String>, String> {
+    Err("native file picker is only available on macos".to_string())
+}
+
+fn main() {
+    let _ = STARTUP.set(std::time::Instant::now());
+    if let Ok(path) = std::env::var("RNGPUI_SERVICE_PID_FILE") {
+        if let Err(error) = std::fs::write(&path, std::process::id().to_string()) {
+            eprintln!("[rngpui] failed to write service pid file {path}: {error}");
+        }
+    }
+    // The JS runs in an embedded Hermes runtime on a dedicated thread (hermes.rs). The
+    // bundle's reconciler hands every committed tree to __rngpui_applyTree, which parses it
+    // and sends an Incoming on this channel: the first tree bootstraps the window size, the
+    // rest are applied by a foreground task that calls cx.notify() — no polling.
+    let (tree_tx, tree_rx) = flume::unbounded::<Incoming>();
+    if let Ok(path) = std::env::var("RNGPUI_CONTROL_SOCKET") {
+        debug_control::start(path, tree_tx.clone());
+    }
+
+    // start the JS engine; its first synchronous React commit sends the first tree below.
+    // native events + fetch/ws results flow back to the JS thread via hermes::post.
+    let bundle = load_bundle();
+    startup_mark("bundle loaded");
+    hermes::start(bundle, tree_tx);
+    // NOTE: we deliberately do NOT block for the first tree here. The GPUI platform init
+    // below (Application::new + app.run + gpui_component::init) is tree-independent and is
+    // the dominant cold-start cost (~85ms), so we let it overlap the JS eval (~60ms). The
+    // first tree is awaited inside app.run, right before the window opens — by then it's
+    // already available, so there's no added latency and no window-size flash.
 
     // test mode keeps conformance windows backgrounded and off the main screen.
     let test_mode = std::env::var("RNGPUI_TEST_MODE").is_ok();
@@ -1194,10 +1263,13 @@ fn main() {
     let show_window = (!test_mode || test_onscreen) && !capture_onscreen;
 
     let app = gpui::Application::new().with_assets(icons::Assets);
+    startup_mark("Application::new");
     app.run(move |cx: &mut App| {
+        startup_mark("app.run entered");
         // sets up gpui-component's theme + the input key bindings (backspace,
         // arrows, select-all, copy/paste, word-motion, …) used by InputState.
         gpui_component::init(cx);
+        startup_mark("gpui_component::init done");
         Theme::global_mut(cx).background = gpui::Hsla::transparent_black();
         // React Native multiline TextInput uses shift+enter for a newline when
         // plain enter submits. gpui-component only binds platform-secondary+enter.
@@ -1224,10 +1296,36 @@ fn main() {
         })
         .detach();
 
-        // The view that renders the tree. Created up front so the stdin pump below
+        // await the first tree HERE (after the tree-independent GPUI init above, which
+        // overlapped the JS eval). it bootstraps the window size + initial content.
+        startup_mark("awaiting first tree");
+        let initial = loop {
+            match tree_rx.recv() {
+                Ok(Incoming::Tree(t)) => break t,
+                Ok(Incoming::Quit) => {
+                    cx.quit();
+                    return;
+                }
+                Ok(_) => continue,
+                Err(_) => break fallback_root(),
+            }
+        };
+        startup_mark("first tree received");
+        // window opens at the root's declared width/height (RNGPUI_WINDOW_SIZE overrides);
+        // after that it fills.
+        let win_w = initial.style.width.and_then(Dim::as_px).unwrap_or(720.0);
+        let win_h = initial.style.height.and_then(Dim::as_px).unwrap_or(800.0);
+        let (win_w, win_h) = parse_point_env("RNGPUI_WINDOW_SIZE")
+            .map(|p| (f32::from(p.x), f32::from(p.y)))
+            .unwrap_or((win_w, win_h));
+        let app_root = fill_root(initial);
+        bridge::ready(win_w, win_h);
+
+        // The view that renders the tree. Created up front so the applier task below
         // can update it directly.
         let content = cx.new(|_| ServiceApp {
             root: app_root,
+            dump_tree_path: std::env::var("RNGPUI_DUMP_TREE").ok(),
             last_w: 0.0,
             last_h: 0.0,
             inputs: HashMap::new(),
@@ -1284,11 +1382,14 @@ fn main() {
         };
 
         let pump = content.clone();
+        startup_mark("pre open_window");
         let window_handle = cx
             .open_window(options, move |window, cx| {
                 window.set_window_title("react-native-gpui");
+                startup_mark("open_window cb: pre glass");
                 #[cfg(target_os = "macos")]
                 liquid_glass::install(window);
+                startup_mark("open_window cb: post glass");
                 #[cfg(target_os = "macos")]
                 if offscreen_test_window && !liquid_glass::show_offscreen_test_window(window) {
                     // macOS constrained the window back on-screen (happens on some
@@ -1335,6 +1436,7 @@ fn main() {
                 cx.new(|cx| gpui_component::Root::new(content.clone(), window, cx))
             })
             .expect("open window");
+        startup_mark("window opened (GPUI/Metal init)");
         // bring the app to the front so keystrokes reach the focused input
         // (skipped in background mode so it doesn't pop over your work).
         if !background {
@@ -1426,6 +1528,10 @@ fn main() {
         cx.spawn(async move |cx| {
             while let Ok(msg) = tree_rx.recv_async().await {
                 match msg {
+                    Incoming::Quit => {
+                        let _ = cx.update(|cx| cx.quit());
+                        break;
+                    }
                     Incoming::FocusInput { id } => {
                         let applied = window_handle.update(cx, |_root, window, cx| {
                             pump.update(cx, |this, cx| {
@@ -1446,15 +1552,36 @@ fn main() {
                             break;
                         }
                     }
-                    // `rngpui do type`: insert text at the focused input's cursor, going
-                    // through the same InputState path a real keypress would, so onChange
-                    // fires and the rendered value updates.
-                    Incoming::TypeText { text } => {
+                    Incoming::PickPaths {
+                        id,
+                        files,
+                        directories,
+                        multiple,
+                        prompt,
+                    } => {
+                        let result = pick_paths_native(files, directories, multiple, &prompt);
+                        let payload = match result {
+                            Ok(paths) => serde_json::json!({
+                                "id": id,
+                                "ok": true,
+                                "paths": paths,
+                            }),
+                            Err(error) => serde_json::json!({
+                                "id": id,
+                                "ok": false,
+                                "error": error,
+                            }),
+                        };
+                        hermes::post("__rngpui_filePickerDone", payload.to_string());
+                    }
+                    Incoming::DebugTypeText { text, reply } => {
+                        let mut focused_id = None;
                         let applied = window_handle.update(cx, |_root, window, cx| {
                             pump.update(cx, |this, cx| {
                                 if let Some(id) = this.focused_input
                                     && let Some(state) = this.inputs.get(&id)
                                 {
+                                    focused_id = Some(id);
                                     state.update(cx, |input, cx| {
                                         input.insert(text.clone(), window, cx)
                                     });
@@ -1462,19 +1589,23 @@ fn main() {
                                 cx.notify();
                             })
                         });
+                        let _ = reply.send(serde_json::json!({
+                            "ok": applied.is_ok() && focused_id.is_some(),
+                            "type": "type",
+                            "focusedId": focused_id,
+                        }));
                         if applied.is_err() {
                             break;
                         }
                     }
-                    // `rngpui do key`: a single named key into the focused input. Enter
-                    // submits / inserts a newline (multiline) via the existing submit
-                    // path; Backspace deletes; printable single chars insert.
-                    Incoming::KeyPress { key } => {
+                    Incoming::DebugKeyPress { key, reply } => {
+                        let mut focused_id = None;
                         let applied = window_handle.update(cx, |_root, window, cx| {
                             pump.update(cx, |this, cx| {
                                 if let Some(id) = this.focused_input
                                     && let Some(state) = this.inputs.get(&id)
                                 {
+                                    focused_id = Some(id);
                                     let key_lower = key.to_ascii_lowercase();
                                     state.update(cx, |input, cx| match key_lower.as_str() {
                                         "enter" | "return" => {
@@ -1499,6 +1630,11 @@ fn main() {
                                 cx.notify();
                             })
                         });
+                        let _ = reply.send(serde_json::json!({
+                            "ok": applied.is_ok() && focused_id.is_some(),
+                            "type": "key",
+                            "focusedId": focused_id,
+                        }));
                         if applied.is_err() {
                             break;
                         }
@@ -1524,6 +1660,7 @@ fn main() {
                                 bridge::emit_cached_layout_for_new_subscribers(&layout_ids);
                                 emit_definite_cached_layouts(&next_root);
                                 this.root = next_root;
+                                this.write_debug_dump();
                                 cx.notify();
                             }
                             Incoming::Eval { id, js } => {
@@ -1565,43 +1702,66 @@ fn main() {
                                 }
                                 cx.notify();
                             }
-                            // `rngpui get …`: serialize the live tree (authored facts +
-                            // computed bounds) to a file, then ack so the CLI can read it.
-                            Incoming::Dump { req_id, path } => {
-                                let value = dump::dump_tree(&this.root);
-                                match serde_json::to_string(&value)
-                                    .map_err(|e| e.to_string())
-                                    .and_then(|json| {
-                                        std::fs::write(&path, json).map_err(|e| e.to_string())
-                                    }) {
-                                    Ok(()) => bridge::dump_ready(req_id, &path),
-                                    Err(err) => eprintln!("[rngpui dump] failed: {err}"),
+                            Incoming::DebugDump { reply } => {
+                                let tree = dump::dump_tree(&this.root);
+                                let _ = reply.send(serde_json::json!({
+                                    "ok": true,
+                                    "type": "dump",
+                                    "tree": tree,
+                                }));
+                            }
+                            Incoming::DebugTap { x, y, reply } => {
+                                let target = inspector::tap_target_at(&this.root, x, y);
+                                if let Some(target) = target {
+                                    elements::synth_tap(target.id, &target.events, target.bounds, x, y);
+                                    if target.focusable_input {
+                                        this.focused_input = Some(target.id);
+                                    }
+                                    cx.notify();
+                                    let _ = reply.send(serde_json::json!({
+                                        "ok": true,
+                                        "type": "tap",
+                                        "targetId": target.id,
+                                        "focusedInput": target.focusable_input,
+                                    }));
+                                } else {
+                                    let _ = reply.send(serde_json::json!({
+                                        "ok": false,
+                                        "type": "tap",
+                                        "error": "no tappable node at point",
+                                    }));
                                 }
                             }
-                            // `rngpui do tap <x,y>`: hit-test the live tree and fire the
-                            // press sequence the node under the point listens for.
-                            Incoming::Tap { x, y } => {
-                                if let Some((id, events, bounds)) =
-                                    inspector::tap_target_at(&this.root, x, y)
-                                {
-                                    elements::synth_tap(id, &events, bounds, x, y);
-                                }
-                                cx.notify();
-                            }
-                            // `rngpui do scroll <x,y> <dx,dy>`: scroll the container at the
-                            // point by a delta.
-                            Incoming::ScrollAt { x, y, dx, dy } => {
-                                if let Some(id) =
-                                    inspector::scroll_container_at(&this.root, x, y)
-                                {
+                            Incoming::DebugScrollAt {
+                                x,
+                                y,
+                                dx,
+                                dy,
+                                reply,
+                            } => {
+                                let target = inspector::scroll_container_at(&this.root, x, y);
+                                if let Some(id) = target {
                                     elements::scroll_by(id, dx, dy);
+                                    cx.notify();
+                                    let _ = reply.send(serde_json::json!({
+                                        "ok": true,
+                                        "type": "scrollAt",
+                                        "targetId": id,
+                                    }));
+                                } else {
+                                    let _ = reply.send(serde_json::json!({
+                                        "ok": false,
+                                        "type": "scrollAt",
+                                        "error": "no scroll container at point",
+                                    }));
                                 }
-                                cx.notify();
                             }
                             Incoming::FocusInput { .. }
                             | Incoming::BlurInput
-                            | Incoming::TypeText { .. }
-                            | Incoming::KeyPress { .. }
+                            | Incoming::PickPaths { .. }
+                            | Incoming::Quit
+                            | Incoming::DebugTypeText { .. }
+                            | Incoming::DebugKeyPress { .. }
                             | Incoming::AppCommands(_) => unreachable!(),
                         });
                         if applied.is_err() {

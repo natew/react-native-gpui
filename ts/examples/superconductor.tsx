@@ -4,7 +4,7 @@
  * components); the conversation is a WebView (native web scroll + selection).
  * Sending a message re-renders the WebView's HTML from React state.
  *
- *   bun run examples/superconductor.tsx
+ *   bun run superconductor
  */
 import { useMemo, useState } from "react";
 import {

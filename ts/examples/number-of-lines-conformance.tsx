@@ -2,7 +2,7 @@
  * Visual conformance fixture for RN Text `numberOfLines`.
  *
  * Run:
- *   RNGPUI_NO_ACTIVATE=1 bun run examples/number-of-lines-conformance.tsx
+ *   bun run conformance:text-lines
  *
  * Capture the GPUI window, then compare against a known-good capture with:
  *   bun run pixel-diff before.png after.png --crop 0,0,540,300 --diff-out /tmp/text-lines-diff.png

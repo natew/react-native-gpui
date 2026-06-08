@@ -10,7 +10,7 @@ const root = dirname(here);
 const pidPath = `/tmp/rngpui-input-conformance-${process.pid}.pid`;
 let fixturePid = 0;
 
-const child = spawn("bun", ["run", "examples/input-conformance.tsx"], {
+const child = spawn("node", ["scripts/run-hermes-example.mjs", "examples/input-conformance.tsx"], {
     cwd: root,
     env: conformanceEnv({
         RNGPUI_INPUT_EXPECT: expected,

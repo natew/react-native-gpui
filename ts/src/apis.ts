@@ -2,7 +2,6 @@
  * Non-component RN APIs: Platform, PixelRatio, useWindowDimensions.
  */
 import { useEffect, useState } from "react";
-import { spawn } from "child_process";
 import { Dimensions, type ScaledSize } from "./Dimensions";
 import {
     findHostNodeId,
@@ -181,12 +180,58 @@ export type FilePickerOptions = {
     prompt?: string;
 };
 
+type FilePickerRequest = Required<FilePickerOptions> & { id: number };
+type FilePickerResponse = { id: number; ok?: boolean; paths?: unknown; error?: string };
+
+declare global {
+    var __rngpui_pickPaths: ((json: string) => void) | undefined;
+    var __rngpui_filePickerDone: ((json: string) => void) | undefined;
+}
+
+let filePickerSeq = 1;
+const pendingFilePickers = new Map<number, { resolve(paths: string[]): void; reject(error: Error): void }>();
+
+globalThis.__rngpui_filePickerDone = (json: string) => {
+    let response: FilePickerResponse;
+    try {
+        response = JSON.parse(json) as FilePickerResponse;
+    } catch (error) {
+        return;
+    }
+    const pending = pendingFilePickers.get(response.id);
+    if (!pending) return;
+    pendingFilePickers.delete(response.id);
+    if (response.ok === false) {
+        pending.reject(new Error(response.error || "native file picker failed"));
+        return;
+    }
+    pending.resolve(parseFilePickerPaths(response.paths));
+};
+
 export const FilePicker = {
     async pickPaths(options: FilePickerOptions = {}): Promise<string[]> {
-        return runFilePickerScript(filePickerScript(options));
+        const pickPaths = globalThis.__rngpui_pickPaths;
+        if (typeof pickPaths !== "function") {
+            throw new Error("native file picker host is not available");
+        }
+        const request: FilePickerRequest = {
+            id: filePickerSeq++,
+            files: options.files !== false,
+            directories: !!options.directories,
+            multiple: !!options.multiple,
+            prompt: options.prompt || "Choose file",
+        };
+        return new Promise((resolve, reject) => {
+            pendingFilePickers.set(request.id, { resolve, reject });
+            try {
+                pickPaths(JSON.stringify(request));
+            } catch (error) {
+                pendingFilePickers.delete(request.id);
+                reject(error instanceof Error ? error : new Error(String(error)));
+            }
+        });
     },
-    _script: filePickerScript,
-    _parse: parseFilePickerOutput,
+    _parse: parseFilePickerPaths,
 };
 
 export function findNodeHandle(ref: unknown): number | null {
@@ -235,63 +280,7 @@ export const AccessibilityInfo = {
     setAccessibilityFocus(_reactTag: number): void {},
 };
 
-function filePickerScript(options: FilePickerOptions) {
-    const files = options.files !== false;
-    const directories = !!options.directories;
-    const multiple = !!options.multiple;
-    const prompt = options.prompt || "Choose file";
-    return `
-ObjC.import('AppKit')
-const panel = $.NSOpenPanel.openPanel
-panel.canChooseFiles = ${files ? "true" : "false"}
-panel.canChooseDirectories = ${directories ? "true" : "false"}
-panel.allowsMultipleSelection = ${multiple ? "true" : "false"}
-panel.message = ${JSON.stringify(prompt)}
-const result = panel.runModal()
-if (result !== $.NSModalResponseOK) {
-  JSON.stringify([])
-} else {
-  const urls = panel.URLs
-  const paths = []
-  for (let index = 0; index < urls.count; index++) {
-    paths.push(ObjC.unwrap(urls.objectAtIndex(index).path))
-  }
-  JSON.stringify(paths)
-}
-`.trim();
-}
-
-function runFilePickerScript(script: string): Promise<string[]> {
-    return new Promise((resolve, reject) => {
-        const child = spawn("osascript", ["-l", "JavaScript", "-e", script], {
-            stdio: ["ignore", "pipe", "pipe"],
-        });
-        let output = "";
-        let error = "";
-        child.stdout.on("data", (chunk: Buffer) => {
-            output += chunk.toString();
-        });
-        child.stderr.on("data", (chunk: Buffer) => {
-            error += chunk.toString();
-        });
-        child.on("error", reject);
-        child.on("exit", (code) => {
-            if (code === 0) {
-                resolve(parseFilePickerOutput(output));
-                return;
-            }
-            if (/User canceled/i.test(error)) {
-                resolve([]);
-                return;
-            }
-            reject(new Error(error.trim() || `file picker exited with code ${code}`));
-        });
-    });
-}
-
-function parseFilePickerOutput(output: string) {
-    const trimmed = output.trim();
-    if (!trimmed) return [];
-    const parsed = JSON.parse(trimmed) as unknown;
+function parseFilePickerPaths(value: unknown): string[] {
+    const parsed = typeof value === "string" ? JSON.parse(value) as unknown : value;
     return Array.isArray(parsed) ? parsed.filter((path): path is string => typeof path === "string" && path.length > 0) : [];
 }

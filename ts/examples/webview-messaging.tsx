@@ -4,7 +4,7 @@
  *   host → frame: ref.injectJavaScript(js) runs JS in the page; ref.postMessage(d)
  *                 delivers a 'message' event the page listens for
  *
- *   RNGPUI_WEBVIEW_DEBUG=1 bun run examples/webview-messaging.tsx
+ *   RNGPUI_WEBVIEW_DEBUG=1 node scripts/run-hermes-example.mjs examples/webview-messaging.tsx --interactive
  *
  * Watch the log: you should see a full round-trip — onLoad → injectJavaScript runs
  * setTitle() in the page → the page posts back → onMessage logs it.

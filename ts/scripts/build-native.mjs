@@ -13,6 +13,15 @@ mkdirSync(nativeDir, { recursive: true });
 copyFileSync(serviceSource, serviceTarget);
 
 const linkedDylibs = linkedLibraries(serviceTarget);
+const needsHermes = linkedDylibs.some((line) => line.includes("libhermesvm"));
+const hermesDylib = join(process.env.HERMES_ROOT || "/Users/n8/github/hermes", "build", "lib", "libhermesvm.dylib");
+if (needsHermes) {
+    if (!existsSync(hermesDylib)) {
+        throw new Error(`rngpui-service links libhermesvm, but libhermesvm.dylib was not found at ${hermesDylib}`);
+    }
+    copyFileSync(hermesDylib, join(nativeDir, "libhermesvm.dylib"));
+}
+
 const needsGhostty = linkedDylibs.some((line) => line.includes("libghostty-vt"));
 const ghosttyDylibs = findNativeDylibs(join(releaseDir, "build"));
 if (needsGhostty && ghosttyDylibs.length === 0) {

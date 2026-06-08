@@ -4,7 +4,7 @@
  * testID'd boxes the CLI can resolve by selector and assert non-degenerate bounds +
  * sampled-color-matches-authored-color against, all offscreen, no screenshot.
  *
- *   RNGPUI_NO_ACTIVATE=1 RNGPUI_TEST_MODE=1 bun run examples/describe-fixture.tsx
+ *   node scripts/describe-conformance.mjs
  */
 import { AppRegistry, View, Text } from "../src/index";
 

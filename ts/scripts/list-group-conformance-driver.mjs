@@ -23,7 +23,7 @@ await execFileText("cargo", ["test", "--bin", "rngpui-service", "press_drag"], {
     cwd: `${repo}/rust`,
 });
 
-const child = spawn("bun", ["run", "examples/list-group-conformance.tsx"], {
+const child = spawn("node", ["scripts/run-hermes-example.mjs", "examples/list-group-conformance.tsx"], {
     cwd: root,
     env: conformanceEnv({
         RNGPUI_LIST_GROUP_SMOKE: "1",

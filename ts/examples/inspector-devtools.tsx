@@ -1,7 +1,7 @@
 /**
  * native inspector fixture.
  *
- *   bun run examples/inspector-devtools.tsx
+ *   node scripts/inspector-conformance.mjs
  *
  * hold Option over the window to highlight nodes. Option-click copies a snapshot.
  */

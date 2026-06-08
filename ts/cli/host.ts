@@ -1,26 +1,23 @@
 // Launch / attach plumbing for the `rngpui` developer CLI.
 //
-// Two target modes, exactly like sootsim's open-vs-capture split:
-//   --launch <entry.tsx>  spawn an offscreen, non-activating host that runs the entry,
-//                         own its control channel, and drive + dump it on demand.
-//   --attach              find the running rngpui-service window and capture its pixels
-//                         read-only (no driving, no on-demand dump — we don't own its
-//                         stdin). describe/color still work off a fresh window capture.
+// The only launch model is the Hermes one-process host:
+//   entry.tsx -> bundle-hermes.mjs -> app.hbc -> rngpui-service
 //
-// All launches are forced offscreen + non-activating per repo policy: no foreground GUI.
+// Bun is used as a compiler only. The app runtime is always the Rust service with
+// embedded Hermes, and debug commands go over RNGPUI_CONTROL_SOCKET.
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { createConnection } from "node:net";
 import {
-    closeSync,
     copyFileSync,
     existsSync,
     mkdtempSync,
-    openSync,
+    mkdirSync,
+    readdirSync,
     readFileSync,
     rmSync,
     statSync,
     writeFileSync,
-    writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -50,12 +47,10 @@ export interface LaunchedHost {
     pid: number;
     servicePid: number;
     window: GpuiWindow;
+    sessionDir: string;
     appName: string;
-    /** send one JSON command to the running service via the control fifo */
-    send(cmd: object): void;
-    /** request a fresh annotated dump (authored facts + computed bounds) and read it */
+    request<T = unknown>(cmd: object): Promise<T>;
     dump(): Promise<DumpNode>;
-    /** capture the window to a PNG path */
     capture(path: string): void;
     close(): void;
 }
@@ -64,9 +59,7 @@ export interface AttachedHost {
     mode: "attach";
     servicePid: number;
     window: GpuiWindow;
-    /** capture the window to a PNG path */
     capture(path: string): void;
-    /** the most recent JS-side RNGPUI_DUMP_TREE if one is discoverable, else null */
     dump(): Promise<DumpNode | null>;
     close(): void;
 }
@@ -91,227 +84,258 @@ export type DumpNode = {
     nativeListGroup?: string;
 };
 
-function makeFifo(path: string) {
-    rmSync(path, { force: true });
-    execFileSync("mkfifo", [path]);
+type SessionMeta = {
+    version: 1;
+    servicePid: number;
+    socketPath: string;
+    capturePath: string;
+    bundlePath: string;
+    appName: string;
+    size: string;
+};
+
+type LaunchOptions = {
+    size?: string;
+    bundle?: string;
+    keep?: boolean;
+};
+
+function serviceBinary() {
+    const binary = resolve(process.env.RNGPUI_SERVICE || resolve(tsRoot, "..", "rust", "target", "release", "rngpui-service"));
+    if (!existsSync(binary)) throw new Error(`rngpui-service not found: ${binary}`);
+    stageServiceDylibs(binary);
+    return binary;
 }
 
-// Launch an offscreen host running `entry`, own its control channel, wait for the
-// window + service to come up.
-export async function launchHost(
-    entry: string,
-    opts: { size?: string; launchCmd?: string; cwd?: string } = {},
-): Promise<LaunchedHost> {
-    // --launch-cmd lets the CLI drive ANY rngpui app via its own bundler/launcher
-    // (e.g. agentbus' open-gpui), as long as that launcher forwards the control env
-    // (RNGPUI_CONTROL_FIFO/EVENTS/SERVICE_PID_FILE) to the shared runtime. Plain
-    // entries still use `bun run` from tsRoot.
-    const launchCwd = opts.cwd ? resolve(opts.cwd) : tsRoot;
-    const entryPath = opts.launchCmd ? "" : resolve(entry);
-    if (!opts.launchCmd && !existsSync(entryPath)) throw new Error(`entry not found: ${entryPath}`);
+function stageServiceDylibs(binary: string) {
+    const releaseDir = dirname(binary);
+    const hermesRoot = resolve(process.env.HERMES_ROOT || "/Users/n8/github/hermes");
+    const hermesDylib = resolve(hermesRoot, "build", "lib", "libhermesvm.dylib");
+    if (!existsSync(hermesDylib)) throw new Error(`libhermesvm.dylib not found: ${hermesDylib}`);
+    copyFileSync(hermesDylib, join(releaseDir, "libhermesvm.dylib"));
 
+    const ghostty = findDylibs(resolve(tsRoot, "..", "rust", "target", "release", "build"), "libghostty-vt");
+    if (ghostty.length === 0) throw new Error("libghostty-vt dylib not found under rust/target/release/build");
+    for (const dylib of ghostty) copyFileSync(dylib, join(releaseDir, dylib.split("/").pop() || "libghostty-vt.dylib"));
+}
+
+function findDylibs(dir: string, prefix: string): string[] {
+    if (!existsSync(dir)) return [];
+    const out: string[] = [];
+    const stack = [dir];
+    while (stack.length) {
+        const current = stack.pop()!;
+        for (const entry of readdirSync(current, { withFileTypes: true })) {
+            const path = join(current, entry.name);
+            if (entry.isDirectory()) stack.push(path);
+            else if (entry.name.endsWith(".dylib") && entry.name.startsWith(prefix)) out.push(path);
+        }
+    }
+    return out;
+}
+
+function bundleEntry(entry: string, workdir: string) {
+    const entryPath = resolve(entry);
+    if (!existsSync(entryPath)) throw new Error(`entry not found: ${entryPath}`);
+    const outJs = join(workdir, "app.js");
+    const result = spawnSync("bun", ["scripts/bundle-hermes.mjs", entryPath, outJs, "--bytecode"], {
+        cwd: tsRoot,
+        encoding: "utf8",
+        env: { ...process.env, NODE_ENV: process.env.NODE_ENV || "production" },
+    });
+    if (result.status !== 0) {
+        throw new Error(`bundle-hermes failed\n${result.stdout}\n${result.stderr}`);
+    }
+    const outHbc = outJs.replace(/\.js$/, ".hbc");
+    if (!existsSync(outHbc)) throw new Error(`bundle-hermes did not write ${outHbc}`);
+    return outHbc;
+}
+
+function writeSession(dir: string, meta: SessionMeta) {
+    writeFileSync(join(dir, "session.json"), JSON.stringify(meta, null, 2));
+}
+
+function readSession(dir: string): SessionMeta {
+    const path = join(resolve(dir), "session.json");
+    if (!existsSync(path)) throw new Error(`session metadata not found: ${path}`);
+    return JSON.parse(readFileSync(path, "utf8")) as SessionMeta;
+}
+
+function assertAlive(pid: number) {
+    try {
+        process.kill(pid, 0);
+    } catch {
+        throw new Error(`rngpui service pid ${pid} is not running`);
+    }
+}
+
+export async function launchHost(entry: string, opts: LaunchOptions = {}): Promise<LaunchedHost> {
+    const workdir = mkdtempSync(join(tmpdir(), "rngpui-cli-"));
     const stamp = `${process.pid}-${Date.now().toString(36)}`;
     const appName = `rngpui-cli-${stamp}`;
-    const workdir = mkdtempSync(join(tmpdir(), "rngpui-cli-"));
     const pidPath = join(workdir, "service.pid");
-    const fifoPath = join(workdir, "control.fifo");
-    const eventsPath = join(workdir, "events.ndjson");
-    const dumpPath = join(workdir, "dump.json");
-    // In-service full-opacity capture: the service writes this PNG every ~250ms via
-    // CGWindowListCreateImage + divide-out-alpha (the only path that recovers the real
-    // rendered chrome from an invisible non-activating window — cua-driver's grab of
-    // the alpha~0 window comes back transparent). See rust/src/capture_png.rs.
+    const socketPath = join(workdir, "control.sock");
     const capturePath = join(workdir, "frame.png");
-    makeFifo(fifoPath);
-    writeFileSync(eventsPath, "");
-
     const size = opts.size ?? "1280x860";
-    const [w, h] = size.split("x").map((n) => parseInt(n, 10));
+    const [w, h] = size.split("x").map((value) => parseInt(value, 10));
+    const bundlePath = opts.bundle ? resolve(opts.bundle) : bundleEntry(entry, workdir);
+    if (!existsSync(bundlePath)) throw new Error(`bundle not found: ${bundlePath}`);
 
-    const spawnEnv = {
+    const child = spawn(serviceBinary(), [], {
+        cwd: tsRoot,
+        env: {
             ...process.env,
+            RNGPUI_BUNDLE: bundlePath,
             RNGPUI_NO_ACTIVATE: "1",
             RNGPUI_TEST_MODE: "1",
-            // capture mode keeps the window on-screen-but-invisible so the WindowServer
-            // composites it and pixel capture reads a full-opacity surface (no flash,
-            // no focus theft). Same path the parity/capture harness uses.
             RNGPUI_CAPTURE_ONSCREEN: "1",
             RNGPUI_OPAQUE_WINDOW: "1",
-            // capture math is `out = chrome * alpha`, divided back out per-pixel. The
-            // 0.02 default keeps the window imperceptible but leaves only ~5 levels of
-            // precision per channel, drifting sampled colors badly. 0.2 stays
-            // imperceptible-class (offscreen + non-activating, never brought to front)
-            // while giving ~50 levels, so sampled colors track the authored ones
-            // closely enough to diagnose occlusion. Overridable.
             RNGPUI_CAPTURE_ALPHA: process.env.RNGPUI_CAPTURE_ALPHA || "0.2",
             RNGPUI_WINDOW_SIZE: `${w},${h}`,
             RNGPUI_CAPTURE_PNG: capturePath,
             RNGPUI_SERVICE_PID_FILE: pidPath,
-            RNGPUI_CONTROL_FIFO: fifoPath,
-            RNGPUI_CONTROL_EVENTS: eventsPath,
+            RNGPUI_CONTROL_SOCKET: socketPath,
             RNGPUI_APP_NAME: appName,
-    };
-    const child: ChildProcess = opts.launchCmd
-        ? spawn("sh", ["-c", opts.launchCmd], { cwd: launchCwd, env: spawnEnv, stdio: ["ignore", "pipe", "pipe"] })
-        : spawn("bun", ["run", entryPath], { cwd: launchCwd, env: spawnEnv, stdio: ["ignore", "pipe", "pipe"] });
+        },
+        stdio: ["ignore", "ignore", "pipe"],
+    });
     let log = "";
-    child.stdout?.on("data", (c) => (log += c));
-    child.stderr?.on("data", (c) => (log += c));
+    child.stderr?.on("data", (chunk) => (log += chunk));
 
-    const fail = (msg: string): never => {
+    const fail = (message: string): never => {
+        killPidFile(pidPath);
         try {
             child.kill("SIGTERM");
         } catch {
             /* already gone */
         }
-        // the detached service may have already written its pid before we gave up
-        // (e.g. window-detect timeout on the launcher path) — kill it too, else it
-        // orphans (ppid=1) and piles up into a focus-stealing window storm.
-        try {
-            const p = parseInt(readFileSync(pidPath, "utf8").trim(), 10);
-            if (p > 0) process.kill(p, "SIGTERM");
-        } catch {
-            /* no pid yet / already gone */
-        }
         rmSync(workdir, { recursive: true, force: true });
-        throw new Error(`${msg}\n--- host log tail ---\n${log.split("\n").slice(-20).join("\n")}`);
+        throw new Error(`${message}\n--- host log tail ---\n${log.split("\n").slice(-30).join("\n")}`);
     };
 
-    // With --launch-cmd the spawned process is an external launcher (e.g. agentbus'
-    // open-gpui) that EXITS 0 after handing off to a detached app — so a clean exit is
-    // success, only a non-zero exit is failure. With a plain `bun run` entry the child
-    // IS the app, so any exit means it died. Also: the agentbus app's cold bundle build
-    // can take far longer than the 20s a plain example needs, so give the launcher path
-    // generous timeouts (timing out early rm'd the workdir out from under the late
-    // service, which then crashed writing its pid → ENOENT).
-    const launcherDied = () =>
-        opts.launchCmd ? child.exitCode != null && child.exitCode !== 0 : child.exitCode != null;
     let servicePid = 0;
     try {
         servicePid = await waitForServicePid(pidPath, {
-            timeoutMs: opts.launchCmd ? 120_000 : 20_000,
-            isFixtureExited: launcherDied,
+            timeoutMs: 20_000,
+            isFixtureExited: () => child.exitCode != null,
         });
-    } catch (err) {
-        fail(`service did not start: ${(err as Error).message}`);
+    } catch (error) {
+        fail(`service did not start: ${(error as Error).message}`);
     }
 
     let window: GpuiWindow;
     try {
         window = (await waitForWindow((win: GpuiWindow) => win.pid === servicePid && win.title === "react-native-gpui", {
-            timeoutMs: opts.launchCmd ? 30_000 : 15_000,
-            isFixtureExited: launcherDied,
+            timeoutMs: 15_000,
+            isFixtureExited: () => child.exitCode != null,
         })) as GpuiWindow;
-    } catch (err) {
+    } catch (error) {
         const seen = (listWindows() as GpuiWindow[])
-            .map((w) => `${w.owner}/"${w.title}"/pid${w.pid}/${w.width}x${w.height}`)
+            .map((win) => `${win.owner}/"${win.title}"/pid${win.pid}/${win.width}x${win.height}`)
             .join("  ");
-        fail(`window did not appear: ${(err as Error).message} [wanted pid ${servicePid} title "react-native-gpui"; saw: ${seen}]`);
+        fail(`window did not appear: ${(error as Error).message} [wanted pid ${servicePid}; saw: ${seen}]`);
     }
 
-    // give the first React commit + a paint pass time to land so bounds are populated.
-    await sleep(700);
+    await waitForSocket(socketPath, () => child.exitCode != null);
+    await sleep(500);
 
-    const send = (cmd: object) => {
-        const fd = openSync(fifoPath, "a");
-        try {
-            writeSync(fd, JSON.stringify(cmd) + "\n");
-        } finally {
-            closeSync(fd);
-        }
+    const meta: SessionMeta = {
+        version: 1,
+        servicePid,
+        socketPath,
+        capturePath,
+        bundlePath,
+        appName,
+        size,
     };
+    writeSession(workdir, meta);
+    return makeLaunchedHost({
+        child,
+        meta,
+        sessionDir: workdir,
+        window,
+        ownsProcess: true,
+        keepOnClose: opts.keep === true,
+    });
+}
 
-    let reqSeq = 1;
-    const dump = async (): Promise<DumpNode> => {
-        const reqId = reqSeq++;
-        rmSync(dumpPath, { force: true });
-        // truncate the events file so we only see acks for THIS request.
-        writeFileSync(eventsPath, "");
-        send({ $cmd: "dump", reqId, path: dumpPath });
-        const deadline = Date.now() + 8_000;
-        while (Date.now() < deadline) {
-            if (existsSync(eventsPath)) {
-                const lines = readFileSync(eventsPath, "utf8").split("\n").filter(Boolean);
-                for (const line of lines) {
-                    try {
-                        const evt = JSON.parse(line);
-                        if (evt.type === "dumpReady" && evt.reqId === reqId) {
-                            return JSON.parse(readFileSync(dumpPath, "utf8")) as DumpNode;
-                        }
-                    } catch {
-                        /* partial line */
-                    }
-                }
-            }
-            await sleep(40);
-        }
-        throw new Error("dump request timed out (no dumpReady ack)");
-    };
+export async function attachSession(sessionDir: string): Promise<LaunchedHost> {
+    const meta = readSession(sessionDir);
+    assertAlive(meta.servicePid);
+    await waitForSocket(meta.socketPath);
+    const window = (currentWindow(meta.servicePid) ??
+        ((await waitForWindow((win: GpuiWindow) => win.pid === meta.servicePid && win.title === "react-native-gpui", {
+            timeoutMs: 5_000,
+        })) as GpuiWindow)) as GpuiWindow;
+    return makeLaunchedHost({
+        child: null,
+        meta,
+        sessionDir: resolve(sessionDir),
+        window,
+        ownsProcess: false,
+        keepOnClose: true,
+    });
+}
 
+export function closeSession(sessionDir: string) {
+    const dir = resolve(sessionDir);
+    const meta = readSession(dir);
+    killPid(meta.servicePid);
+    rmSync(dir, { recursive: true, force: true });
+}
+
+function makeLaunchedHost({
+    child,
+    meta,
+    sessionDir,
+    window,
+    ownsProcess,
+    keepOnClose,
+}: {
+    child: ChildProcess | null;
+    meta: SessionMeta;
+    sessionDir: string;
+    window: GpuiWindow;
+    ownsProcess: boolean;
+    keepOnClose: boolean;
+}): LaunchedHost {
     return {
         mode: "launch",
-        pid: child.pid ?? 0,
-        servicePid,
-        window: window!,
-        appName,
-        send,
-        dump,
+        pid: child?.pid ?? meta.servicePid,
+        servicePid: meta.servicePid,
+        window,
+        sessionDir,
+        appName: meta.appName,
+        request<T = unknown>(cmd: object) {
+            return requestSocket<T>(meta.socketPath, cmd);
+        },
+        async dump() {
+            const response = await requestSocket<{ ok: boolean; tree?: DumpNode; error?: string }>(meta.socketPath, { $cmd: "dump" });
+            if (!response.ok || !response.tree) throw new Error(response.error || "dump failed");
+            return response.tree;
+        },
         capture(path: string) {
-            // The service writes a fresh full-opacity frame to RNGPUI_CAPTURE_PNG on a
-            // ~250ms timer. Wait for one, then copy it to the caller's path. A pump tick
-            // is forced first so the just-applied tap/scroll is reflected in the frame.
-            const deadline = Date.now() + 4_000;
-            while (Date.now() < deadline) {
-                if (existsSync(capturePath) && statSync(capturePath).size > 0) {
-                    // give the timer one more tick so the frame reflects the latest state
-                    execSyncSleep(300);
-                    copyFileSync(capturePath, path);
-                    return;
-                }
-                execSyncSleep(120);
-            }
-            throw new Error("in-service capture produced no frame (RNGPUI_CAPTURE_PNG)");
+            waitForCapture(meta.capturePath, path);
         },
         close() {
+            if (keepOnClose) return;
+            if (ownsProcess) killPid(meta.servicePid);
             try {
-                child.kill("SIGTERM");
+                child?.kill("SIGTERM");
             } catch {
                 /* already gone */
             }
-            // CRITICAL: the `bun run <entry>` parent spawns the rngpui-service as a
-            // detached grandchild — SIGTERM to the parent leaves the service orphaned
-            // (ppid=1), and these pile up across launches (focus-stealing window storm).
-            // Kill the service explicitly by the pid it wrote to RNGPUI_SERVICE_PID_FILE.
-            if (servicePid > 0) {
-                try {
-                    process.kill(servicePid, "SIGTERM");
-                } catch {
-                    /* already gone */
-                }
-            }
-            rmSync(workdir, { recursive: true, force: true });
+            rmSync(sessionDir, { recursive: true, force: true });
         },
     };
 }
 
-function execSyncSleep(ms: number) {
-    // synchronous sleep so capture() (called from sync sample paths) can wait for a
-    // fresh in-service frame without restructuring every caller as async.
-    try {
-        execFileSync("sleep", [String(ms / 1000)]);
-    } catch {
-        /* ignore */
-    }
-}
-
-// Attach read-only to the most recently-opened rngpui-service window (capture +
-// describe only — we don't own its stdin so we cannot drive it or request a dump).
 export async function attachHost(): Promise<AttachedHost> {
     const candidates = listWindows()
-        .filter((w: GpuiWindow) => w.title === "react-native-gpui" && w.owner !== "agentbus-gpui-user")
+        .filter((window: GpuiWindow) => window.title === "react-native-gpui" && window.owner !== "agentbus-gpui-user")
         .sort((a: GpuiWindow, b: GpuiWindow) => b.width * b.height - a.width * a.height);
     if (candidates.length === 0) {
-        throw new Error("no running rngpui window found to attach to (launch one with --launch <entry.tsx>)");
+        throw new Error("no running rngpui window found; launch one with --launch <entry.tsx> or --bundle <app.hbc>");
     }
     const window = candidates[0];
     return {
@@ -323,15 +347,10 @@ export async function attachHost(): Promise<AttachedHost> {
             captureWindow(fresh, path);
         },
         async dump() {
-            // best-effort: an attached process may have written a JS-side tree dump.
-            const guess = process.env.RNGPUI_DUMP_TREE;
-            if (guess && existsSync(guess) && statSync(guess).size > 0) {
-                return JSON.parse(readFileSync(guess, "utf8")) as DumpNode;
-            }
             return null;
         },
         close() {
-            /* read-only: never touch a process we don't own */
+            /* read-only: never touch a process we do not own */
         },
     };
 }
@@ -339,7 +358,93 @@ export async function attachHost(): Promise<AttachedHost> {
 export function currentWindow(servicePid: number): GpuiWindow | null {
     return (
         (listWindows() as GpuiWindow[])
-            .filter((w) => w.pid === servicePid && w.title === "react-native-gpui")
+            .filter((window) => window.pid === servicePid && window.title === "react-native-gpui")
             .sort((a, b) => b.width * b.height - a.width * a.height)[0] ?? null
     );
+}
+
+function requestSocket<T>(socketPath: string, cmd: object): Promise<T> {
+    return new Promise((resolve, reject) => {
+        const socket = createConnection(socketPath);
+        let buffer = "";
+        const timer = setTimeout(() => {
+            socket.destroy();
+            reject(new Error(`debug command timed out on ${socketPath}`));
+        }, 10_000);
+        socket.on("connect", () => {
+            socket.write(JSON.stringify(cmd) + "\n");
+        });
+        socket.on("data", (chunk) => {
+            buffer += chunk.toString("utf8");
+            const idx = buffer.indexOf("\n");
+            if (idx >= 0) {
+                clearTimeout(timer);
+                socket.end();
+                try {
+                    resolve(JSON.parse(buffer.slice(0, idx)) as T);
+                } catch (error) {
+                    reject(error);
+                }
+            }
+        });
+        socket.on("error", (error) => {
+            clearTimeout(timer);
+            reject(error);
+        });
+        socket.on("end", () => {
+            if (!buffer.trim()) {
+                clearTimeout(timer);
+                reject(new Error("debug socket closed without a response"));
+            }
+        });
+    });
+}
+
+async function waitForSocket(path: string, exited?: () => boolean) {
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+        if (existsSync(path)) return;
+        if (exited?.()) break;
+        await sleep(25);
+    }
+    throw new Error(`timed out waiting for control socket at ${path}`);
+}
+
+function waitForCapture(source: string, target: string) {
+    const deadline = Date.now() + 4_000;
+    while (Date.now() < deadline) {
+        if (existsSync(source) && statSync(source).size > 0) {
+            execSyncSleep(300);
+            mkdirSync(dirname(target), { recursive: true });
+            copyFileSync(source, target);
+            return;
+        }
+        execSyncSleep(120);
+    }
+    throw new Error("in-service capture produced no frame (RNGPUI_CAPTURE_PNG)");
+}
+
+function execSyncSleep(ms: number) {
+    try {
+        execFileSync("sleep", [String(ms / 1000)]);
+    } catch {
+        /* ignore */
+    }
+}
+
+function killPidFile(path: string) {
+    try {
+        const pid = Number(readFileSync(path, "utf8").trim());
+        if (Number.isFinite(pid) && pid > 0) killPid(pid);
+    } catch {
+        /* no pid yet */
+    }
+}
+
+function killPid(pid: number) {
+    try {
+        process.kill(pid, "SIGTERM");
+    } catch {
+        /* already gone */
+    }
 }

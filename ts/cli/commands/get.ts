@@ -65,6 +65,33 @@ function renderTree(node: DumpNode, depth: number, lines: string[], filter?: (n:
 }
 
 export async function runGet(host: Host, sub: string, args: string[], json: boolean): Promise<number> {
+    if (host.mode === "attach") {
+        if (sub === "color") {
+            const pt = parsePoint(args[0] ?? "");
+            if (!pt) {
+                console.error("  attached color sampling only supports a literal point: rngpui get color <x,y> --attach");
+                return 1;
+            }
+            return getColorAtPoint(host, pt.x, pt.y, json);
+        }
+        if (sub === "point") {
+            const pt = parsePoint(args[0] ?? "");
+            if (!pt) {
+                console.error("  usage: rngpui get point <x,y>");
+                return 1;
+            }
+            const color = getColorSampleAtPoint(host, pt.x, pt.y);
+            out(json, () => console.log(`  topmost: (attach has no tree)\n  pixel: ${color ?? "(unavailable)"}`), {
+                point: pt,
+                topmost: null,
+                pixel: color,
+            });
+            return color ? 0 : 1;
+        }
+        console.error("  attached processes expose pixel capture only; use --launch, --bundle, or --session for tree introspection");
+        return 1;
+    }
+
     const dump = await host.dump();
     if (!dump) {
         console.error("  no tree available (attached process exposes no dump; use --launch <entry.tsx> for full introspection)");

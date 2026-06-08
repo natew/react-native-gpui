@@ -23,7 +23,7 @@ const pidPath = `${outDir}/service.pid`;
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
-const child = spawn("bun", ["examples/animation-conformance.tsx"], {
+const child = spawn("node", ["scripts/run-hermes-example.mjs", "examples/animation-conformance.tsx"], {
     cwd: root,
     env: conformanceEnv({
         RNGPUI_DUMP_TREE: treeDumpPath,

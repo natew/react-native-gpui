@@ -1,12 +1,12 @@
-// `rngpui do …` — drive the live instance with synthetic input. Requires a launched
-// host (we must own the service stdin to inject commands); an attached read-only
-// target cannot be driven.
+// `rngpui do …` — drive the live instance with synthetic input. Requires a
+// driveable launch/session target; an attached read-only target cannot be driven.
 
 import type { AttachedHost, DumpNode, LaunchedHost } from "../host";
 import { sleep } from "../../scripts/conformance-utils.mjs";
 import { centerOf, parsePoint, resolve } from "../selectors";
 
 type Host = LaunchedHost | AttachedHost;
+type ControlResponse = { ok: boolean; error?: string; targetId?: number; focusedId?: number };
 
 function shortId(node: DumpNode): string {
     const a = node.accessibility ?? {};
@@ -15,7 +15,7 @@ function shortId(node: DumpNode): string {
 
 export async function runDo(host: Host, sub: string, args: string[], json: boolean): Promise<number> {
     if (host.mode !== "launch") {
-        console.error("  do commands need a driveable target — launch one with --launch <entry.tsx>");
+        console.error("  do commands need a driveable target — use --launch <entry.tsx>, --bundle <app.hbc>, or --session <dir>");
         console.error("  (an attached running process isn't ours to drive)");
         return 1;
     }
@@ -49,9 +49,13 @@ export async function runDo(host: Host, sub: string, args: string[], json: boole
                 ({ x, y } = center);
                 label = `${shortId(best.node)} #${best.node.globalId}`;
             }
-            launched.send({ $cmd: "tap", x, y });
+            const response = await launched.request<ControlResponse>({ $cmd: "tap", x, y });
+            if (!response.ok) {
+                console.error(`  tap failed: ${response.error || "no native target"}`);
+                return 1;
+            }
             await sleep(150);
-            if (json) console.log(JSON.stringify({ tapped: label, x, y }));
+            if (json) console.log(JSON.stringify({ tapped: label, x, y, targetId: response.targetId }));
             else console.log(`  tapped ${label} at ${x.toFixed(0)},${y.toFixed(0)}`);
             return 0;
         }
@@ -62,9 +66,13 @@ export async function runDo(host: Host, sub: string, args: string[], json: boole
                 console.error("  usage: rngpui do type <text>");
                 return 1;
             }
-            launched.send({ $cmd: "type", text });
+            const response = await launched.request<ControlResponse>({ $cmd: "type", text });
+            if (!response.ok) {
+                console.error(`  type failed: ${response.error || "no focused input"}`);
+                return 1;
+            }
             await sleep(120);
-            if (json) console.log(JSON.stringify({ typed: text }));
+            if (json) console.log(JSON.stringify({ typed: text, focusedId: response.focusedId }));
             else console.log(`  typed: ${JSON.stringify(text)}`);
             return 0;
         }
@@ -75,9 +83,13 @@ export async function runDo(host: Host, sub: string, args: string[], json: boole
                 console.error("  usage: rngpui do key <key>   (e.g. enter, backspace, space, a)");
                 return 1;
             }
-            launched.send({ $cmd: "key", key });
+            const response = await launched.request<ControlResponse>({ $cmd: "key", key });
+            if (!response.ok) {
+                console.error(`  key failed: ${response.error || "no focused input"}`);
+                return 1;
+            }
             await sleep(100);
-            if (json) console.log(JSON.stringify({ key }));
+            if (json) console.log(JSON.stringify({ key, focusedId: response.focusedId }));
             else console.log(`  key: ${key}`);
             return 0;
         }
@@ -109,9 +121,13 @@ export async function runDo(host: Host, sub: string, args: string[], json: boole
                 }
                 ({ x, y } = center);
             }
-            launched.send({ $cmd: "scrollAt", x, y, dx: d.x, dy: d.y });
+            const response = await launched.request<ControlResponse>({ $cmd: "scrollAt", x, y, dx: d.x, dy: d.y });
+            if (!response.ok) {
+                console.error(`  scroll failed: ${response.error || "no scroll container"}`);
+                return 1;
+            }
             await sleep(120);
-            if (json) console.log(JSON.stringify({ scrolled: { x, y, dx: d.x, dy: d.y } }));
+            if (json) console.log(JSON.stringify({ scrolled: { x, y, dx: d.x, dy: d.y, targetId: response.targetId } }));
             else console.log(`  scrolled at ${x.toFixed(0)},${y.toFixed(0)} by ${d.x},${d.y}`);
             return 0;
         }

@@ -4,7 +4,7 @@
  * something gpui itself can't draw, so if you SEE it, it's genuinely the WKWebView
  * compositing inside the gpui window (not blank, not a gpui fallback).
  *
- *   RNGPUI_WEBVIEW_DEBUG=1 bun run examples/webview-probe.tsx
+ *   RNGPUI_WEBVIEW_DEBUG=1 node scripts/run-hermes-example.mjs examples/webview-probe.tsx --interactive
  */
 import { AppRegistry, View, Text, WebView } from "../src/index";
 

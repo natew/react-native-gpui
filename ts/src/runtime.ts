@@ -1,12 +1,13 @@
 /**
- * Runtime bridge: spawns the rngpui-service GPUI process, streams element trees to
- * it as newline-delimited JSON over stdin, and parses events back over stdout.
+ * Runtime bridge — in-process host calls to the embedded Hermes host (rust/src/hermes.rs).
+ *
+ * Single-process model: this code runs inside Hermes on the JS thread; the Rust binary owns
+ * the GPUI/Metal main thread. Instead of spawning a service and streaming NDJSON over pipes,
+ * every committed tree is handed to the host fn `globalThis.__rngpui_applyTree(json)`, and
+ * native events arrive by the host calling `globalThis.__rngpui_onHostEvent(json)`.
+ *
+ * The JSON tree/event protocol is unchanged from the old stdio bridge — only the transport.
  */
-import { spawn, ChildProcess } from "child_process";
-import { createReadStream, existsSync, writeFileSync } from "fs";
-import { createInterface } from "readline";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
 
 export type SerializedNode = {
     globalId: number;
@@ -103,120 +104,69 @@ export interface Bridge {
 }
 
 export interface BridgeOptions {
-    /** Enables the native Option-key element inspector in the service process. */
+    /** Enables the native Option-key element inspector in the host. */
     inspector?: boolean;
 }
 
-function findServiceBinary(): string {
-    // explicit override wins
-    const env = process.env.RNGPUI_SERVICE;
-    if (env && existsSync(env)) return env;
+// host fns installed by the Rust host before this bundle is evaluated.
+declare const __rngpui_applyTree: (json: string) => void;
+declare const __rngpui_close: (() => void) | undefined;
 
-    const here = dirname(fileURLToPath(import.meta.url));
-    const candidates = [
-        // packaged: the binary is copied next to the build output (dist/ or src/)
-        join(here, "native", "rngpui-service"),
-        join(here, "..", "native", "rngpui-service"),
-        // dev: built straight from the workspace's rust crate
-        join(here, "..", "..", "rust", "target", "release", "rngpui-service"),
-        join(here, "..", "..", "rust", "target", "debug", "rngpui-service"),
-    ];
-    for (const p of candidates) if (existsSync(p)) return p;
-    return candidates[0];
+// the host batches high-frequency events (resize/layout/scroll/move during a window
+// resize or drag) into one call; this wraps their dispatch in a single React update so a
+// flood produces ONE re-render, not one per event. render.ts injects the reconciler's
+// batchedUpdates here. Without it (or for single events) dispatch is direct.
+let eventBatcher: ((run: () => void) => void) | undefined;
+export function setEventBatcher(fn: ((run: () => void) => void) | undefined): void {
+    eventBatcher = fn;
 }
 
-export function startBridge(initial: SerializedNode, options: BridgeOptions = {}): Bridge {
-    const bin = findServiceBinary();
-    if (!existsSync(bin)) {
-        throw new Error(`rngpui-service not found at ${bin}. Build: cd rust && cargo build --release --bin rngpui-service`);
-    }
-
-    const env = { ...process.env };
-    if (options.inspector) env.RNGPUI_INSPECTOR = "1";
-    const proc: ChildProcess = spawn(bin, [], { stdio: ["pipe", "pipe", "pipe"], env });
+export function startBridge(initial: SerializedNode, _options: BridgeOptions = {}): Bridge {
     const listeners: Array<(e: BridgeEvent) => void> = [];
-    if (process.env.RNGPUI_SERVICE_PID_FILE && proc.pid) {
-        writeFileSync(process.env.RNGPUI_SERVICE_PID_FILE, `${proc.pid}\n`);
-    }
 
-    if (proc.stdout) {
-        let buf = "";
-        proc.stdout.on("data", (chunk: Buffer) => {
-            buf += chunk.toString();
-            const lines = buf.split("\n");
-            buf = lines.pop() ?? "";
-            for (const line of lines) {
-                if (!line.trim()) continue;
-                try {
-                    const evt = JSON.parse(line) as BridgeEvent;
-                    for (const cb of listeners) cb(evt);
-                } catch {
-                    /* ignore non-JSON log lines */
-                }
-            }
-        });
-    }
-    if (proc.stderr) {
-        proc.stderr.on("data", (c: Buffer) => process.stderr.write(c));
-    }
-    proc.on("exit", () => process.exit(0));
-
-    const writeLine = (obj: object) => {
-        if (process.env.RNGPUI_DUMP_TREE && isSerializedNode(obj)) {
-            writeFileSync(process.env.RNGPUI_DUMP_TREE, JSON.stringify(obj, null, 2));
-        }
-        if (proc.stdin && proc.stdin.writable) proc.stdin.write(JSON.stringify(obj) + "\n");
+    const deliver = (evt: BridgeEvent) => {
+        for (const cb of listeners) cb(evt);
     };
-    writeLine(initial);
 
-    // Control channel for the `rngpui` developer CLI: when RNGPUI_CONTROL_FIFO points
-    // at a named pipe, every JSON line written to it is forwarded straight to the
-    // service stdin (dump / tap / type / scroll commands), and the service's stdout
-    // events are mirrored to RNGPUI_CONTROL_EVENTS so the CLI can await acks
-    // (dumpReady) without owning the service's pipes. This is the single hook that
-    // makes a launched host driveable; absent the env var it is inert.
-    const controlFifo = process.env.RNGPUI_CONTROL_FIFO;
-    if (controlFifo && existsSync(controlFifo)) {
-        const eventsPath = process.env.RNGPUI_CONTROL_EVENTS;
-        if (eventsPath) {
-            listeners.push((evt) => {
-                try {
-                    writeFileSync(eventsPath, JSON.stringify(evt) + "\n", { flag: "a" });
-                } catch {
-                    /* events file may be rotated by the CLI between commands */
-                }
-            });
+    // the host (Rust) calls this on the JS thread to deliver a single native event.
+    (globalThis as any).__rngpui_onHostEvent = (json: string) => {
+        let evt: BridgeEvent;
+        try {
+            evt = JSON.parse(json) as BridgeEvent;
+        } catch {
+            return;
         }
-        const pumpControl = () => {
-            const rl = createInterface({ input: createReadStream(controlFifo), crlfDelay: Infinity });
-            rl.on("line", (line) => {
-                const trimmed = line.trim();
-                if (!trimmed) return;
-                try {
-                    writeLine(JSON.parse(trimmed));
-                } catch {
-                    /* ignore non-JSON control lines */
-                }
-            });
-            // a fifo returns EOF when the last writer closes; reopen so subsequent CLI
-            // commands keep flowing to the same long-lived host.
-            rl.on("close", () => setTimeout(pumpControl, 10));
+        deliver(evt);
+    };
+
+    // ...and this to deliver a coalesced batch of events as one React update.
+    (globalThis as any).__rngpui_onHostEventBatch = (jsonArray: string) => {
+        let arr: BridgeEvent[];
+        try {
+            arr = JSON.parse(jsonArray) as BridgeEvent[];
+        } catch {
+            return;
+        }
+        const run = () => {
+            for (const evt of arr) deliver(evt);
         };
-        pumpControl();
-    }
+        if (eventBatcher) eventBatcher(run);
+        else run();
+    };
+
+    const send = (obj: object) => {
+        __rngpui_applyTree(JSON.stringify(obj));
+    };
+
+    // push the first tree during bundle evaluation so the native host can size the window.
+    send(initial);
 
     return {
-        update: writeLine,
-        command: writeLine,
+        update: send,
+        command: send,
         onEvent: (cb) => listeners.push(cb),
         close: () => {
-            if (proc.stdin) proc.stdin.end();
-            proc.kill();
+            if (typeof __rngpui_close === "function") __rngpui_close();
         },
     };
-}
-
-function isSerializedNode(obj: object): obj is SerializedNode {
-    const node = obj as Partial<SerializedNode>;
-    return typeof node.globalId === "number" && typeof node.type === "string";
 }

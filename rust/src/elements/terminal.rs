@@ -21,9 +21,23 @@ use crate::elements::{
 };
 
 thread_local! {
-    static TERMINALS: RefCell<HashMap<u64, TerminalState>> = RefCell::new(HashMap::new());
+    // Keyed by SESSION id (not the React element's `global_id`): the single
+    // GhosttyTerminal element keeps a stable `global_id` while its
+    // `terminal_session_id` prop swaps as the user switches tabs. Keying by
+    // global_id meant every switch evicted the previous session's fully-built
+    // ghostty grid and rebuilt the next one from scratch — replaying the whole
+    // retained frame buffer (~90ms for a busy session) on EVERY switch, even
+    // when switching back to a session whose state we just discarded. Keying by
+    // session id keeps each session's terminal warm, so a switch is just the
+    // few new frames + a cached render. Bounded by an LRU cap so idle sessions
+    // don't leak.
+    static TERMINALS: RefCell<HashMap<String, TerminalState>> = RefCell::new(HashMap::new());
     static TERMINAL_FOCUS: RefCell<HashMap<u64, gpui::FocusHandle>> = RefCell::new(HashMap::new());
+    static TERMINAL_CLOCK: RefCell<u64> = const { RefCell::new(0) };
 }
+
+// Keep at most this many warm per-session terminals; evict least-recently-used.
+const MAX_WARM_TERMINALS: usize = 12;
 
 pub struct ReactGhosttyTerminalElement {
     element: Arc<ReactElement>,
@@ -56,6 +70,11 @@ impl ReactGhosttyTerminalElement {
         let listens_press = self.element.listens("press");
         let element_id = self.element.global_id;
         let press_element_id = element_id;
+        let scroll_session_id = self
+            .element
+            .terminal_session_id
+            .clone()
+            .unwrap_or_else(|| "__terminal__".to_string());
 
         let mut root = div()
             .size_full()
@@ -77,7 +96,7 @@ impl ReactGhosttyTerminalElement {
             .on_scroll_wheel(
                 move |event: &ScrollWheelEvent, window: &mut Window, cx: &mut App| {
                     let rows = scroll_delta_rows(&event.delta, line_height);
-                    if rows.abs() < 0.01 || !scroll_terminal_viewport(element_id, rows) {
+                    if rows.abs() < 0.01 || !scroll_terminal_viewport(&scroll_session_id, rows) {
                         return;
                     }
                     window.refresh();
@@ -244,20 +263,45 @@ impl Element for ReactGhosttyTerminalElement {
 }
 
 struct TerminalState {
-    session_id: String,
     terminal: Terminal<'static, 'static>,
     render: RenderState<'static>,
     last_seq: u64,
     cols: u16,
     rows: u16,
     scroll_remainder: f32,
+    /// Bumped whenever a wheel scroll actually moves the viewport, so the row
+    /// cache invalidates even though scrolling doesn't advance `last_seq`.
+    scroll_epoch: u64,
+    /// Monotonic tick of the last access, for LRU eviction of warm terminals.
+    last_used: u64,
+    /// Cached output of the last `render_rows()`, with the state it was
+    /// computed for. `build_child` runs in `request_layout`, which fires on
+    /// EVERY full tree re-render (input-cursor blink, the periodic session
+    /// poll, mouse moves, an unrelated scroll, …) — not just when terminal
+    /// bytes arrive. Re-running ghostty's `render.update` + full cell
+    /// iteration each of those times is wasted O(rows*cols) work and was the
+    /// dominant terminal-stage cost. Cache the rows and reuse them whenever
+    /// nothing relevant changed.
+    cache: Option<RenderCache>,
 }
 
+struct RenderCache {
+    /// Highest applied frame seq + viewport the rows were rendered for. A
+    /// scroll bumps `epoch` so wheel scrolling still re-renders.
+    seq: u64,
+    cols: u16,
+    rows: u16,
+    epoch: u64,
+    rows_out: Vec<RenderedRow>,
+}
+
+#[derive(Clone)]
 struct RenderedRow {
     text: String,
     highlights: Vec<RowHighlight>,
 }
 
+#[derive(Clone)]
 struct RowHighlight {
     range: Range<usize>,
     fg: Option<Hsla>,
@@ -275,6 +319,11 @@ fn terminal_rows(element: &ReactElement) -> Vec<RenderedRow> {
         .clone()
         .unwrap_or_else(|| "__terminal__".to_string());
     let mut rows = Vec::new();
+    let tick = TERMINAL_CLOCK.with(|clock| {
+        let mut clock = clock.borrow_mut();
+        *clock = clock.wrapping_add(1);
+        *clock
+    });
     TERMINALS.with(|terminals| {
         let mut terminals = terminals.borrow_mut();
         let initial_cols = element
@@ -290,30 +339,41 @@ fn terminal_rows(element: &ReactElement) -> Vec<RenderedRow> {
             .find_map(|frame| frame.rows)
             .unwrap_or(30);
 
-        let state = match terminals.get_mut(&element.global_id) {
-            Some(state) if state.session_id == session_id => state,
-            _ => {
-                terminals.remove(&element.global_id);
-                let Some(state) =
-                    TerminalState::new(session_id.clone(), initial_cols, initial_rows)
-                else {
-                    return;
-                };
-                terminals.insert(element.global_id, state);
-                terminals
-                    .get_mut(&element.global_id)
-                    .expect("terminal inserted")
-            }
-        };
-
+        if !terminals.contains_key(&session_id) {
+            let Some(state) = TerminalState::new(initial_cols, initial_rows) else {
+                return;
+            };
+            terminals.insert(session_id.clone(), state);
+            evict_lru(&mut terminals, &session_id);
+        }
+        let state = terminals.get_mut(&session_id).expect("terminal inserted");
+        state.last_used = tick;
         state.apply_frames(&element.terminal_frames);
-        rows = state.render_rows().unwrap_or_default();
+        rows = state.rows_for_render().unwrap_or_default();
     });
     rows
 }
 
+/// Drop the least-recently-used warm terminals once the map exceeds the cap,
+/// never evicting the session being rendered this frame.
+fn evict_lru(terminals: &mut HashMap<String, TerminalState>, keep: &str) {
+    while terminals.len() > MAX_WARM_TERMINALS {
+        let victim = terminals
+            .iter()
+            .filter(|(id, _)| id.as_str() != keep)
+            .min_by_key(|(_, state)| state.last_used)
+            .map(|(id, _)| id.clone());
+        match victim {
+            Some(id) => {
+                terminals.remove(&id);
+            }
+            None => break,
+        }
+    }
+}
+
 impl TerminalState {
-    fn new(session_id: String, cols: u16, rows: u16) -> Option<Self> {
+    fn new(cols: u16, rows: u16) -> Option<Self> {
         let terminal = Terminal::new(TerminalOptions {
             cols,
             rows,
@@ -322,14 +382,40 @@ impl TerminalState {
         .ok()?;
         let render = RenderState::new().ok()?;
         Some(Self {
-            session_id,
             terminal,
             render,
             last_seq: 0,
             cols,
             rows,
             scroll_remainder: 0.0,
+            scroll_epoch: 0,
+            last_used: 0,
+            cache: None,
         })
+    }
+
+    /// Return the rows for this render. Reuses the cached `Vec<RenderedRow>`
+    /// when nothing relevant changed since the last `render_rows()`
+    /// (same applied seq, same viewport, same scroll epoch), so the common
+    /// idle re-render skips ghostty's `render.update` + cell iteration.
+    fn rows_for_render(&mut self) -> Result<Vec<RenderedRow>, Box<dyn std::error::Error>> {
+        if let Some(cache) = &self.cache
+            && cache.seq == self.last_seq
+            && cache.cols == self.cols
+            && cache.rows == self.rows
+            && cache.epoch == self.scroll_epoch
+        {
+            return Ok(cache.rows_out.clone());
+        }
+        let rows_out = self.render_rows()?;
+        self.cache = Some(RenderCache {
+            seq: self.last_seq,
+            cols: self.cols,
+            rows: self.rows,
+            epoch: self.scroll_epoch,
+            rows_out: rows_out.clone(),
+        });
+        Ok(rows_out)
     }
 
     fn apply_frames(&mut self, frames: &[TerminalFrame]) {
@@ -452,10 +538,10 @@ impl TerminalState {
     }
 }
 
-fn scroll_terminal_viewport(id: u64, rows: f32) -> bool {
+fn scroll_terminal_viewport(session_id: &str, rows: f32) -> bool {
     TERMINALS.with(|terminals| {
         let mut terminals = terminals.borrow_mut();
-        let Some(state) = terminals.get_mut(&id) else {
+        let Some(state) = terminals.get_mut(session_id) else {
             return false;
         };
         state.scroll_viewport(rows)
@@ -487,6 +573,7 @@ impl TerminalState {
         self.terminal
             .scroll_viewport(ScrollViewport::Delta(whole as isize));
         self.scroll_remainder -= whole;
+        self.scroll_epoch = self.scroll_epoch.wrapping_add(1);
         true
     }
 }
@@ -578,6 +665,90 @@ mod tests {
         assert_eq!(
             scroll_delta_rows(&ScrollDelta::Pixels(point(px(0.0), px(36.0))), 18.0),
             -2.0
+        );
+    }
+
+    use super::{MAX_WARM_TERMINALS, TerminalFrame, TerminalFrameKind, TerminalState, evict_lru};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+    use std::collections::HashMap;
+
+    fn bytes_frame(seq: u64, text: &str) -> TerminalFrame {
+        TerminalFrame {
+            seq,
+            kind: TerminalFrameKind::Bytes,
+            data: Some(B64.encode(text.as_bytes())),
+            cols: None,
+            rows: None,
+        }
+    }
+
+    fn row_texts(state: &mut TerminalState) -> Vec<String> {
+        state
+            .rows_for_render()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.text.trim_end().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn caches_rows_until_a_new_frame_advances_seq() {
+        let mut state = TerminalState::new(20, 4).unwrap();
+        state.apply_frames(&[bytes_frame(1, "hello")]);
+
+        // first render builds + caches; a second idle render returns the cache.
+        let first = row_texts(&mut state);
+        assert!(first.iter().any(|l| l.contains("hello")));
+        assert!(state.cache.is_some());
+        let cached_seq = state.cache.as_ref().unwrap().seq;
+
+        // an idle re-render (no new frames) must reuse the cache: same seq, same rows.
+        let second = row_texts(&mut state);
+        assert_eq!(first, second);
+        assert_eq!(state.cache.as_ref().unwrap().seq, cached_seq);
+
+        // a new frame advances last_seq -> cache misses and rebuilds with new content.
+        state.apply_frames(&[bytes_frame(2, "\r\nworld")]);
+        let third = row_texts(&mut state);
+        assert!(third.iter().any(|l| l.contains("world")));
+        assert_eq!(state.cache.as_ref().unwrap().seq, 2);
+    }
+
+    #[test]
+    fn scroll_invalidates_the_row_cache() {
+        let mut state = TerminalState::new(20, 4).unwrap();
+        // fill enough lines to have scrollback to move into.
+        for seq in 1..=40 {
+            state.apply_frames(&[bytes_frame(seq, &format!("line {seq}\r\n"))]);
+        }
+        let _ = row_texts(&mut state);
+        let epoch_before = state.scroll_epoch;
+        assert_eq!(state.cache.as_ref().unwrap().epoch, epoch_before);
+
+        // a real scroll bumps the epoch, so the next render must rebuild.
+        assert!(state.scroll_viewport(-5.0));
+        assert_ne!(state.scroll_epoch, epoch_before);
+        let _ = row_texts(&mut state);
+        assert_eq!(state.cache.as_ref().unwrap().epoch, state.scroll_epoch);
+    }
+
+    #[test]
+    fn evict_lru_drops_oldest_and_keeps_active_session() {
+        let mut terminals: HashMap<String, TerminalState> = HashMap::new();
+        for i in 0..(MAX_WARM_TERMINALS + 3) {
+            let mut s = TerminalState::new(20, 4).unwrap();
+            s.last_used = i as u64; // session "0" is least-recently-used
+            terminals.insert(format!("session-{i}"), s);
+        }
+        let active = format!("session-{}", MAX_WARM_TERMINALS + 2);
+        evict_lru(&mut terminals, &active);
+
+        assert_eq!(terminals.len(), MAX_WARM_TERMINALS);
+        assert!(terminals.contains_key(&active), "active session evicted");
+        assert!(
+            !terminals.contains_key("session-0"),
+            "least-recently-used session was not evicted"
         );
     }
 }

@@ -468,6 +468,31 @@ fn emit_mouse_if(
     );
 }
 
+fn emit_press_drag_mouse_if(
+    id: u64,
+    enabled: bool,
+    name: &str,
+    position: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    modifiers: Modifiers,
+) {
+    if !enabled {
+        return;
+    }
+    crate::bridge::press_drag_mouse_event(
+        id,
+        name,
+        position.x.into(),
+        position.y.into(),
+        (position.x - bounds.origin.x).into(),
+        (position.y - bounds.origin.y).into(),
+        modifiers.shift,
+        modifiers.control,
+        modifiers.alt,
+        modifiers.platform,
+    );
+}
+
 fn events_have_press_action(events: &[String]) -> bool {
     events.iter().any(|event| {
         matches!(
@@ -516,6 +541,7 @@ fn emit_press_action_sequence(
     position: Point<Pixels>,
     bounds: Bounds<Pixels>,
     modifiers: Modifiers,
+    press_drag: bool,
 ) {
     for name in [
         "mouseDown",
@@ -535,14 +561,25 @@ fn emit_press_action_sequence(
         "press",
         "click",
     ] {
-        emit_mouse_if(
-            id,
-            events.iter().any(|event| event == name),
-            name,
-            position,
-            bounds,
-            modifiers,
-        );
+        if press_drag {
+            emit_press_drag_mouse_if(
+                id,
+                events.iter().any(|event| event == name),
+                name,
+                position,
+                bounds,
+                modifiers,
+            );
+        } else {
+            emit_mouse_if(
+                id,
+                events.iter().any(|event| event == name),
+                name,
+                position,
+                bounds,
+                modifiers,
+            );
+        }
     }
 }
 
@@ -557,7 +594,7 @@ pub fn synth_tap(id: u64, events: &[String], bounds: (f32, f32, f32, f32), x: f3
         size: gpui::size(px(bounds.2), px(bounds.3)),
     };
     finish_pointer_gesture();
-    emit_press_action_sequence(id, events, position, bounds, Modifiers::default());
+    emit_press_action_sequence(id, events, position, bounds, Modifiers::default(), false);
     finish_pointer_gesture();
 }
 
@@ -916,7 +953,7 @@ fn activate_drag_press_if_needed(
     if let Some((start_id, start_events, start_bounds)) = cancel_start {
         emit_press_cancel_sequence(start_id, &start_events, position, start_bounds, modifiers);
     }
-    emit_press_action_sequence(id, events, position, bounds, modifiers);
+    emit_press_action_sequence(id, events, position, bounds, modifiers, true);
     true
 }
 

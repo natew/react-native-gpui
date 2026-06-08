@@ -81,6 +81,7 @@ export function createRoot(options: RootOptions = {}): Root {
             ctrlKey: e.ctrlKey,
             altKey: e.altKey,
             metaKey: e.metaKey,
+            pressDrag: e.pressDrag,
             pageX: e.pageX,
             pageY: e.pageY,
             locationX: e.locationX,
@@ -106,11 +107,12 @@ export function createRoot(options: RootOptions = {}): Root {
     // only fire after mount, by which point the bridge exists.
     setCommandSink((cmd) => bridge?.command(cmd));
 
-    // tag 0 = LegacyRoot → synchronous commits, so each render flushes straight
-    // through resetAfterCommit into the bridge.
+    // tag 1 = ConcurrentRoot. Urgent input state (pressed row, text input) still
+    // commits immediately, while startTransition work can be superseded when a
+    // fast press-drag or tap stream selects a newer target before the stage mounts.
     const fiberRoot = (Reconciler as any).createContainer(
         container,
-        0,
+        1,
         null,
         false,
         null,

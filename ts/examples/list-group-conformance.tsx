@@ -23,7 +23,7 @@ function App() {
             smokeTimer = setTimeout(() => {
                 console.log("CONFORMANCE list-group smoke PASS");
                 process.exit(0);
-            }, 500);
+            }, 1500);
         }
         if (expected?.length) {
             failTimer = setTimeout(() => {

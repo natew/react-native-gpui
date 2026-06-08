@@ -153,6 +153,7 @@ export function dispatchEvent(
         ctrlKey?: boolean;
         altKey?: boolean;
         metaKey?: boolean;
+        pressDrag?: boolean;
         pageX?: number;
         pageY?: number;
         locationX?: number;
@@ -515,6 +516,7 @@ function createEvent(
         ctrlKey?: boolean;
         altKey?: boolean;
         metaKey?: boolean;
+        pressDrag?: boolean;
         pageX?: number;
         pageY?: number;
         locationX?: number;
@@ -536,6 +538,7 @@ function createEvent(
         currentTarget: {},
         defaultPrevented,
         metaKey: !!payload.metaKey,
+        pressDrag: !!payload.pressDrag,
         nativeEvent: {
             type,
             value: payload.value,
@@ -544,6 +547,7 @@ function createEvent(
             ctrlKey: !!payload.ctrlKey,
             altKey: !!payload.altKey,
             metaKey: !!payload.metaKey,
+            pressDrag: !!payload.pressDrag,
             layout: payload.layout,
             locationX: payload.locationX ?? 0,
             locationY: payload.locationY ?? 0,

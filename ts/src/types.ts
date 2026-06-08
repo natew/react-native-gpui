@@ -183,6 +183,7 @@ export interface GestureResponderEvent {
         ctrlKey?: boolean;
         altKey?: boolean;
         metaKey?: boolean;
+        pressDrag?: boolean;
     };
 }
 export interface MouseResponderEvent extends GestureResponderEvent {
@@ -191,6 +192,7 @@ export interface MouseResponderEvent extends GestureResponderEvent {
     ctrlKey?: boolean;
     metaKey?: boolean;
     shiftKey?: boolean;
+    pressDrag?: boolean;
     preventDefault?: () => void;
     stopPropagation?: () => void;
     isDefaultPrevented?: () => boolean;

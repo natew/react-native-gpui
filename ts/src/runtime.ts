@@ -86,6 +86,7 @@ export type BridgeEvent =
           ctrlKey?: boolean;
           altKey?: boolean;
           metaKey?: boolean;
+          pressDrag?: boolean;
           pageX?: number;
           pageY?: number;
           locationX?: number;

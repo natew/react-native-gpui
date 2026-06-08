@@ -70,7 +70,44 @@ pub fn mouse_event(
     alt_key: bool,
     meta_key: bool,
 ) {
-    emit_value(json!({
+    mouse_event_inner(
+        id, name, page_x, page_y, location_x, location_y, shift_key, ctrl_key, alt_key, meta_key,
+        false,
+    );
+}
+
+pub fn press_drag_mouse_event(
+    id: u64,
+    name: &str,
+    page_x: f32,
+    page_y: f32,
+    location_x: f32,
+    location_y: f32,
+    shift_key: bool,
+    ctrl_key: bool,
+    alt_key: bool,
+    meta_key: bool,
+) {
+    mouse_event_inner(
+        id, name, page_x, page_y, location_x, location_y, shift_key, ctrl_key, alt_key, meta_key,
+        true,
+    );
+}
+
+fn mouse_event_inner(
+    id: u64,
+    name: &str,
+    page_x: f32,
+    page_y: f32,
+    location_x: f32,
+    location_y: f32,
+    shift_key: bool,
+    ctrl_key: bool,
+    alt_key: bool,
+    meta_key: bool,
+    press_drag: bool,
+) {
+    let mut event = json!({
         "type": "event",
         "id": id,
         "event": name,
@@ -82,7 +119,11 @@ pub fn mouse_event(
         "ctrlKey": ctrl_key,
         "altKey": alt_key,
         "metaKey": meta_key
-    }));
+    });
+    if press_drag {
+        event["pressDrag"] = json!(true);
+    }
+    emit_value(event);
 }
 
 pub fn scroll_event(id: u64, x: f32, y: f32) {

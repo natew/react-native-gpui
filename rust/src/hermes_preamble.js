@@ -91,12 +91,53 @@
     g.queueMicrotask = function (cb) { Promise.resolve().then(cb); };
   }
 
+  function abortError() {
+    var e = new Error('The operation was aborted');
+    e.name = 'AbortError';
+    return e;
+  }
+  if (typeof g.AbortController !== 'function') {
+    function AbortSignal() {
+      this.aborted = false;
+      this.reason = undefined;
+      this._listeners = [];
+    }
+    AbortSignal.prototype.addEventListener = function (type, cb, options) {
+      if (type !== 'abort' || typeof cb !== 'function') return;
+      this._listeners.push({ cb: cb, once: !!(options && options.once) });
+    };
+    AbortSignal.prototype.removeEventListener = function (type, cb) {
+      if (type !== 'abort') return;
+      this._listeners = this._listeners.filter(function (item) { return item.cb !== cb; });
+    };
+    AbortSignal.prototype._abort = function (reason) {
+      if (this.aborted) return;
+      this.aborted = true;
+      this.reason = reason || abortError();
+      var listeners = this._listeners.slice();
+      this._listeners = listeners.filter(function (item) { return !item.once; });
+      for (var i = 0; i < listeners.length; i++) {
+        try { listeners[i].cb.call(this, { type: 'abort', target: this }); } catch (e) { g.__rngpui_log('error: abort listener threw ' + ((e && e.stack) || e)); }
+      }
+    };
+    function AbortController() {
+      this.signal = new AbortSignal();
+    }
+    AbortController.prototype.abort = function (reason) {
+      this.signal._abort(reason);
+    };
+    g.AbortSignal = AbortSignal;
+    g.AbortController = AbortController;
+  }
+
   // fetch — bridged to the Rust host (ureq) on a worker thread; resolves with a minimal
   // Response (ok/status/text()/json()). Enough for the agentbus REST client.
   var fetchSeq = 1;
   var fetchPending = Object.create(null);
   g.fetch = function (url, init) {
     init = init || {};
+    var signal = init.signal;
+    if (signal && signal.aborted) return Promise.reject(signal.reason || abortError());
     var id = fetchSeq++;
     var headers = {};
     if (init.headers) {
@@ -104,7 +145,14 @@
       else for (var k in init.headers) headers[k] = init.headers[k];
     }
     return new Promise(function (resolve, reject) {
-      fetchPending[id] = { resolve: resolve, reject: reject };
+      var onAbort = function () {
+        var p = fetchPending[id];
+        if (!p) return;
+        delete fetchPending[id];
+        reject((signal && signal.reason) || abortError());
+      };
+      fetchPending[id] = { resolve: resolve, reject: reject, signal: signal, onAbort: onAbort };
+      if (signal && typeof signal.addEventListener === 'function') signal.addEventListener('abort', onAbort, { once: true });
       g.__rngpui_fetch(JSON.stringify({
         id: id,
         url: String(url),
@@ -119,6 +167,7 @@
     var p = fetchPending[r.id];
     if (!p) return;
     delete fetchPending[r.id];
+    if (p.signal && typeof p.signal.removeEventListener === 'function') p.signal.removeEventListener('abort', p.onAbort);
     if (r.error != null) { p.reject(new Error(r.error)); return; }
     var body = r.body || '';
     p.resolve({

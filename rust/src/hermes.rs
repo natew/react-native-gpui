@@ -589,6 +589,50 @@ enum CKey {
     Scroll(u64),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueueClass {
+    DiscreteInput,
+    AsyncCompletion,
+    Other,
+}
+
+fn queue_class(func: &'static str, arg: &str) -> QueueClass {
+    if func == "__rngpui_onHostEvent" && is_discrete_input_event(arg) {
+        QueueClass::DiscreteInput
+    } else if func == "__rngpui_wsEvent" || func == "__rngpui_fetchDone" {
+        QueueClass::AsyncCompletion
+    } else {
+        QueueClass::Other
+    }
+}
+
+fn is_discrete_input_event(arg: &str) -> bool {
+    if !arg.contains("\"type\":\"event\"") {
+        return false;
+    }
+    arg.contains("\"event\":\"mouseDown\"")
+        || arg.contains("\"event\":\"mouseUp\"")
+        || arg.contains("\"event\":\"touchStart\"")
+        || arg.contains("\"event\":\"touchEnd\"")
+        || arg.contains("\"event\":\"startShouldSetResponder\"")
+        || arg.contains("\"event\":\"startShouldSetResponderCapture\"")
+        || arg.contains("\"event\":\"responderStart\"")
+        || arg.contains("\"event\":\"responderGrant\"")
+        || arg.contains("\"event\":\"responderRelease\"")
+        || arg.contains("\"event\":\"responderEnd\"")
+        || arg.contains("\"event\":\"responderTerminate\"")
+        || arg.contains("\"event\":\"responderTerminationRequest\"")
+        || arg.contains("\"event\":\"pressIn\"")
+        || arg.contains("\"event\":\"pressOut\"")
+        || arg.contains("\"event\":\"press\"")
+        || arg.contains("\"event\":\"click\"")
+        || arg.contains("\"event\":\"changeText\"")
+        || arg.contains("\"event\":\"keyPress\"")
+        || arg.contains("\"event\":\"submit\"")
+        || arg.contains("\"event\":\"focus\"")
+        || arg.contains("\"event\":\"blur\"")
+}
+
 fn coalesce_key(arg: &str) -> Option<CKey> {
     // cheap substring pre-filter so discrete events aren't JSON-parsed in the hot path.
     let resize = arg.contains("\"type\":\"resize\"");
@@ -634,23 +678,27 @@ fn flush_events(rt: *mut c_void, events: &mut Vec<String>) {
 }
 
 /// Dispatch a batch of queued calls: coalesce floods (resize / per-node layout / move /
-/// scroll → latest), and group consecutive UI events into one batched React update. Order
-/// is otherwise preserved; non-event calls (fetch/ws results) flush the pending event group.
+/// scroll → latest), and group consecutive UI events into one batched React update. Discrete
+/// input always runs before async completions so a slow fetch/ws frame cannot jump ahead of
+/// a tap that native already accepted; async completions still run before coalesced layout /
+/// move / scroll noise.
 fn dispatch_coalesced(rt: *mut c_void, batch: Vec<JsCall>) {
     if batch.len() == 1 {
         call1(rt, batch[0].func, &batch[0].arg);
         return;
     }
-    let mut priority = Vec::new();
+    let mut input_events = Vec::new();
+    let mut async_completions = Vec::new();
     let mut batch_rest = Vec::new();
     for call in batch {
-        if call.func == "__rngpui_wsEvent" || call.func == "__rngpui_fetchDone" {
-            priority.push(call);
-        } else {
-            batch_rest.push(call);
+        match queue_class(call.func, &call.arg) {
+            QueueClass::DiscreteInput => input_events.push(call.arg),
+            QueueClass::AsyncCompletion => async_completions.push(call),
+            QueueClass::Other => batch_rest.push(call),
         }
     }
-    for call in priority {
+    flush_events(rt, &mut input_events);
+    for call in async_completions {
         call1(rt, call.func, &call.arg);
     }
     let batch = batch_rest;
@@ -732,5 +780,49 @@ fn run_loop(rt: *mut c_void, ctx: &JsContext, calls_rx: &Receiver<JsCall>) {
             call1(rt, "__rngpui_fireTimer", &id.to_string());
         }
         unsafe { rng_hermes_drain_microtasks(rt) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{QueueClass, queue_class};
+
+    #[test]
+    fn discrete_tap_events_outrank_async_completions() {
+        for event in [
+            "mouseDown",
+            "touchStart",
+            "responderGrant",
+            "responderRelease",
+            "pressOut",
+            "press",
+        ] {
+            let arg = format!(r#"{{"type":"event","id":7,"event":"{event}"}}"#);
+            assert_eq!(
+                queue_class("__rngpui_onHostEvent", &arg),
+                QueueClass::DiscreteInput,
+                "{event}"
+            );
+        }
+        assert_eq!(
+            queue_class("__rngpui_fetchDone", r#"{"id":1,"ok":true}"#),
+            QueueClass::AsyncCompletion
+        );
+        assert_eq!(
+            queue_class("__rngpui_wsEvent", r#"{"id":1,"event":"message"}"#),
+            QueueClass::AsyncCompletion
+        );
+    }
+
+    #[test]
+    fn coalescible_motion_and_layout_do_not_outrank_async() {
+        for event in ["layout", "mouseMove", "scroll"] {
+            let arg = format!(r#"{{"type":"event","id":7,"event":"{event}"}}"#);
+            assert_eq!(
+                queue_class("__rngpui_onHostEvent", &arg),
+                QueueClass::Other,
+                "{event}"
+            );
+        }
     }
 }

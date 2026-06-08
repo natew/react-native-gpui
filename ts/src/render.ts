@@ -14,6 +14,9 @@ import { AppCommands, setCommandSink } from "./commands";
 import { Dimensions } from "./Dimensions";
 import { applyNativeColorScheme, setAppearanceUpdateSink } from "./colors";
 
+const EMPTY_NODES: ReadonlyArray<SerializedNode> = [];
+const EMPTY_STYLE: Readonly<Record<string, unknown>> = {};
+
 export type DevtoolsOptions = {
     /** hold Option to inspect native GPUI nodes; Option-click copies a node snapshot. */
     inspector?: boolean;
@@ -47,8 +50,45 @@ export function createRoot(options: RootOptions = {}): Root {
     };
 
     let bridge: Bridge | null = null;
+    let lastTree: SerializedNode | null = null;
     const bridgeOptions: BridgeOptions = {
         inspector: options.devtools === true || (typeof options.devtools === "object" && options.devtools.inspector === true),
+    };
+
+    // Diff bridge: skip the apply when the committed tree is unchanged. The
+    // reconciler memoizes serialization so an unchanged subtree re-emits the SAME
+    // node object; any real change bubbles a fresh object up to the root's direct
+    // children (markSerializeDirty propagates to the root). So comparing the root
+    // style + top-level children by reference detects "nothing changed" in O(top
+    // children) — and lets us drop the whole stringify → applyTree → Rust parse →
+    // GPUI re-render → webview-host reposition for no-op commits (the selection
+    // cascade's redundant frames, hover that didn't change output, background
+    // streaming). This is what stops the webview "doing a lot" on idle churn.
+    const sameTree = (a: SerializedNode, b: SerializedNode): boolean => {
+        if (a === b) return true;
+        if (a.globalId !== b.globalId) return false;
+        const ac = a.children ?? EMPTY_NODES;
+        const bc = b.children ?? EMPTY_NODES;
+        if (ac.length !== bc.length) return false;
+        for (let i = 0; i < ac.length; i++) if (ac[i] !== bc[i]) return false;
+        // root style carries the window size (resize); compare it directly (tiny).
+        const as = a.style ?? EMPTY_STYLE;
+        const bs = b.style ?? EMPTY_STYLE;
+        const ak = Object.keys(as);
+        if (ak.length !== Object.keys(bs).length) return false;
+        for (const k of ak) if ((as as Record<string, unknown>)[k] !== (bs as Record<string, unknown>)[k]) return false;
+        return true;
+    };
+    const pushTree = (tree: SerializedNode) => {
+        if (!bridge) {
+            bridge = startBridge(tree, bridgeOptions);
+            bridge.onEvent(handleEvent);
+            lastTree = tree;
+            return;
+        }
+        if (lastTree && sameTree(tree, lastTree)) return;
+        bridge.update(tree);
+        lastTree = tree;
     };
 
     const handleEvent = (e: BridgeEvent) => {
@@ -58,7 +98,7 @@ export function createRoot(options: RootOptions = {}): Root {
             container.height = e.height;
             // re-emit even if a hook already re-rendered: the root's own width/height
             // must track the window for components that don't subscribe to dimensions.
-            if (changed && bridge) bridge.update(serializeContainer(container));
+            if (changed && bridge) pushTree(serializeContainer(container));
             return;
         }
         if (e.type === "command") {
@@ -92,15 +132,10 @@ export function createRoot(options: RootOptions = {}): Root {
 
     // The reconciler calls this after every commit with the serialized tree.
     setCommitSink((tree: SerializedNode) => {
-        if (!bridge) {
-            bridge = startBridge(tree, bridgeOptions);
-            bridge.onEvent(handleEvent);
-        } else {
-            bridge.update(tree);
-        }
+        pushTree(tree);
     });
     setAppearanceUpdateSink(() => {
-        if (bridge) bridge.update(serializeContainer(container));
+        if (bridge) pushTree(serializeContainer(container));
     });
 
     // Imperative host → frame commands (WebView.injectJavaScript / reload). Commands

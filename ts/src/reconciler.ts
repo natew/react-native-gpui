@@ -922,6 +922,11 @@ export function setCommitSink(fn: (tree: SerializedNode) => void) {
     commit = fn;
 }
 
+function detachForMove<T>(children: T[], child: T) {
+    const index = children.indexOf(child);
+    if (index !== -1) children.splice(index, 1);
+}
+
 // ── host config ─────────────────────────────────────────────────────
 const hostConfig: any = {
     supportsMutation: true,
@@ -947,10 +952,12 @@ const hostConfig: any = {
         invalidateLayout(parent);
     },
     appendChild(parent: Instance, child: Instance | TextInstance) {
+        detachForMove(parent.children, child);
         parent.children.push(child);
         invalidateLayout(parent);
     },
     appendChildToContainer(container: Container, child: Instance | TextInstance) {
+        detachForMove(container.children, child);
         container.children.push(child);
     },
     removeChild(parent: Instance, child: Instance | TextInstance) {
@@ -969,11 +976,13 @@ const hostConfig: any = {
         }
     },
     insertBefore(parent: Instance, child: Instance | TextInstance, before: Instance | TextInstance) {
+        detachForMove(parent.children, child);
         const i = parent.children.indexOf(before);
         parent.children.splice(i === -1 ? parent.children.length : i, 0, child);
         invalidateLayout(parent);
     },
     insertInContainerBefore(container: Container, child: Instance | TextInstance, before: Instance | TextInstance) {
+        detachForMove(container.children, child);
         const i = container.children.indexOf(before);
         container.children.splice(i === -1 ? container.children.length : i, 0, child);
     },

@@ -817,6 +817,20 @@ impl Render for ServiceApp {
             .on_mouse_up_out(MouseButton::Left, |_event: &MouseUpEvent, _window, _cx| {
                 elements::finish_pointer_gesture();
             })
+            // self-heal a wedged pointer capture: a fresh press always begins a new
+            // gesture, so any ACTIVE_MOUSE_TARGET still set here is stale — its mouse-up
+            // never reached gpui (swallowed by a native menu's nested event loop, lost
+            // across a heavy session-switch re-render, or eaten while the webview host
+            // re-orders under the cursor). without this the stale capture makes
+            // `target_receives_captured_pointer_event` reject every *other* element
+            // forever — the per-element down-handler only re-captures when the slot is
+            // free (`active.is_none()`), so one missed up wedges all clicks + hovers
+            // permanently while the divider (separate ACTIVE_NATIVE_RESIZE path) and
+            // native webview scroll keep working. capture phase runs before the bubble
+            // down-handlers that set the fresh capture, so this clears then they re-arm.
+            .capture_any_mouse_down(|_event: &MouseDownEvent, _window, _cx| {
+                elements::finish_pointer_gesture();
+            })
             .child(root);
 
         if self.inspector.enabled() {

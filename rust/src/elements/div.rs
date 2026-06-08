@@ -1711,12 +1711,13 @@ mod tests {
     use once_cell::sync::Lazy;
 
     use super::{
-        ActiveNativeResize, ActivePressDrag, NATIVE_LAYOUT_ANIMATIONS, NATIVE_LAYOUT_FRAMES,
-        NATIVE_LAYOUT_OVERRIDES, NativeLayoutAnimation, NativeLayoutOverride, RoundedOverflowClip,
-        clear_native_layout_override, events_have_press_action, get_scroll, inner_corner_radius,
-        native_layout_animation_value, native_layout_has_animations, native_layout_override,
-        press_drag_should_activate, remember_native_layout_frame, rounded_clip_radii_for_bounds,
-        scroll_to, set_native_layout_override, stacked_child_indices_for,
+        ACTIVE_MOUSE_TARGET, ActiveNativeResize, ActivePressDrag, NATIVE_LAYOUT_ANIMATIONS,
+        NATIVE_LAYOUT_FRAMES, NATIVE_LAYOUT_OVERRIDES, NativeLayoutAnimation, NativeLayoutOverride,
+        RoundedOverflowClip, clear_native_layout_override, events_have_press_action,
+        finish_pointer_gesture, get_scroll, inner_corner_radius, native_layout_animation_value,
+        native_layout_has_animations, native_layout_override, press_drag_should_activate,
+        remember_native_layout_frame, rounded_clip_radii_for_bounds, scroll_to,
+        set_native_layout_override, stacked_child_indices_for,
         target_receives_captured_pointer_event, target_receives_pointer_up_event,
         update_native_resize,
     };
@@ -1763,6 +1764,44 @@ mod tests {
         assert!(target_receives_pointer_up_event(Some(1), None, 1, true));
         assert!(!target_receives_pointer_up_event(None, Some(1), 2, true));
         assert!(target_receives_pointer_up_event(None, None, 2, true));
+    }
+
+    #[test]
+    fn fresh_mouse_down_self_heals_a_wedged_pointer_capture() {
+        // serialize: this mutates the process-global ACTIVE_MOUSE_TARGET.
+        let _guard = native_layout_test_guard();
+
+        // a stale capture left behind when a gesture's mouse-up never reached gpui
+        // (its element unmounted mid-gesture, or a native menu's nested event loop
+        // swallowed the up). ACTIVE_MOUSE_TARGET is stuck on a now-dead id.
+        *ACTIVE_MOUSE_TARGET.lock().unwrap() = Some(4242);
+
+        // the wedge: while a target is captured, every *other* element is rejected,
+        // so all clicks + hovers go dead (the divider's separate ACTIVE_NATIVE_RESIZE
+        // path and native webview scroll are unaffected — exactly the reported bug).
+        let stuck = *ACTIVE_MOUSE_TARGET.lock().unwrap();
+        assert!(!target_receives_captured_pointer_event(stuck, 7, true));
+
+        // the next press's capture-phase handler (service.rs root frame) clears the
+        // stale gesture *before* the per-element bubble down-handlers run...
+        finish_pointer_gesture();
+        assert_eq!(*ACTIVE_MOUSE_TARGET.lock().unwrap(), None);
+
+        // ...so the freshly pressed element captures from a free slot (the real
+        // down-handler only captures `if active.is_none()`), and again exclusively
+        // receives its own gesture — input is healed.
+        {
+            let mut active = ACTIVE_MOUSE_TARGET.lock().unwrap();
+            if active.is_none() {
+                *active = Some(7);
+            }
+        }
+        let healed = *ACTIVE_MOUSE_TARGET.lock().unwrap();
+        assert_eq!(healed, Some(7));
+        assert!(target_receives_captured_pointer_event(healed, 7, false));
+
+        // don't leak the capture into sibling tests.
+        finish_pointer_gesture();
     }
 
     #[test]

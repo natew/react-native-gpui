@@ -541,11 +541,11 @@ fn collect_snapshots(
         rank: inspect_rank(element),
         depth: path.len(),
     };
-    if let Some(bounds) = bridge::cached_layout(element.global_id).map(Rect::from) {
-        if bounds.is_visible() {
-            let hit = snapshot_metadata.clone().into_hit(bounds);
-            snapshots.insert(element.global_id, snapshot(&hit));
-        }
+    if let Some(bounds) = bridge::cached_layout(element.global_id).map(Rect::from)
+        && bounds.is_visible()
+    {
+        let hit = snapshot_metadata.clone().into_hit(bounds);
+        snapshots.insert(element.global_id, snapshot(&hit));
     }
     metadata.insert(element.global_id, snapshot_metadata);
     for child in element.children.iter() {
@@ -640,10 +640,12 @@ pub fn webview_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<u64> {
 /// on a label inside a Pressable still finds the Pressable's handlers.
 pub fn tap_target_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<TapTarget> {
     let position = point(px(x), px(y));
-    let hit = hit_test(root, position)?;
-    // the hit itself is the deepest interactive node when one exists (rank 100), but a
-    // text leaf can win when nothing interactive is under the point; in that case walk
-    // the captured path outward to the nearest press-handling ancestor.
+    let mut path = Vec::new();
+    let mut hits = Vec::new();
+    collect_hits(root, position, &mut path, &mut hits);
+    // the visual hit itself may be a text leaf inside a row. choose the topmost
+    // press/responder target under the point first, then fall back to the visual hit
+    // so the caller can still report what is there.
     const PRESS: &[&str] = &[
         "press",
         "click",
@@ -651,32 +653,24 @@ pub fn tap_target_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<TapTarg
         "pressOut",
         "longPress",
         "mouseDown",
+        "mouseUp",
         "pointerDown",
+        "pointerUp",
         "touchStart",
+        "touchEnd",
+        "responderRelease",
     ];
     let listens_press = |events: &[String]| events.iter().any(|e| PRESS.contains(&e.as_str()));
-    if listens_press(&hit.events) {
-        return Some(TapTarget {
-            id: hit.target.id,
-            focusable_input: is_input_type(&hit.target.element_type),
-            events: hit.events,
-            native_list_group: hit.native_list_group,
-            bounds: (
-                hit.bounds.x,
-                hit.bounds.y,
-                hit.bounds.width,
-                hit.bounds.height,
-            ),
-        });
-    }
-    // no press handler directly under the point — fall back to the topmost node so the
-    // caller can still report what is there (a tap on a non-interactive node is a no-op
-    // event-wise, which the CLI surfaces).
+    let hit = hits
+        .iter()
+        .filter(|hit| listens_press(&hit.events))
+        .max_by(|a, b| compare_hits(a, b))
+        .or_else(|| hits.iter().max_by(|a, b| compare_hits(a, b)))?;
     Some(TapTarget {
         id: hit.target.id,
         focusable_input: is_input_type(&hit.target.element_type),
-        events: hit.events,
-        native_list_group: hit.native_list_group,
+        events: hit.events.clone(),
+        native_list_group: hit.native_list_group.clone(),
         bounds: (
             hit.bounds.x,
             hit.bounds.y,
@@ -899,10 +893,10 @@ fn snapshot(hit: &InspectorHit) -> String {
 }
 
 fn push_optional(lines: &mut Vec<String>, key: &str, value: Option<&str>) {
-    if let Some(value) = value {
-        if !value.is_empty() {
-            lines.push(format!("{key}: {value}"));
-        }
+    if let Some(value) = value
+        && !value.is_empty()
+    {
+        lines.push(format!("{key}: {value}"));
     }
 }
 
@@ -953,7 +947,7 @@ mod tests {
 
     use super::{
         InspectorState, cached_snapshot, hit_test, is_webview_inspector_message,
-        refresh_layout_snapshot, refresh_snapshot_cache, snapshot,
+        refresh_layout_snapshot, refresh_snapshot_cache, snapshot, tap_target_at,
     };
     use crate::bridge;
     use crate::elements::{AccessibilityInfo, ReactElement};
@@ -1023,6 +1017,28 @@ mod tests {
 
         assert_eq!(hit.target.id, 3002);
         assert_eq!(hit.events, vec!["press"]);
+        bridge::retain_layout(&HashSet::new());
+    }
+
+    #[test]
+    fn tap_target_uses_press_ancestor_when_visual_hit_is_text() {
+        let _guard = inspector_test_guard();
+        bridge::retain_layout(&HashSet::new());
+        let mut label = (*node(3103, "text", Vec::new())).clone();
+        label.text = Some("Select project".to_string());
+        let label = Arc::new(label);
+        let mut row = (*node(3102, "view", vec![label])).clone();
+        row.events.push("responderRelease".to_string());
+        row.accessibility.label = Some("Select project soot".to_string());
+        let root = node(3101, "view", vec![Arc::new(row)]);
+        bridge::remember_layout(3101, 0.0, 0.0, 400.0, 300.0);
+        bridge::remember_layout(3102, 10.0, 10.0, 200.0, 54.0);
+        bridge::remember_layout(3103, 24.0, 24.0, 120.0, 18.0);
+
+        let target = tap_target_at(&root, 40.0, 30.0).expect("expected tap target");
+
+        assert_eq!(target.id, 3102);
+        assert_eq!(target.events, vec!["responderRelease"]);
         bridge::retain_layout(&HashSet::new());
     }
 

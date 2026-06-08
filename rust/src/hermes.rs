@@ -387,18 +387,18 @@ extern "C" fn host_ws_open(_ud: *mut c_void, arg: *const c_char) {
 }
 
 extern "C" fn host_ws_send(_ud: *mut c_void, arg: *const c_char) {
-    if let Ok((id, data)) = serde_json::from_str::<(u64, String)>(&arg_str(arg)) {
-        if let Some(tx) = ws_registry().lock().unwrap().get(&id) {
-            let _ = tx.send(WsCmd::Send(data));
-        }
+    if let Ok((id, data)) = serde_json::from_str::<(u64, String)>(&arg_str(arg))
+        && let Some(tx) = ws_registry().lock().unwrap().get(&id)
+    {
+        let _ = tx.send(WsCmd::Send(data));
     }
 }
 
 extern "C" fn host_ws_close(_ud: *mut c_void, arg: *const c_char) {
-    if let Ok((id,)) = serde_json::from_str::<(u64,)>(&arg_str(arg)) {
-        if let Some(tx) = ws_registry().lock().unwrap().get(&id) {
-            let _ = tx.send(WsCmd::Close);
-        }
+    if let Ok((id,)) = serde_json::from_str::<(u64,)>(&arg_str(arg))
+        && let Some(tx) = ws_registry().lock().unwrap().get(&id)
+    {
+        let _ = tx.send(WsCmd::Close);
     }
 }
 
@@ -498,6 +498,7 @@ fn install_num(
 
 /// Spawn the JS thread: create the Hermes runtime, install host fns, evaluate the preamble
 /// + `bundle`, then run the JS event loop. The first React commit (during bundle eval) sends
+///
 /// `Incoming::Tree` on `tree_tx`, which `main()` awaits inside `app.run`.
 pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
     let (calls_tx, calls_rx) = flume::unbounded::<JsCall>();
@@ -640,16 +641,36 @@ fn dispatch_coalesced(rt: *mut c_void, batch: Vec<JsCall>) {
         call1(rt, batch[0].func, &batch[0].arg);
         return;
     }
+    let mut priority = Vec::new();
+    let mut batch_rest = Vec::new();
+    for call in batch {
+        if call.func == "__rngpui_wsEvent" || call.func == "__rngpui_fetchDone" {
+            priority.push(call);
+        } else {
+            batch_rest.push(call);
+        }
+    }
+    for call in priority {
+        call1(rt, call.func, &call.arg);
+    }
+    let batch = batch_rest;
+    if batch.is_empty() {
+        return;
+    }
+    if batch.len() == 1 {
+        call1(rt, batch[0].func, &batch[0].arg);
+        return;
+    }
     let mut keep = vec![true; batch.len()];
     let mut last: HashMap<CKey, usize> = HashMap::new();
     for (i, c) in batch.iter().enumerate() {
         if c.func != "__rngpui_onHostEvent" {
             continue;
         }
-        if let Some(k) = coalesce_key(&c.arg) {
-            if let Some(prev) = last.insert(k, i) {
-                keep[prev] = false;
-            }
+        if let Some(k) = coalesce_key(&c.arg)
+            && let Some(prev) = last.insert(k, i)
+        {
+            keep[prev] = false;
         }
     }
     if std::env::var_os("RNGPUI_DEBUG_QUEUE").is_some() && batch.len() > 16 {

@@ -332,8 +332,24 @@ unsafe fn ensure_backing_view(parent_view: id, gpui_view: id) {
             if current_parent != parent_view {
                 let _: () = msg_send![parent_view, addSubview: backing];
             }
+            // The backing view is a layer-backed, full-window NSView whose setFrame runs
+            // on every prepaint (webview_parent is called each frame). Re-setting an
+            // unchanged frame each frame is wasted work, and an implicit CoreAnimation
+            // bounds tween on this clear full-window layer adds to the per-frame resize
+            // cost. Skip when the parent bounds are unchanged, and disable implicit
+            // actions so the resize step that does change lands synchronously.
             let bounds: NSRect = msg_send![parent_view, bounds];
-            let _: () = msg_send![backing, setFrame: bounds];
+            let current: NSRect = msg_send![backing, frame];
+            let same = (current.origin.x - bounds.origin.x).abs() < 0.01
+                && (current.origin.y - bounds.origin.y).abs() < 0.01
+                && (current.size.width - bounds.size.width).abs() < 0.01
+                && (current.size.height - bounds.size.height).abs() < 0.01;
+            if !same {
+                let _: () = msg_send![class!(CATransaction), begin];
+                let _: () = msg_send![class!(CATransaction), setDisableActions: YES];
+                let _: () = msg_send![backing, setFrame: bounds];
+                let _: () = msg_send![class!(CATransaction), commit];
+            }
             let _: () = msg_send![backing, setHidden: NO];
         }
     });
@@ -348,6 +364,17 @@ fn ensure_host_view(id: u64, parent_view: id, gpui_view: id) -> id {
             let host: id = msg_send![class!(NSView), alloc];
             let host: id = msg_send![host, initWithFrame: frame];
             configure_transparent_view(host);
+            // The host must NOT autoresize the WKWebView. We drive the webview's frame
+            // explicitly every changed prepaint (see position_webview_host). If the host
+            // also resized it via the autoresizing machinery, there'd be two competing
+            // sizing authorities running in the same layout pass during a continuous
+            // resize: AppKit's proportional autoresize (off the OLD host bounds) and our
+            // hard setFrame (the NEW bounds). They momentarily disagree, and since the
+            // WebContent process re-lays-out async across XPC, the page's right-edge
+            // scrollbar oscillates "further and closer" + lags the native frame — exactly
+            // the reported jitter. One source of truth = our setFrame, so turn host
+            // autoresizing off here once.
+            let _: () = msg_send![host, setAutoresizesSubviews: NO];
             host
         });
 
@@ -488,6 +515,12 @@ fn position_webview_host(
         let reparented = current_parent != host;
 
         if reparented || changed || style_changed {
+            // Every geometry/layer mutation below goes through one CATransaction with
+            // implicit actions disabled, so a resize step lands in a single synchronous
+            // commit with no implicit CoreAnimation tween on frame, cornerRadius, or
+            // backgroundColor. Without this, each `setFrame`/`cornerRadius` on these
+            // layer-backed views kicks off an implicit animation, leaving the page
+            // perpetually mid-tween under a continuous resize (lag + blank flicker).
             let _: () = msg_send![class!(CATransaction), begin];
             let _: () = msg_send![class!(CATransaction), setDisableActions: YES];
 
@@ -502,13 +535,20 @@ fn position_webview_host(
                     }
                     let _: () = msg_send![host, addSubview: webview];
                     let _: () = msg_send![webview, release];
+                    // No autoresizing on the WKWebView: we set its frame explicitly on
+                    // every changed prepaint, so an autoresizing mask would be a second,
+                    // conflicting sizing authority (it resizes off the host's OLD bounds
+                    // while we hard-set the NEW bounds in the same pass). Under a
+                    // continuous resize those two disagree frame-to-frame and the page's
+                    // right-edge scrollbar jitters/lags. Pin the mask to None so the only
+                    // thing that ever moves the webview is the set_child_frame below.
+                    let _: () = msg_send![webview, setAutoresizingMask: 0u64];
                 }
 
                 set_child_frame(parent_view, host, x, y, width, height);
-                // the webview fills its host exactly; host-local coords (host is flipped
-                // by default for a layer-backed NSView, but match its geometry anyway).
+                // the webview fills its host exactly; host-local coords (host is a plain
+                // non-flipped NSView, set_child_frame flips y to match its geometry).
                 set_child_frame(host, webview, 0.0, 0.0, width, height);
-                let _: () = msg_send![webview, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
                 // the decoration view shares the host's exact frame so its rounded-rect
                 // shadowPath lines up with the webview; it sits one level below the host.
                 let decor = ensure_decor_view(id);
@@ -518,9 +558,18 @@ fn position_webview_host(
                 });
             }
 
-            apply_host_layer_clip(host, style);
-            apply_webview_layer_clip(webview, style);
-            apply_webview_base_color(webview, style.background_color);
+            // Layer-clip + base-color set animatable layer props (cornerRadius,
+            // maskedCorners, backgroundColor, isOpaque) and each allocates an NSColor.
+            // None of them depend on size, so on a pure resize (changed but not
+            // style_changed) they'd re-set identical values every frame for nothing —
+            // pure churn that also re-touches animatable layer state mid-resize. Gate
+            // them on a real style change. The decor's own size-dependent shadowPath is
+            // gated internally (apply_webview_decor), so it must still run on resize.
+            if style_changed {
+                apply_host_layer_clip(host, style);
+                apply_webview_layer_clip(webview, style);
+                apply_webview_base_color(webview, style.background_color);
+            }
             apply_webview_decor(id, width, height, style);
 
             let _: () = msg_send![class!(CATransaction), commit];

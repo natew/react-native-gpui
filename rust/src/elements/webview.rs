@@ -33,6 +33,20 @@ const CA_LAYER_MAX_X_MIN_Y_CORNER: u64 = 1 << 1;
 const CA_LAYER_MIN_X_MAX_Y_CORNER: u64 = 1 << 2;
 #[cfg(target_os = "macos")]
 const CA_LAYER_MAX_X_MAX_Y_CORNER: u64 = 1 << 3;
+
+#[cfg(target_os = "macos")]
+#[allow(non_snake_case)]
+unsafe extern "C" {
+    // CoreGraphics: a rounded-rect CGPath for the decoration layer's `shadowPath`, so
+    // the drop shadow is a crisp rounded-card silhouette independent of view content.
+    fn CGPathCreateWithRoundedRect(
+        rect: cocoa::foundation::NSRect,
+        corner_width: f64,
+        corner_height: f64,
+        transform: *const std::ffi::c_void,
+    ) -> id;
+    fn CGPathRelease(path: id);
+}
 // The service owns one persistent wry WebView per `<WebView>` id and publishes a
 // snapshot here each render, so this (stateless) element can resolve its view by id
 // and park it over the right layout bounds — the standard gpui + wry overlay pattern.
@@ -42,6 +56,17 @@ thread_local! {
     static WEBVIEW_LOADED_CONTENT: RefCell<HashMap<u64, WebViewContent>> = RefCell::new(HashMap::new());
     #[cfg(target_os = "macos")]
     static WEBVIEW_HOSTS: RefCell<HashMap<u64, id>> = RefCell::new(HashMap::new());
+    // A general "below-webview decoration" NSView per webview id, ordered in the parent
+    // z-stack directly BELOW the host (backing → DECOR → host → gpui_view). It carries
+    // native decoration that must sit UNDER the page — today the rounded card drop
+    // shadow, and it's deliberately reusable so fill / border / gradient could ride the
+    // same layer later. Because the opaque WebView in front covers the decoration's
+    // center, only its outward spill (the shadow) is ever visible — it can never bleed
+    // over the page interior the way a gpui boxShadow painted in the Metal layer above
+    // the underlay does. This is the doc's recommended Approach C (native-view
+    // interleaving), the same move rngpui already makes for the glass + backing views.
+    #[cfg(target_os = "macos")]
+    static WEBVIEW_DECOR_VIEWS: RefCell<HashMap<u64, id>> = RefCell::new(HashMap::new());
     #[cfg(target_os = "macos")]
     static WEBVIEW_BACKING_VIEWS: RefCell<HashMap<usize, id>> = RefCell::new(HashMap::new());
     // last native geometry we actually applied per webview id, so we can skip the
@@ -70,6 +95,7 @@ const WEBVIEW_SCROLLBAR_GUTTER: f32 = 16.0;
 struct WebViewHostStyle {
     background_color: Option<(f32, f32, f32, f32)>,
     corner_clip: WebViewCornerClip,
+    decor: WebViewDecor,
 }
 
 #[cfg(target_os = "macos")]
@@ -77,6 +103,30 @@ struct WebViewHostStyle {
 struct WebViewCornerClip {
     radius: f32,
     masked_corners: u64,
+}
+
+// The resolved "below-webview decoration": currently just the rounded card drop
+// shadow, derived from the webview element's `boxShadow`. `None` shadow → no decoration
+// (the decor view stays hidden). Folded into WebViewHostStyle so position_webview_host
+// re-applies the decoration when the style changes (same gate as the corner clip).
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct WebViewDecor {
+    shadow: Option<WebViewShadow>,
+}
+
+// One CALayer drop shadow: an opaque srgb color + separate opacity (the way CALayer
+// wants them), a blur radius, a screen-space offset, and the rounded-rect corner the
+// `shadowPath` traces so the silhouette matches the card.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WebViewShadow {
+    color: (f32, f32, f32),
+    opacity: f32,
+    radius: f32,
+    offset_x: f32,
+    offset_y: f32,
+    corner_radius: f32,
 }
 
 fn scrollbar_dragging(id: u64) -> bool {
@@ -123,6 +173,19 @@ pub fn set_webviews(map: HashMap<u64, Rc<wry::WebView>>, content: HashMap<u64, W
             unsafe {
                 let _: () = msg_send![*host, removeFromSuperview];
                 let _: () = msg_send![*host, release];
+            }
+            false
+        });
+    });
+    #[cfg(target_os = "macos")]
+    WEBVIEW_DECOR_VIEWS.with(|decor| {
+        decor.borrow_mut().retain(|id, view| {
+            if live_ids.contains(id) {
+                return true;
+            }
+            unsafe {
+                let _: () = msg_send![*view, removeFromSuperview];
+                let _: () = msg_send![*view, release];
             }
             false
         });
@@ -310,9 +373,14 @@ fn ensure_host_view(id: u64, parent_view: id, gpui_view: id) -> id {
                 if current_parent != nil && current_parent != parent_view {
                     let _: () = msg_send![host, removeFromSuperview];
                 }
+                // re-stack bottom→top: backing, then the below-webview decoration
+                // (shadow), then the webview host, then gpui's Metal view on top.
+                // `addSubview:` appends, so this order yields exactly this z-order.
                 if let Some(backing) = backing_view(parent_view) {
                     let _: () = msg_send![parent_view, addSubview: backing];
                 }
+                let decor = ensure_decor_view(id);
+                let _: () = msg_send![parent_view, addSubview: decor];
                 let _: () = msg_send![parent_view, addSubview: host];
                 let _: () = msg_send![parent_view, addSubview: gpui_view];
             }
@@ -320,6 +388,36 @@ fn ensure_host_view(id: u64, parent_view: id, gpui_view: id) -> id {
 
         host
     })
+}
+
+// The per-webview below-webview decoration view (created lazily). Layer-backed, clear,
+// `masksToBounds=NO` so its CALayer drop shadow can spill past its frame. It holds no
+// content — its job is the shadow (and, in future, fill/border), so it draws regardless
+// of what is painted in front of it.
+#[cfg(target_os = "macos")]
+fn ensure_decor_view(id: u64) -> id {
+    WEBVIEW_DECOR_VIEWS.with(|decor| {
+        let mut decor = decor.borrow_mut();
+        *decor.entry(id).or_insert_with(|| unsafe {
+            let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0));
+            let view: id = msg_send![class!(NSView), alloc];
+            let view: id = msg_send![view, initWithFrame: frame];
+            let _: () = msg_send![view, setWantsLayer: YES];
+            let layer: id = msg_send![view, layer];
+            if layer != nil {
+                let clear: id = msg_send![class!(NSColor), clearColor];
+                let clear_cg: id = msg_send![clear, CGColor];
+                let _: () = msg_send![layer, setMasksToBounds: NO];
+                let _: () = msg_send![layer, setBackgroundColor: clear_cg];
+            }
+            view
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn decor_view(id: u64) -> Option<id> {
+    WEBVIEW_DECOR_VIEWS.with(|decor| decor.borrow().get(&id).copied())
 }
 
 #[cfg(target_os = "macos")]
@@ -405,6 +503,10 @@ fn position_webview_host(
                 // by default for a layer-backed NSView, but match its geometry anyway).
                 set_child_frame(host, webview, 0.0, 0.0, width, height);
                 let _: () = msg_send![webview, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
+                // the decoration view shares the host's exact frame so its rounded-rect
+                // shadowPath lines up with the webview; it sits one level below the host.
+                let decor = ensure_decor_view(id);
+                set_child_frame(parent_view, decor, x, y, width, height);
                 WEBVIEW_LAST_BOUNDS.with(|b| {
                     b.borrow_mut().insert(id, new_bounds);
                 });
@@ -413,6 +515,7 @@ fn position_webview_host(
             apply_host_layer_clip(host, style);
             apply_webview_layer_clip(webview, style);
             apply_webview_base_color(webview, style.background_color);
+            apply_webview_decor(id, width, height, style);
 
             let _: () = msg_send![class!(CATransaction), commit];
 
@@ -441,7 +544,53 @@ fn webview_host_style(style: &ElementStyle) -> WebViewHostStyle {
     WebViewHostStyle {
         background_color: style.background_color.map(|c| (c.h, c.s, c.l, c.a)),
         corner_clip: webview_corner_clip(style),
+        decor: webview_decor_style(style),
     }
+}
+
+// Resolve the below-webview decoration from the element's style — today, the rounded
+// card drop shadow from `boxShadow`.
+#[cfg(target_os = "macos")]
+fn webview_decor_style(style: &ElementStyle) -> WebViewDecor {
+    WebViewDecor {
+        shadow: webview_shadow_style(style),
+    }
+}
+
+// The webview element's `boxShadow` → the native drop shadow. CSS can list several
+// layers; CALayer has one shadow, so take the layer with the largest visual footprint
+// (offset magnitude + blur) — the "main" drop shadow. `None` → no shadow decoration.
+#[cfg(target_os = "macos")]
+fn webview_shadow_style(style: &ElementStyle) -> Option<WebViewShadow> {
+    let css = style.box_shadow.as_deref()?;
+    let main = crate::style::parse_box_shadows(css)
+        .into_iter()
+        .max_by(|a, b| {
+            let weight = |s: &gpui::BoxShadow| {
+                f32::from(s.offset.x).abs() + f32::from(s.offset.y).abs() + f32::from(s.blur_radius)
+            };
+            weight(a)
+                .partial_cmp(&weight(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+    let (r, g, b, a) = hsla_to_srgb(main.color);
+    if a <= 0.0 {
+        return None;
+    }
+    Some(WebViewShadow {
+        color: (r as f32, g as f32, b as f32),
+        opacity: a as f32,
+        // CSS blur ≈ 2× the CALayer shadowRadius (CSS blur is the full gaussian
+        // diameter; shadowRadius is the standard-deviation-ish radius).
+        radius: f32::from(main.blur_radius) / 2.0,
+        offset_x: f32::from(main.offset.x),
+        // CALayer shadowOffset is in the layer's geometry. The decoration view's layer
+        // is non-flipped (AppKit default, +y UP), so a CSS "shadow below the box" (+y
+        // down) is a NEGATIVE shadowOffset.height — verified on-capture (the shadow
+        // lands below the card, not above it behind the mode bar).
+        offset_y: -f32::from(main.offset.y),
+        corner_radius: webview_corner_clip(style).radius,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -516,6 +665,11 @@ fn hide_webview_host(id: u64) {
             let _: () = msg_send![host, setHidden: YES];
         }
     });
+    if let Some(decor) = decor_view(id) {
+        unsafe {
+            let _: () = msg_send![decor, setHidden: YES];
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -550,6 +704,72 @@ unsafe fn apply_webview_layer_clip(webview: id, style: &ElementStyle) {
     if webview_layer != nil {
         unsafe {
             apply_layer_corner_clip(webview_layer, clip);
+        }
+    }
+}
+
+// Drive the below-webview decoration view from the element's resolved style: today, the
+// rounded card drop shadow. The view already shares the webview's frame and sits one
+// level below the host; here we set its CALayer shadow properties + a rounded-rect
+// `shadowPath` so it casts a real shadow. The opaque WebView in front covers the
+// interior, so only the outward edge spill shows — it can never bleed over the page.
+// With no boxShadow (chrome webviews, or a webview without a card shadow) the decoration
+// view is left transparent + hidden.
+#[cfg(target_os = "macos")]
+fn apply_webview_decor(id: u64, width: f64, height: f64, style: &ElementStyle) {
+    let Some(view) = decor_view(id) else {
+        return;
+    };
+    let shadow = webview_decor_style(style).shadow;
+    unsafe {
+        let layer: id = msg_send![view, layer];
+        if layer == nil {
+            return;
+        }
+        let Some(shadow) = shadow else {
+            let _: () = msg_send![layer, setShadowOpacity: 0.0f32];
+            let _: () = msg_send![layer, setShadowPath: nil];
+            let _: () = msg_send![view, setHidden: YES];
+            return;
+        };
+
+        let ns_color: id = msg_send![
+            class!(NSColor),
+            colorWithSRGBRed: shadow.color.0 as f64
+            green: shadow.color.1 as f64
+            blue: shadow.color.2 as f64
+            alpha: 1.0f64
+        ];
+        let cg_color: id = msg_send![ns_color, CGColor];
+        let _: () = msg_send![layer, setShadowColor: cg_color];
+        let _: () = msg_send![layer, setShadowOpacity: shadow.opacity];
+        let _: () = msg_send![layer, setShadowRadius: shadow.radius as f64];
+        let offset = NSSize::new(shadow.offset_x as f64, shadow.offset_y as f64);
+        let _: () = msg_send![layer, setShadowOffset: offset];
+
+        // a rounded-rect path in the layer's own space (origin 0,0) matching the webview
+        // corner radius, so the shadow is a crisp rounded-card silhouette.
+        let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height));
+        let r = shadow.corner_radius.max(0.0) as f64;
+        let path: id = CGPathCreateWithRoundedRect(rect, r, r, std::ptr::null());
+        let _: () = msg_send![layer, setShadowPath: path];
+        if path != nil {
+            CGPathRelease(path);
+        }
+        let _: () = msg_send![view, setHidden: NO];
+
+        if std::env::var("RNGPUI_WEBVIEW_GEOMETRY_DEBUG").is_ok() {
+            eprintln!(
+                "[webview {id} decor-shadow] color=({:.2},{:.2},{:.2}) opacity={:.2} radius={:.1} offset=({:.1},{:.1}) corner={:.1}",
+                shadow.color.0,
+                shadow.color.1,
+                shadow.color.2,
+                shadow.opacity,
+                shadow.radius,
+                shadow.offset_x,
+                shadow.offset_y,
+                shadow.corner_radius,
+            );
         }
     }
 }

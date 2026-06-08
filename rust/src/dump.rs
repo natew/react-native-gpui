@@ -16,7 +16,7 @@ use gpui::{Hsla, Rgba};
 use serde_json::{Map, Value, json};
 
 use crate::bridge;
-use crate::elements::ReactElement;
+use crate::elements::{NativeResizeEdge, ReactElement};
 use crate::style::{Dim, ElementStyle};
 
 /// Serialize the full tree rooted at `root` into a JSON object, annotating each node
@@ -44,6 +44,21 @@ fn dump_node(el: &Arc<ReactElement>) -> Value {
     }
     if let Some(group) = el.native_list_group.as_ref() {
         obj.insert("nativeListGroup".into(), json!(group));
+    }
+    if let Some(key) = el.native_layout_key.as_ref() {
+        obj.insert("nativeLayoutKey".into(), json!(key));
+    }
+    if let Some(resize) = el.native_resize.as_ref() {
+        let mut native = Map::new();
+        native.insert("target".into(), json!(resize.target));
+        native.insert("edge".into(), json!(native_resize_edge_label(resize.edge)));
+        if let Some(min) = resize.min {
+            native.insert("min".into(), json!(min));
+        }
+        if let Some(max) = resize.max {
+            native.insert("max".into(), json!(max));
+        }
+        obj.insert("nativeResize".into(), Value::Object(native));
     }
 
     // accessibility / identity — flattened to the keys selectors match against, so the
@@ -98,16 +113,22 @@ fn dump_node(el: &Arc<ReactElement>) -> Value {
 
 fn resolved_style(style: &ElementStyle) -> Map<String, Value> {
     let mut m = Map::new();
-    let mut dim = |key: &str, d: Option<Dim>| {
-        if let Some(d) = d {
-            m.insert(key.into(), json!(dim_to_string(d)));
-        }
-    };
-    dim("width", style.width);
-    dim("height", style.height);
+    insert_dim(&mut m, "width", style.width);
+    insert_dim(&mut m, "height", style.height);
+    insert_dim(&mut m, "minWidth", style.min_width);
+    insert_dim(&mut m, "maxWidth", style.max_width);
+    insert_dim(&mut m, "minHeight", style.min_height);
+    insert_dim(&mut m, "maxHeight", style.max_height);
     if let Some(v) = style.flex {
         m.insert("flex".into(), json!(v));
     }
+    if let Some(v) = style.flex_grow {
+        m.insert("flexGrow".into(), json!(v));
+    }
+    if let Some(v) = style.flex_shrink {
+        m.insert("flexShrink".into(), json!(v));
+    }
+    insert_dim(&mut m, "flexBasis", style.flex_basis);
     if let Some(v) = style.position.as_ref() {
         m.insert("position".into(), json!(v));
     }
@@ -123,6 +144,9 @@ fn resolved_style(style: &ElementStyle) -> Map<String, Value> {
     if let Some(c) = style.background_color {
         m.insert("backgroundColor".into(), json!(hsla_to_hex(c)));
     }
+    if let Some(v) = style.background_image.as_ref() {
+        m.insert("backgroundImage".into(), json!(v));
+    }
     if let Some(c) = style.color {
         m.insert("color".into(), json!(hsla_to_hex(c)));
     }
@@ -135,7 +159,16 @@ fn resolved_style(style: &ElementStyle) -> Map<String, Value> {
     if let Some(v) = style.overflow.as_ref() {
         m.insert("overflow".into(), json!(v));
     }
+    if let Some(v) = style.box_shadow.as_ref() {
+        m.insert("boxShadow".into(), json!(v));
+    }
     m
+}
+
+fn insert_dim(m: &mut Map<String, Value>, key: &str, d: Option<Dim>) {
+    if let Some(d) = d {
+        m.insert(key.into(), json!(dim_to_string(d)));
+    }
 }
 
 fn dim_to_string(d: Dim) -> String {
@@ -143,6 +176,15 @@ fn dim_to_string(d: Dim) -> String {
         Dim::Px(p) => format!("{p}"),
         Dim::Pct(f) => format!("{}%", f * 100.0),
         Dim::Auto => "auto".to_string(),
+    }
+}
+
+fn native_resize_edge_label(edge: NativeResizeEdge) -> &'static str {
+    match edge {
+        NativeResizeEdge::Left => "left",
+        NativeResizeEdge::Right => "right",
+        NativeResizeEdge::Top => "top",
+        NativeResizeEdge::Bottom => "bottom",
     }
 }
 

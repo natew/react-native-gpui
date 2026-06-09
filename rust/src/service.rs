@@ -61,6 +61,15 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static STARTUP: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 static FIRST_RENDER_LOGGED: AtomicBool = AtomicBool::new(false);
 
+// RNGPUI_DISABLE_RENDER_GATE=1 forces the per-frame tree lifecycle to run EVERY render
+// (the pre-fix behavior), so the on-screen validator can A/B the freeze: gate-off = the
+// per-frame WebView reposition + whole-tree walks that pinned the main thread, gate-on =
+// the fix. Cached once; the OR below is free in normal runs.
+static RENDER_GATE_DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+fn render_gate_disabled() -> bool {
+    *RENDER_GATE_DISABLED.get_or_init(|| std::env::var_os("RNGPUI_DISABLE_RENDER_GATE").is_some())
+}
+
 fn startup_mark(label: &str) {
     if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some() {
         if let Some(t0) = STARTUP.get() {
@@ -717,10 +726,14 @@ impl Render for ServiceApp {
             eprintln!(
                 "[render] root_dirty={} (lifecycle {})",
                 self.root_dirty,
-                if self.root_dirty { "RUN" } else { "SKIP" }
+                if self.root_dirty || render_gate_disabled() {
+                    "RUN"
+                } else {
+                    "SKIP"
+                }
             );
         }
-        if self.root_dirty {
+        if self.root_dirty || render_gate_disabled() {
             // Ensure a persistent InputState entity exists for every text-input node,
             // subscribing once so edits stream back to JS as `changeText`, and observing
             // it so this view re-renders (and the edit shows) when the input changes.

@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use std::collections::{HashMap, HashSet, VecDeque};
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use gpui::{
@@ -272,7 +272,11 @@ fn parse_json_tree(
     let children: Vec<Arc<ReactElement>> = obj
         .get("children")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|c| parse_json_tree(c, prior)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| parse_json_tree(c, prior))
+                .collect()
+        })
         .unwrap_or_default();
 
     let runs = obj
@@ -602,6 +606,30 @@ fn schedule_inspector_activation(cx: &mut Context<ServiceApp>, token: u64) {
     .detach();
 }
 
+/// After the Copy menu item is clicked, let "Copied" show for a beat, then close the
+/// menu — unless the user interacted with it again (the token check inside
+/// `close_menu_after_copy` cancels stale closes).
+fn schedule_inspector_menu_close(cx: &mut Context<ServiceApp>, token: u64) {
+    cx.spawn(async move |this, cx| {
+        cx.background_executor()
+            .timer(inspector::INSPECTOR_COPY_CLOSE_DELAY)
+            .await;
+        let changed = this
+            .update(cx, |this, cx| {
+                let changed = this.inspector.close_menu_after_copy(token);
+                if changed {
+                    cx.notify();
+                }
+                changed
+            })
+            .unwrap_or(false);
+        if changed {
+            let _ = cx.update(|cx| cx.refresh_windows());
+        }
+    })
+    .detach();
+}
+
 /// collect (id, placeholder, value, multiline, secure) for every text-input node in the tree.
 fn collect_inputs(el: &Arc<ReactElement>, out: &mut Vec<InputSpec>) {
     if el.element_type == "textinput" || el.element_type == "textarea" {
@@ -761,6 +789,10 @@ impl Render for ServiceApp {
         // reset the per-frame hit-test passthrough registry before this frame's prepaint
         // pass repopulates it (webview rects + occluder rects, for native webview events).
         hit_passthrough::begin_frame();
+        // while the inspector overlay/menu is up it owns all mouse input — without this,
+        // a menu painted over a webview region is unclickable (clicks fall through to
+        // the page via the hitTest: passthrough).
+        hit_passthrough::set_input_grab(self.inspector.wants_input_grab());
         // flush the previous frame's stage breakdown + reset accumulators for this frame.
         frame_trace::begin_render(self.root_dirty);
         if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some()
@@ -1124,7 +1156,12 @@ impl Render for ServiceApp {
                     let root = this.root.clone();
                     let size = window.viewport_size();
                     let viewport = (size.width.into(), size.height.into());
-                    if this.inspector.handle_mouse_down(&root, event, viewport, cx) {
+                    let (handled, copy_close_token) =
+                        this.inspector.handle_mouse_down(&root, event, viewport, cx);
+                    if let Some(token) = copy_close_token {
+                        schedule_inspector_menu_close(cx, token);
+                    }
+                    if handled {
                         cx.stop_propagation();
                         cx.notify();
                         window.refresh();
@@ -1552,11 +1589,13 @@ fn spawn_parent_exit_watchdog() {
     if parent <= 1 {
         return; // already detached; nothing meaningful to watch
     }
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        if std::os::unix::process::parent_id() != parent {
-            eprintln!("[rngpui] test-mode parent {parent} exited — shutting down");
-            std::process::exit(0);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            if std::os::unix::process::parent_id() != parent {
+                eprintln!("[rngpui] test-mode parent {parent} exited — shutting down");
+                std::process::exit(0);
+            }
         }
     });
 }

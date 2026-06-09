@@ -23,6 +23,7 @@ mod imp {
     use std::cell::RefCell;
     use std::os::raw::c_char;
     use std::sync::Once;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use cocoa::base::{YES, id, nil};
     use cocoa::foundation::{NSPoint, NSRect};
@@ -48,6 +49,16 @@ mod imp {
     thread_local! {
         static FRAME: RefCell<Vec<Rect>> = RefCell::new(Vec::new());
         static ORDER: RefCell<u32> = RefCell::new(0);
+    }
+
+    /// While set, `hitTest:` never declines in favor of a webview — gpui owns every
+    /// mouse event. The inspector turns this on while its hover overlay or popup menu
+    /// is up, so option+click and menu clicks land in gpui even over a webview region
+    /// (the overlay paints above the page but is invisible to AppKit hit-testing).
+    static INPUT_GRAB: AtomicBool = AtomicBool::new(false);
+
+    pub fn set_input_grab(grab: bool) {
+        INPUT_GRAB.store(grab, Ordering::Relaxed);
     }
 
     /// Clear the per-frame rect registry and (once) install the `hitTest:` override.
@@ -121,6 +132,11 @@ mod imp {
                 return nil;
             }
 
+            // inspector overlay/menu is up: gpui owns all input, no webview passthrough.
+            if INPUT_GRAB.load(Ordering::Relaxed) {
+                return this as *const Object as id;
+            }
+
             let superview: id = msg_send![this, superview];
             let local: NSPoint = if superview != nil {
                 msg_send![this, convertPoint: point fromView: superview]
@@ -171,7 +187,7 @@ mod imp {
 }
 
 #[cfg(target_os = "macos")]
-pub use imp::{begin_frame, record_occluder, record_webview};
+pub use imp::{begin_frame, record_occluder, record_webview, set_input_grab};
 
 #[cfg(not(target_os = "macos"))]
 pub fn begin_frame() {}
@@ -179,3 +195,5 @@ pub fn begin_frame() {}
 pub fn record_webview(_x: f64, _y: f64, _w: f64, _h: f64) {}
 #[cfg(not(target_os = "macos"))]
 pub fn record_occluder(_x: f64, _y: f64, _w: f64, _h: f64) {}
+#[cfg(not(target_os = "macos"))]
+pub fn set_input_grab(_grab: bool) {}

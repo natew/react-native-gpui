@@ -102,6 +102,9 @@ pub const WEBVIEW_INSPECTOR_SCRIPT: &str = r#"
 
 const WEBVIEW_INSPECTOR_FLAG: &str = "__rngpuiInspector";
 pub const INSPECTOR_ACTIVATION_HOLD: Duration = Duration::from_millis(500);
+/// How long the menu's Copy button shows "Copied" before the menu closes itself
+/// (parity with the ~/one devtool's copy-then-dismiss beat).
+pub const INSPECTOR_COPY_CLOSE_DELAY: Duration = Duration::from_millis(800);
 
 static SNAPSHOT_METADATA: Lazy<Mutex<HashMap<u64, SnapshotMetadata>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -750,6 +753,9 @@ pub struct InspectorState {
     copied_id: Option<u64>,
     /// when Some, the popup menu is open and owns all mouse input until dismissed.
     menu: Option<InspectorMenu>,
+    /// bumped on every menu interaction; a scheduled copy-close fires only if the
+    /// menu hasn't been touched since the Copy click that scheduled it.
+    menu_close_token: u64,
 }
 
 impl InspectorState {
@@ -764,6 +770,7 @@ impl InspectorState {
             hover: None,
             copied_id: None,
             menu: None,
+            menu_close_token: 0,
         }
     }
 
@@ -820,35 +827,61 @@ impl InspectorState {
         self.update_alt_state(root, event.position, event.modifiers.alt)
     }
 
+    /// Whether the inspector should own ALL mouse input right now. While the hover
+    /// overlay or popup menu is up, the native `hitTest:` passthrough to webviews is
+    /// suspended (`hit_passthrough::set_input_grab`) — otherwise the overlay paints
+    /// above a webview but every click lands in the page and the menu is unclickable.
+    pub fn wants_input_grab(&self) -> bool {
+        self.enabled && (self.active || self.menu.is_some())
+    }
+
+    /// Returns (handled, copy_close_token). When the Copy menu item was clicked the
+    /// token is Some — the caller schedules `close_menu_after_copy(token)` after
+    /// `INSPECTOR_COPY_CLOSE_DELAY` so "Copied" shows for a beat, then the menu closes.
     pub fn handle_mouse_down(
         &mut self,
         root: &Arc<ReactElement>,
         event: &MouseDownEvent,
         viewport: (f32, f32),
         cx: &mut App,
-    ) -> bool {
+    ) -> (bool, Option<u64>) {
         if !self.enabled {
-            return false;
+            return (false, None);
         }
         // menu open: every click is ours. Left clicks dispatch the item under the cursor
         // (or dismiss on an outside-click); any other button dismisses.
         if self.menu.is_some() {
             self.suppress_mouse_up = true;
-            if event.button == MouseButton::Left {
-                self.dispatch_menu_click(event.position, cx);
+            let close_token = if event.button == MouseButton::Left {
+                self.dispatch_menu_click(event.position, cx)
             } else {
                 self.menu = None;
-            }
-            return true;
+                None
+            };
+            return (true, close_token);
         }
         // option+click on an active hover opens the menu (replacing the old straight-to-
         // clipboard copy — copy is now a menu action).
         if event.button != MouseButton::Left || !event.modifiers.alt || !self.active {
-            return false;
+            return (false, None);
         }
         self.suppress_mouse_up = true;
         self.open_menu(root, event.position, viewport);
-        true
+        (true, None)
+    }
+
+    /// Close the menu if it's still showing the "Copied" state from the Copy click that
+    /// minted `token`. Any menu interaction since then bumps the token and cancels this.
+    pub fn close_menu_after_copy(&mut self, token: u64) -> bool {
+        if token != self.menu_close_token {
+            return false;
+        }
+        if self.menu.as_ref().is_some_and(|menu| menu.copied) {
+            self.menu = None;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn copy_at(
@@ -1017,16 +1050,16 @@ impl InspectorState {
         self.menu = Some(build_menu(hit, position, viewport));
     }
 
-    fn dispatch_menu_click(&mut self, position: Point<Pixels>, cx: &mut App) {
-        let Some(menu) = self.menu.as_ref() else {
-            return;
-        };
+    fn dispatch_menu_click(&mut self, position: Point<Pixels>, cx: &mut App) -> Option<u64> {
+        // every interaction invalidates a pending copy-close.
+        self.menu_close_token = self.menu_close_token.wrapping_add(1);
+        let menu = self.menu.as_ref()?;
         if !menu.panel.contains(position) {
             self.menu = None;
-            return;
+            return None;
         }
         let Some(action) = menu_action_at(menu, position) else {
-            return; // inside the panel but on no item: keep it open
+            return None; // inside the panel but on no item: keep it open
         };
         match action {
             MenuAction::Select(i) => {
@@ -1043,6 +1076,7 @@ impl InspectorState {
                     if let Some(menu) = self.menu.as_mut() {
                         menu.copied = true;
                     }
+                    return Some(self.menu_close_token);
                 }
             }
             MenuAction::Open => {
@@ -1059,6 +1093,7 @@ impl InspectorState {
                 self.menu = None;
             }
         }
+        None
     }
 
     fn update_menu_hover(&mut self, position: Point<Pixels>) -> bool {
@@ -1150,7 +1185,10 @@ pub fn remember_source(id: u64, source: &str) {
 /// repopulated each commit — it's pruned by the present-set instead (mirrors
 /// `pseudo_style::retain`). `present` is ALL reconstructed ids, ref'd subtrees included.
 pub fn retain_sources(present: &std::collections::HashSet<u64>) {
-    SOURCE_TABLE.lock().unwrap().retain(|id, _| present.contains(id));
+    SOURCE_TABLE
+        .lock()
+        .unwrap()
+        .retain(|id, _| present.contains(id));
 }
 
 pub fn source_for(id: u64) -> Option<String> {
@@ -2188,6 +2226,68 @@ mod tests {
         assert!(ancestor_snapshot.contains("id: 2"));
         assert!(ancestor_snapshot.contains("source: /a/Panel.tsx:5:3"));
         assert!(ancestor_snapshot.contains("path: view#1 > view#2"));
+    }
+
+    #[test]
+    fn copy_close_only_fires_for_untouched_copied_menu() {
+        let _guard = inspector_test_guard();
+        bridge::retain_layout(&HashSet::new());
+        let hit = hit_with_path(
+            vec![ns(1, "view", Some("/a/App.tsx:1:1"))],
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 50.0,
+                height: 20.0,
+            },
+        );
+        let mut inspector = InspectorState::new(true);
+        inspector.menu = Some(build_menu(hit, point(px(10.0), px(10.0)), (800.0, 600.0)));
+        inspector.menu_close_token = 7;
+
+        // menu open but Copy not clicked → a stray close is a no-op.
+        assert!(!inspector.close_menu_after_copy(7));
+        assert!(inspector.menu.is_some());
+
+        inspector.menu.as_mut().unwrap().copied = true;
+        // a later interaction bumped the token → the stale close is cancelled.
+        assert!(!inspector.close_menu_after_copy(6));
+        assert!(inspector.menu.is_some());
+
+        // matching token + still in the copied state → the menu closes.
+        assert!(inspector.close_menu_after_copy(7));
+        assert!(inspector.menu.is_none());
+    }
+
+    #[test]
+    fn input_grab_follows_overlay_and_menu_state() {
+        let _guard = inspector_test_guard();
+        bridge::retain_layout(&HashSet::new());
+        let mut inspector = InspectorState::new(true);
+        assert!(!inspector.wants_input_grab());
+
+        inspector.active = true;
+        assert!(inspector.wants_input_grab(), "active hover grabs input");
+        inspector.active = false;
+
+        let hit = hit_with_path(
+            vec![ns(1, "view", None)],
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 50.0,
+                height: 20.0,
+            },
+        );
+        inspector.menu = Some(build_menu(hit, point(px(10.0), px(10.0)), (800.0, 600.0)));
+        assert!(inspector.wants_input_grab(), "open menu grabs input");
+
+        let mut disabled = InspectorState::new(false);
+        disabled.active = true;
+        assert!(
+            !disabled.wants_input_grab(),
+            "disabled inspector never grabs"
+        );
     }
 
     #[test]

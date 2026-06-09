@@ -1247,6 +1247,11 @@ pub(crate) enum Incoming {
         y: f32,
         reply: flume::Sender<serde_json::Value>,
     },
+    DebugRealMove {
+        x: f32,
+        y: f32,
+        reply: flume::Sender<serde_json::Value>,
+    },
     DebugDragAt {
         phase: String,
         x: f32,
@@ -1896,6 +1901,43 @@ fn main() {
                             Err(_) => break,
                         }
                     }
+                    Incoming::DebugRealMove { x, y, reply } => {
+                        // dispatch a REAL mouse MOVE (no button) through gpui's hitbox hit-test —
+                        // the same path an OS hover takes. Used to validate native hover/press
+                        // pseudo styles: a move over a row triggers the host's is_hovered + the
+                        // div's paint swap, with ZERO JS round-trip. We snapshot the host→JS event
+                        // counter so the caller can prove no JS event fired (no mouseEnter etc.),
+                        // then refresh so the hover repaints.
+                        let result = window_handle.update(cx, |_root, window, cx| {
+                            let position = gpui::point(px(x), px(y));
+                            let before = crate::bridge::events_emitted_count();
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::MouseMove(MouseMoveEvent {
+                                    position,
+                                    pressed_button: None,
+                                    modifiers: gpui::Modifiers::default(),
+                                }),
+                                cx,
+                            );
+                            window.refresh();
+                            crate::bridge::events_emitted_count().saturating_sub(before)
+                        });
+                        match result {
+                            Ok(emitted) => {
+                                let _ = reply.send(serde_json::json!({
+                                    "ok": true,
+                                    "type": "realmove",
+                                    "x": x,
+                                    "y": y,
+                                    // native hover emits NOTHING to JS — a non-zero delta means a
+                                    // JS listener fired (the old re-serialize-on-hover round-trip).
+                                    "eventsEmitted": emitted,
+                                }));
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     Incoming::PickPaths {
                         id,
                         files,
@@ -2214,6 +2256,7 @@ fn main() {
                             | Incoming::DebugTypeText { .. }
                             | Incoming::DebugKeyPress { .. }
                             | Incoming::DebugRealTap { .. }
+                            | Incoming::DebugRealMove { .. }
                             | Incoming::AppCommands(_) => unreachable!(),
                         });
                         if applied.is_err() {

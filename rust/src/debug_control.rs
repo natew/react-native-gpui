@@ -114,6 +114,11 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
             y: number(value, "y")?,
             reply,
         }),
+        "realmove" => Ok(Incoming::DebugRealMove {
+            x: number(value, "x")?,
+            y: number(value, "y")?,
+            reply,
+        }),
         "dragAt" => Ok(Incoming::DebugDragAt {
             phase: value
                 .get("phase")

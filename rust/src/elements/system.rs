@@ -70,12 +70,10 @@ unsafe extern "C" {
     fn CGPathRelease(path: id);
 }
 
-// place a subview at the very bottom of the parent's z-stack (below the Metal view).
+// order a subview below a given sibling, or — with `relativeTo: nil` — at the very
+// bottom of the parent's z-stack (NSWindowBelow).
 #[cfg(target_os = "macos")]
 const NS_WINDOW_BELOW: i64 = -1;
-// order a subview directly ABOVE a given sibling (NSWindowAbove).
-#[cfg(target_os = "macos")]
-const NS_WINDOW_ABOVE: i64 = 1;
 
 #[cfg(target_os = "macos")]
 const CA_LAYER_MIN_X_MIN_Y_CORNER: u64 = 1 << 0;
@@ -455,13 +453,26 @@ fn ensure_shadow_view(id: u64) -> id {
     })
 }
 
-// Lazily create the surface view for an id and keep it parented just ABOVE its shadow
-// decor view, both at the BOTTOM of the parent z-stack (always below gpui's Metal
-// view). Re-creates the surface when the surface KIND changes (plain NSView ⇄
+// Lazily create the surface view for an id and park it in the native z-stack so its
+// outer drop shadow can never be occluded. The stack is split into three bands, bottom
+// → top: ALL shadow decor views, then ALL surface views, then gpui's Metal view on top.
+//
+// Why bands and not "surface directly above its own shadow": with the per-card
+// "surface above its own shadow" ordering, a second card's shadow gets pushed to the
+// absolute bottom (below the first card's surface), so the first card's opaque glass
+// surface sits ABOVE the second card's shadow and CLIPS its spill at the shared edge —
+// the reported "shadow clipped at the card edges" bug. Keeping every surface in a single
+// band directly BELOW gpui's Metal view (and above ALL shadows) means no surface ever
+// covers another card's shadow spill, while the surface still covers its OWN shadow's
+// interior (same frame). gpui's Metal view is re-asserted on top so a surface ordered
+// `NS_WINDOW_BELOW relativeTo: gpui_view` lands just under it. Mirrors webview.rs's
+// bottom→top re-stack (backing, decor, host, gpui_view).
+//
+// Re-creates the surface when the surface KIND changes (plain NSView ⇄
 // NSVisualEffectView ⇄ NSGlassEffectView, or a different glass variant — different
 // classes/instances can't be reconfigured in place). Returns the current surface id.
 #[cfg(target_os = "macos")]
-fn ensure_surface_view(id: u64, parent_view: id, surface: SystemSurface) -> id {
+fn ensure_surface_view(id: u64, parent_view: id, gpui_view: id, surface: SystemSurface) -> id {
     // the decor view exists first so the surface can be ordered directly above it.
     let shadow = ensure_shadow_view(id);
 
@@ -496,7 +507,8 @@ fn ensure_surface_view(id: u64, parent_view: id, surface: SystemSurface) -> id {
             .or_insert_with(|| unsafe { create_surface_view(surface) });
 
         unsafe {
-            // keep the shadow decor at the very bottom of the parent z-stack…
+            // keep every shadow decor at the very bottom of the parent z-stack (the
+            // shadows band), below all surfaces and gpui's Metal view.
             let shadow_parent: id = msg_send![shadow, superview];
             if shadow_parent != parent_view {
                 if shadow_parent != nil {
@@ -509,8 +521,11 @@ fn ensure_surface_view(id: u64, parent_view: id, surface: SystemSurface) -> id {
                     relativeTo: nil
                 ];
             }
-            // …and the surface directly ABOVE the shadow (still below gpui's Metal view,
-            // since both sit at the bottom of the stack).
+            // park the surface in the band directly BELOW gpui's Metal view — i.e. above
+            // ALL shadow decors, so no card's surface can occlude another card's shadow
+            // spill, while still covering its own shadow's interior (same frame). Ordering
+            // relative to gpui_view (not to its own shadow) is what keeps every surface in
+            // one band above every shadow regardless of card count / tree order.
             let surface_parent: id = msg_send![view, superview];
             if surface_parent != parent_view {
                 if surface_parent != nil {
@@ -519,9 +534,25 @@ fn ensure_surface_view(id: u64, parent_view: id, surface: SystemSurface) -> id {
                 let _: () = msg_send![
                     parent_view,
                     addSubview: view
-                    positioned: NS_WINDOW_ABOVE
-                    relativeTo: shadow
+                    positioned: NS_WINDOW_BELOW
+                    relativeTo: gpui_view
                 ];
+            }
+            // re-assert gpui's Metal view on top so surfaces ordered below it stay below
+            // it (and above every shadow). `addSubview:` re-adds an existing subview at
+            // the top; gate it on the Metal view not already being topmost to avoid the
+            // per-frame reparent churn that tears the whole UI out and flickers.
+            if gpui_view != nil {
+                let subviews: id = msg_send![parent_view, subviews];
+                let count: usize = msg_send![subviews, count];
+                let topmost: id = if count > 0 {
+                    msg_send![subviews, objectAtIndex: count - 1]
+                } else {
+                    nil
+                };
+                if topmost != gpui_view {
+                    let _: () = msg_send![parent_view, addSubview: gpui_view];
+                }
             }
         }
 
@@ -685,13 +716,13 @@ unsafe fn apply_shadow_decor(id: u64, width: f64, height: f64, shadow: Option<Sy
 // one flicker-free step.
 #[cfg(target_os = "macos")]
 fn position_system_view(window: &mut Window, element: &ReactElement, bounds: Bounds<Pixels>) {
-    let Some((parent_view, _gpui_view)) = webview_parent(window) else {
+    let Some((parent_view, gpui_view)) = webview_parent(window) else {
         return;
     };
 
     let id = element.global_id;
     let style = system_view_style(element);
-    let view = ensure_surface_view(id, parent_view, style.surface);
+    let view = ensure_surface_view(id, parent_view, gpui_view, style.surface);
     let shadow_view = ensure_shadow_view(id);
 
     let x = f64::from(bounds.origin.x);
@@ -1064,6 +1095,7 @@ mod tests {
             accessibility: crate::elements::AccessibilityInfo::default(),
             children: Vec::new(),
             style: ElementStyle::default(),
+            style_json: None,
             cached_gpui_style: None,
         }
     }

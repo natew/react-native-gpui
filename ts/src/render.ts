@@ -127,6 +127,8 @@ export function createRoot(options: RootOptions = {}): Root {
             locationX: e.locationX,
             locationY: e.locationY,
             layout: e.layout,
+            cols: e.cols,
+            rows: e.rows,
         });
     };
 

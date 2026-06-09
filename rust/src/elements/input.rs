@@ -5,7 +5,7 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, Bounds, Display, Element, ElementId, Entity, GlobalElementId,
     InteractiveElement as _, IntoElement, KeyDownEvent, LayoutId, ParentElement as _, Pixels,
-    Styled, Window, div,
+    Styled, Window, div, px,
 };
 use gpui_component::input::{Input, InputState};
 
@@ -60,6 +60,30 @@ impl ReactInputElement {
                     .appearance(false)
                     .focus_bordered(false)
                     .disabled(!editable);
+                // Drive the input's text rendering from the node's resolved style.
+                // gpui-component's `Input` is `Styled`, and its wrapper div applies
+                // its own `input_text_size(size)` first, then `refine_style(&self.style)`
+                // last — so a `text_size`/`font_family`/`font_weight`/`line_height` set
+                // here wins. The inner `TextElement` (state) reads `window.text_style()`
+                // for the font + `font_size`, which is exactly this inherited text style,
+                // so `style.fontSize` now visibly changes the input/placeholder size.
+                // (Text `color`/`placeholderTextColor` and `textAlign` are NOT applied:
+                // gpui-component hardcodes the text color to `theme().foreground` and the
+                // placeholder to `theme().muted_foreground`, and the input never reads a
+                // text alignment — none are reachable through the text style.)
+                let style = &self.element.style;
+                if let Some(size) = style.font_size {
+                    input = input.text_size(px(size));
+                }
+                if let Some(weight) = style.gpui_font_weight() {
+                    input = input.font_weight(weight);
+                }
+                if let Some(family) = style.gpui_font_family() {
+                    input = input.font_family(family);
+                }
+                if let Some(lh) = style.line_height {
+                    input = input.line_height(px(lh));
+                }
                 if self.element.element_type == "textarea" {
                     input = input.h_full();
                 }

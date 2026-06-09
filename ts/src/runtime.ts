@@ -11,7 +11,11 @@
 
 export type SerializedNode = {
     globalId: number;
-    type: string;
+    /** delta wire only: a `{ globalId, ref: true }` node tells the host to reuse the prior
+     * commit's subtree for this id unchanged (emitted by toWireDelta in render.ts). Full
+     * nodes omit it and always carry `type`; refs carry only globalId + ref. */
+    ref?: boolean;
+    type?: string;
     style?: Record<string, unknown>;
     /**
      * pseudo-state style DELTAS applied NATIVELY in the gpui host (zero JS round-trip).

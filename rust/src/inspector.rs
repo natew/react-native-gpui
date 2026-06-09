@@ -1145,11 +1145,12 @@ pub fn remember_source(id: u64, source: &str) {
     SOURCE_TABLE.lock().unwrap().insert(id, source.to_string());
 }
 
-/// Drop all recorded sources. Called at the start of each full tree apply so the table
-/// reflects only the current commit (globalIds are reused across commits, so a stale
-/// entry would mislabel a different node).
-pub fn clear_sources() {
-    SOURCE_TABLE.lock().unwrap().clear();
+/// Drop source entries for ids no longer in the live tree. Under the delta wire, ref'd
+/// nodes never re-enter `parse_json_tree`, so the source table can't be cleared and
+/// repopulated each commit — it's pruned by the present-set instead (mirrors
+/// `pseudo_style::retain`). `present` is ALL reconstructed ids, ref'd subtrees included.
+pub fn retain_sources(present: &std::collections::HashSet<u64>) {
+    SOURCE_TABLE.lock().unwrap().retain(|id, _| present.contains(id));
 }
 
 pub fn source_for(id: u64) -> Option<String> {
@@ -2201,7 +2202,7 @@ mod tests {
     #[test]
     fn summary_reads_source_from_side_table() {
         let _guard = inspector_test_guard();
-        super::clear_sources();
+        super::retain_sources(&std::collections::HashSet::new());
         super::remember_source(54321, "/a/Widget.tsx:8:3");
         let element = node(54321, "view", Vec::new());
         assert_eq!(
@@ -2211,6 +2212,23 @@ mod tests {
         // a node with no recorded source has none.
         let other = node(99999, "view", Vec::new());
         assert_eq!(super::summary(&other).source, None);
-        super::clear_sources();
+        super::retain_sources(&std::collections::HashSet::new());
+    }
+
+    // Under the delta wire the source table is pruned by present-set (not cleared each
+    // commit), so a node still in the tree — whether re-sent full or reused via a ref —
+    // keeps its source, while a removed node's source is dropped.
+    #[test]
+    fn retain_sources_keeps_present_prunes_absent() {
+        let _guard = inspector_test_guard();
+        super::retain_sources(&std::collections::HashSet::new());
+        super::remember_source(101, "/a/Keep.tsx:1:1");
+        super::remember_source(102, "/a/Drop.tsx:2:2");
+        let mut present = std::collections::HashSet::new();
+        present.insert(101u64);
+        super::retain_sources(&present);
+        assert_eq!(super::source_for(101).as_deref(), Some("/a/Keep.tsx:1:1"));
+        assert_eq!(super::source_for(102), None);
+        super::retain_sources(&std::collections::HashSet::new());
     }
 }

@@ -6,6 +6,7 @@
 import { createElement, type ReactElement, type ComponentType } from "react";
 import Reconciler, { setCommitSink, serializeContainer, dispatchEvent, type Container } from "./reconciler";
 import { setEventBatcher, startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type SerializedNode } from "./runtime";
+import { toWireDelta } from "./wire-delta";
 
 // coalesced event batches (resize/layout/scroll floods) dispatch inside one React update so
 // a window resize produces one re-render per batch instead of one per event.
@@ -51,6 +52,8 @@ export function createRoot(options: RootOptions = {}): Root {
 
     let bridge: Bridge | null = null;
     let lastTree: SerializedNode | null = null;
+    // objects the host currently holds in full; toWireDelta emits refs for these. see its doc.
+    const sentNodes = new WeakSet<SerializedNode>();
     const bridgeOptions: BridgeOptions = {
         inspector: options.devtools === true || (typeof options.devtools === "object" && options.devtools.inspector === true),
     };
@@ -80,14 +83,17 @@ export function createRoot(options: RootOptions = {}): Root {
         return true;
     };
     const pushTree = (tree: SerializedNode) => {
+        // sameTree compares the MEMOIZED tree (cheap O(top-children) ref check) to skip
+        // no-op commits entirely; toWireDelta runs only when we actually send, and lastTree
+        // stays the memoized tree so the next sameTree/delta sees real object identity.
         if (!bridge) {
-            bridge = startBridge(tree, bridgeOptions);
+            bridge = startBridge(toWireDelta(tree, sentNodes), bridgeOptions);
             bridge.onEvent(handleEvent);
             lastTree = tree;
             return;
         }
         if (lastTree && sameTree(tree, lastTree)) return;
-        bridge.update(tree);
+        bridge.update(toWireDelta(tree, sentNodes));
         lastTree = tree;
     };
 

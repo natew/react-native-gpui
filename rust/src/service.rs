@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
@@ -102,8 +103,46 @@ fn dispatch_real_input(window: &mut Window, input: gpui::PlatformInput, cx: &mut
 const RN_WEBVIEW_SHIM: &str = "window.ReactNativeWebView={postMessage:function(d){\
     window.ipc.postMessage(typeof d==='string'?d:JSON.stringify(d))}};";
 
-fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
+// The prior committed tree's globalId -> Arc index, used to resolve delta `ref` nodes
+// (unchanged subtrees the reconciler didn't re-serialize). Rebuilt from the
+// reconstructed tree after every commit so reused subtrees stay resolvable for future
+// refs. Thread-local because `parse_json_tree` runs on the JS thread inside
+// `host_apply_tree` (one runtime = one JS thread); this also isolates the index per
+// test thread so parallel tests don't pollute each other.
+thread_local! {
+    static PRIOR_TREE_INDEX: RefCell<HashMap<u64, Arc<ReactElement>>> =
+        RefCell::new(HashMap::new());
+}
+
+// Walk a reconstructed tree (including reused subtrees) into a globalId -> Arc index
+// for the next commit's `ref` resolution. Mirrors `collect_node_ids` but keeps the Arc.
+fn index_tree(el: &Arc<ReactElement>, out: &mut HashMap<u64, Arc<ReactElement>>) {
+    out.insert(el.global_id, Arc::clone(el));
+    for c in &el.children {
+        index_tree(c, out);
+    }
+}
+
+fn parse_json_tree(
+    value: &serde_json::Value,
+    prior: &HashMap<u64, Arc<ReactElement>>,
+) -> Option<Arc<ReactElement>> {
     let obj = value.as_object()?;
+    // delta wire fast path: a `{ globalId, ref: true }` node means "this subtree is
+    // unchanged since the last commit" — reuse the prior commit's Arc wholesale
+    // (structural sharing, no reparse). The reconciler only emits a ref for a node it
+    // already sent in full, so `prior` is guaranteed to hold it; a miss means the JS
+    // sent-set and this index drifted (shouldn't happen) — log so it's visible.
+    if obj.get("ref").and_then(|v| v.as_bool()) == Some(true) {
+        let id = obj.get("globalId").and_then(|v| v.as_u64())?;
+        return match prior.get(&id) {
+            Some(arc) => Some(Arc::clone(arc)),
+            None => {
+                eprintln!("[rngpui] delta ref miss for globalId {id} (no prior node)");
+                None
+            }
+        };
+    }
     let element_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("div");
     let global_id = obj
         .get("globalId")
@@ -233,7 +272,7 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
     let children: Vec<Arc<ReactElement>> = obj
         .get("children")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(parse_json_tree).collect())
+        .map(|arr| arr.iter().filter_map(|c| parse_json_tree(c, prior)).collect())
         .unwrap_or_default();
 
     let runs = obj
@@ -1326,10 +1365,17 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
             _ => None,
         };
     }
-    // a full tree arrives here once per React commit; reset the source side-table so it
-    // holds only this commit's nodes (globalIds are reused across commits).
-    crate::inspector::clear_sources();
-    parse_json_tree(v).map(Incoming::Tree)
+    // a tree (full or delta) arrives here once per React commit. resolve any `ref` nodes
+    // against the prior commit's index, then rebuild the index from the reconstructed
+    // tree (incl. reused subtrees) for the next commit's refs. the source side-table is
+    // pruned by `retain_sources(present)` in the Incoming::Tree handler (mirrors
+    // pseudo_style) — NOT cleared here, or ref'd nodes would lose their source (they
+    // never re-enter parse_json_tree).
+    let root = PRIOR_TREE_INDEX.with(|idx| parse_json_tree(v, &idx.borrow()))?;
+    let mut next_index = HashMap::new();
+    index_tree(&root, &mut next_index);
+    PRIOR_TREE_INDEX.with(|idx| *idx.borrow_mut() = next_index);
+    Some(Incoming::Tree(root))
 }
 
 fn install_app_commands(config: AppCommandConfig, cx: &mut App) {
@@ -2045,6 +2091,7 @@ fn main() {
                                 bridge::retain_layout(&node_ids);
                                 crate::anim_overlay::retain(&node_ids);
                                 crate::pseudo_style::retain(&node_ids);
+                                crate::inspector::retain_sources(&node_ids);
                                 let mut native_layout_keys = HashSet::new();
                                 collect_native_layout_keys(&next_root, &mut native_layout_keys);
                                 elements::retain_native_layout_keys(&native_layout_keys);
@@ -2344,6 +2391,67 @@ mod tests {
     use gpui::{KeyContext, Keymap, Keystroke};
     use serde_json::json;
     use std::collections::HashSet;
+    use std::sync::Arc;
+
+    fn tree_of(incoming: Option<Incoming>) -> Arc<super::ReactElement> {
+        match incoming {
+            Some(Incoming::Tree(t)) => t,
+            _ => panic!("expected Incoming::Tree"),
+        }
+    }
+
+    // The delta wire: a full commit seeds the index, then a delta with a `ref` node
+    // reuses the prior Arc for the unchanged subtree (structural sharing) and must
+    // reconstruct a tree byte-identical to a full apply of the same end state.
+    #[test]
+    fn delta_ref_reconstructs_full_tree_with_structural_sharing() {
+        let full_a = json!({
+            "globalId": 0, "type": "div", "children": [
+                { "globalId": 1, "type": "div", "style": { "backgroundColor": "#111111" } },
+                { "globalId": 2, "type": "div", "children": [
+                    { "globalId": 3, "type": "text", "text": "hello" }
+                ]}
+            ]
+        });
+        // node 1's style changed; node 2's subtree is unchanged -> emitted as a ref.
+        let delta = json!({
+            "globalId": 0, "type": "div", "children": [
+                { "globalId": 1, "type": "div", "style": { "backgroundColor": "#222222" } },
+                { "globalId": 2, "ref": true }
+            ]
+        });
+        // the equivalent full tree for the post-delta state.
+        let full_b = json!({
+            "globalId": 0, "type": "div", "children": [
+                { "globalId": 1, "type": "div", "style": { "backgroundColor": "#222222" } },
+                { "globalId": 2, "type": "div", "children": [
+                    { "globalId": 3, "type": "text", "text": "hello" }
+                ]}
+            ]
+        });
+
+        let root_a = tree_of(parse_incoming(&full_a));
+        let root_b_delta = tree_of(parse_incoming(&delta));
+
+        // the ref'd subtree (node 2) must be the SAME Arc as in tree A — reused, not reparsed.
+        assert!(
+            Arc::ptr_eq(&root_a.children[1], &root_b_delta.children[1]),
+            "ref'd subtree should reuse the prior commit's Arc"
+        );
+        // node 1 changed, so it must be a fresh Arc (not shared with A).
+        assert!(
+            !Arc::ptr_eq(&root_a.children[0], &root_b_delta.children[0]),
+            "changed node should be reparsed, not shared"
+        );
+
+        // and the delta-reconstructed tree must be structurally identical to a full apply of B.
+        let root_b_full = tree_of(parse_incoming(&full_b));
+        assert_eq!(
+            crate::dump::dump_tree(&root_b_delta),
+            crate::dump::dump_tree(&root_b_full),
+            "delta reconstruction must match a full apply"
+        );
+    }
 
     #[test]
     fn maps_window_appearance_to_scheme() {

@@ -39,6 +39,11 @@ fn dump_node(el: &Arc<ReactElement>) -> Value {
     if let Some(src) = el.src.as_ref() {
         obj.insert("src".into(), json!(src));
     }
+    // authored JSX source location ("<abs-path>:<line>:<col>") from the inspector
+    // side-table — lets the CLI surface where each node came from.
+    if let Some(source) = crate::inspector::source_for(el.global_id) {
+        obj.insert("source".into(), json!(source));
+    }
     if !el.events.is_empty() {
         obj.insert("events".into(), json!(el.events));
     }

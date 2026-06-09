@@ -22,6 +22,9 @@ export type SerializedNode = {
      */
     hoverStyle?: Record<string, unknown>;
     pressStyle?: Record<string, unknown>;
+    /** authored JSX source location ("<abs-path>:<line>:<col>"), stamped at bundle time by
+     * the babel source-location plugin; the native inspector reads it for open-in-editor. */
+    source?: string;
     accessibility?: SerializedAccessibility;
     text?: string;
     numberOfLines?: number;

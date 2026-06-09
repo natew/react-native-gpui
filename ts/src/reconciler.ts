@@ -953,8 +953,9 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
     const accessibility = serializeAccessibility(inst, node);
     if (accessibility) node.accessibility = accessibility;
     // authored JSX source location stamped by the babel source-location plugin
-    // (data-rngs="<abs-path>:<line>:<col>"); the native inspector reads it for open-in-editor.
-    const source = stringProp(props, "data-rngs");
+    // (rngsSource="<abs-path>:<line>:<col>"); the native inspector reads it for
+    // open-in-editor. Plain prop name (not data-*) so Tamagui forwards it to native.
+    const source = stringProp(props, "rngsSource");
     if (source) node.source = source;
 
     if (node.type === "div" || node.type === "svg" /* svg has no children but harmless */) {

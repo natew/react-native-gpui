@@ -1531,8 +1531,39 @@ fn pick_paths_native(
     Err("native file picker is only available on macos".to_string())
 }
 
+/// Offscreen harnesses (conformance, cli --launch, example runners — anything
+/// setting RNGPUI_TEST_MODE) spawn this service as a child and are supposed to
+/// reap it, but runners die in unreapable ways (timeouts, SIGPIPE when their
+/// stdout is piped to `head`, SIGKILL) and the service lingered as an orphan —
+/// the user found a pile of hanging rngpui-service processes. Root fix in ONE
+/// place: under test mode, poll the parent pid and exit when it changes
+/// (orphaned processes reparent to launchd). The real app (`agentbus gui`)
+/// never sets RNGPUI_TEST_MODE, so its lifecycle is untouched.
+fn spawn_parent_exit_watchdog() {
+    if std::env::var_os("RNGPUI_TEST_MODE").is_none() {
+        return;
+    }
+    // `rngpui ... --keep` sessions are CONTRACTUALLY long-lived (driven later via
+    // --session, reaped by `rngpui close`); they opt out of the parent watchdog.
+    if std::env::var_os("RNGPUI_KEEP_ALIVE").is_some() {
+        return;
+    }
+    let parent = std::os::unix::process::parent_id();
+    if parent <= 1 {
+        return; // already detached; nothing meaningful to watch
+    }
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        if std::os::unix::process::parent_id() != parent {
+            eprintln!("[rngpui] test-mode parent {parent} exited — shutting down");
+            std::process::exit(0);
+        }
+    });
+}
+
 fn main() {
     let _ = STARTUP.set(std::time::Instant::now());
+    spawn_parent_exit_watchdog();
     if let Ok(path) = std::env::var("RNGPUI_SERVICE_PID_FILE") {
         if let Err(error) = std::fs::write(&path, std::process::id().to_string()) {
             eprintln!("[rngpui] failed to write service pid file {path}: {error}");

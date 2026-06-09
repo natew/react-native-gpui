@@ -217,6 +217,11 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
             RNGPUI_BUNDLE: bundlePath,
             RNGPUI_NO_ACTIVATE: "1",
             RNGPUI_TEST_MODE: "1",
+            // test-mode services exit when their spawning parent dies (the orphan
+            // watchdog in service.rs). A --keep launch is the one flow whose
+            // CONTRACT is to outlive this cli process (do/get --session ... then
+            // `rngpui close`), so it opts out explicitly.
+            ...(opts.keep === true ? { RNGPUI_KEEP_ALIVE: "1" } : {}),
             RNGPUI_CAPTURE_ONSCREEN: "1",
             RNGPUI_OPAQUE_WINDOW: "1",
             RNGPUI_CAPTURE_ALPHA: process.env.RNGPUI_CAPTURE_ALPHA || "0.2",

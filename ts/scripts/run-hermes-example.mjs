@@ -67,6 +67,8 @@ try {
             ...process.env,
             RNGPUI_BUNDLE: hbc,
             RNGPUI_NO_ACTIVATE: "1",
+            // parent-exit watchdog: the service reaps itself if this runner dies unreaped
+            RNGPUI_TEST_MODE: "1",
             RNGPUI_SERVICE_PID_FILE: process.env.RNGPUI_SERVICE_PID_FILE || pidPath,
         },
         stdio: ["ignore", "pipe", "pipe"],

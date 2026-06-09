@@ -1,12 +1,11 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
-    IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta,
-    ScrollWheelEvent, Window,
+    App, Bounds, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior, Hsla, IntoElement,
+    LayoutId, MouseDownEvent, Pixels, Window,
 };
 
 use crate::elements::{ReactElement, report_layout};
@@ -83,19 +82,6 @@ thread_local! {
     static WEBVIEW_LAST_DECOR_APPLIED: RefCell<HashMap<u64, (f64, f64, WebViewShadow)>> = RefCell::new(HashMap::new());
 }
 
-// Webviews composite *behind* gpui's Metal layer (see `ensure_host_view`), so the
-// native view never receives AppKit mouse events — gpui consumes them first. Scroll
-// wheels are forwarded into the page as injected JS; this set tracks ids whose
-// scrollbar gutter is being dragged so the per-frame mouse handlers can keep
-// translating drag motion into scroll position across frames.
-thread_local! {
-    static SCROLLBAR_DRAGS: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
-}
-
-// clickable width of the scrollbar gutter at the webview's right edge, in logical px.
-// kept a touch wider than the page's rendered scrollbar so the thumb is easy to grab.
-const WEBVIEW_SCROLLBAR_GUTTER: f32 = 16.0;
-
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct WebViewHostStyle {
@@ -133,20 +119,6 @@ struct WebViewShadow {
     offset_x: f32,
     offset_y: f32,
     corner_radius: f32,
-}
-
-fn scrollbar_dragging(id: u64) -> bool {
-    SCROLLBAR_DRAGS.with(|d| d.borrow().contains(&id))
-}
-
-fn set_scrollbar_dragging(id: u64, on: bool) {
-    SCROLLBAR_DRAGS.with(|d| {
-        if on {
-            d.borrow_mut().insert(id);
-        } else {
-            d.borrow_mut().remove(&id);
-        }
-    });
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -241,6 +213,110 @@ fn raw_ns_view(window: &mut Window) -> Option<id> {
     match handle.as_raw() {
         RawWindowHandle::AppKit(handle) => Some(handle.ns_view.as_ptr() as id),
         _ => None,
+    }
+}
+
+// CoreGraphics scroll-event FFI used only by the native-scroll proof command. Builds a
+// real pixel-unit scroll-wheel CGEvent we can lift into an NSEvent and hand to AppKit's
+// `scrollWheel:` — the same kind of event WebKit's scroll machinery consumes from a
+// trackpad, so the page scrolls natively with zero rngpui JS forwarding.
+#[cfg(target_os = "macos")]
+#[allow(non_snake_case)]
+unsafe extern "C" {
+    fn CGEventCreateScrollWheelEvent(
+        source: *const std::ffi::c_void,
+        units: u32,
+        wheelCount: u32,
+        wheel1: i32,
+        ...
+    ) -> id;
+    fn CFRelease(cf: id);
+}
+
+// kCGScrollEventUnitPixel — pixel-precise scroll, matching a trackpad gesture.
+#[cfg(target_os = "macos")]
+const CG_SCROLL_UNIT_PIXEL: u32 = 0;
+
+/// Ground-truth proof that native scroll routing works: run the REAL AppKit `hitTest:`
+/// at (x, y) in the gpui window and report which view class wins, then deliver a real
+/// scroll-wheel `NSEvent` to that view via `scrollWheel:`. No `evaluate_script`, no
+/// `webview_scroll_script` — if the hit-test passthrough is doing its job the resolved
+/// view is the WKWebView (its content scroll view), not `GPUIView`, and WebKit scrolls
+/// the page from a genuine native event. Returns (hit_view_class, dispatched).
+#[cfg(target_os = "macos")]
+pub(crate) fn native_scroll_proof(window: &mut Window, x: f64, y: f64, dy: f64) -> (String, bool) {
+    let Some(gpui_view) = raw_ns_view(window) else {
+        return ("<no-ns-view>".into(), false);
+    };
+    unsafe {
+        let ns_window: id = msg_send![gpui_view, window];
+        if ns_window == nil {
+            return ("<no-window>".into(), false);
+        }
+        let content_view: id = msg_send![ns_window, contentView];
+        if content_view == nil {
+            return ("<no-content-view>".into(), false);
+        }
+        // hitTest: takes a point in the receiver's SUPERVIEW coords. The content view's
+        // superview is the window's theme frame; for a borderless test window the content
+        // view fills it, so a content-local top-left point maps to the same value flipped
+        // into AppKit's bottom-left origin. Convert (x, y) — gpui top-left logical px —
+        // into the content view's superview space.
+        let bounds: NSRect = msg_send![content_view, bounds];
+        let flipped: objc::runtime::BOOL = msg_send![content_view, isFlipped];
+        let local_y = if flipped == YES {
+            y
+        } else {
+            bounds.size.height - y
+        };
+        let local = NSPoint::new(x, local_y);
+        let superview: id = msg_send![content_view, superview];
+        let point_in_super: NSPoint = if superview != nil {
+            msg_send![content_view, convertPoint: local toView: superview]
+        } else {
+            local
+        };
+        // the REAL hitTest: — this invokes GPUIView's overridden hit_test (hit_passthrough),
+        // so a webview region returns nil and AppKit walks down to the WKWebView sibling.
+        let hit: id = msg_send![content_view, hitTest: point_in_super];
+        let class_name = if hit == nil {
+            "<nil>".to_string()
+        } else {
+            // object_getClassName returns the instance's class name as a C string —
+            // unlike `[[obj class] name]`, which sends `name` to the class object (not
+            // every class responds to +name, and WryWebView does not).
+            unsafe extern "C" {
+                fn object_getClassName(obj: id) -> *const std::os::raw::c_char;
+            }
+            let name_ptr = object_getClassName(hit);
+            if name_ptr.is_null() {
+                "<unknown>".to_string()
+            } else {
+                std::ffi::CStr::from_ptr(name_ptr)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
+        if hit == nil {
+            return (class_name, false);
+        }
+
+        // build a real pixel-unit scroll-wheel CGEvent and lift it into an NSEvent. dy>0
+        // scrolls the page DOWN; an AppKit scroll wheel uses the opposite sign (content
+        // moves with the wheel), so negate.
+        let cg_event: id =
+            CGEventCreateScrollWheelEvent(std::ptr::null(), CG_SCROLL_UNIT_PIXEL, 1, -(dy as i32));
+        if cg_event == nil {
+            return (class_name, false);
+        }
+        let ns_event: id = msg_send![class!(NSEvent), eventWithCGEvent: cg_event];
+        CFRelease(cg_event);
+        if ns_event == nil {
+            return (class_name, false);
+        }
+        // deliver the scroll-wheel event natively to the hit view's responder chain.
+        let _: () = msg_send![hit, scrollWheel: ns_event];
+        (class_name, true)
     }
 }
 
@@ -1049,13 +1125,10 @@ fn webview_corner_clip(style: &ElementStyle) -> WebViewCornerClip {
     }
 }
 
-fn webview_scroll_delta(delta: ScrollDelta) -> (f32, f32) {
-    match delta {
-        ScrollDelta::Lines(point) => (point.x * 32.0, point.y * 32.0),
-        ScrollDelta::Pixels(point) => (point.x.into(), point.y.into()),
-    }
-}
-
+// Synthetic page-scroll script. The product NEVER uses this — real wheel/momentum
+// scroll goes natively to the WKWebView via the hitTest passthrough. It exists ONLY for
+// the offscreen webview-overlay conformance, whose invisible/click-through test window
+// can't receive a posted CGEvent, so it drives a scroll through `scrollAt` instead.
 pub(crate) fn webview_scroll_script(left: f32, top: f32) -> Option<String> {
     if !left.is_finite() || !top.is_finite() {
         return None;
@@ -1066,43 +1139,6 @@ const s=document.scrollingElement||document.documentElement||document.body;\
 if(s){{s.scrollLeft+={:.3};s.scrollTop+={:.3};}}\
 if(document.body&&document.body!==s){{document.body.scrollLeft+={:.3};document.body.scrollTop+={:.3};}}}})();",
         left, top, left, top, left, top
-    ))
-}
-
-// Pressing the scrollbar gutter starts a drag: figure out where the thumb is, record
-// the grab offset (so the thumb tracks the cursor instead of jumping its center), and
-// scroll once. `local_y` is the cursor's y relative to the webview's top edge.
-fn webview_scrollbar_down_script(local_y: f32) -> Option<String> {
-    if !local_y.is_finite() {
-        return None;
-    }
-    Some(format!(
-        "(()=>{{var s=document.scrollingElement||document.documentElement||document.body;if(!s)return;\
-var ch=s.clientHeight,sh=s.scrollHeight,max=sh-ch;\
-if(max<=0){{window.__rngpuiSbGrab=null;return;}}\
-var thumb=Math.max(24,ch*ch/sh),span=ch-thumb;\
-var top=span>0?(s.scrollTop/max)*span:0,y={:.3};\
-window.__rngpuiSbGrab=(y>=top&&y<=top+thumb)?(y-top):(thumb/2);\
-var nt=Math.max(0,Math.min(span,y-window.__rngpuiSbGrab));\
-s.scrollTop=span>0?(nt/span)*max:0;}})();",
-        local_y
-    ))
-}
-
-// Each drag move maps the cursor's y back to a scroll position using the offset
-// recorded on mouse-down, so the thumb follows the cursor like a real scrollbar.
-fn webview_scrollbar_move_script(local_y: f32) -> Option<String> {
-    if !local_y.is_finite() {
-        return None;
-    }
-    Some(format!(
-        "(()=>{{if(window.__rngpuiSbGrab==null)return;\
-var s=document.scrollingElement||document.documentElement||document.body;if(!s)return;\
-var ch=s.clientHeight,sh=s.scrollHeight,max=sh-ch;if(max<=0)return;\
-var thumb=Math.max(24,ch*ch/sh),span=ch-thumb;\
-var nt=Math.max(0,Math.min(span,{:.3}-window.__rngpuiSbGrab));\
-s.scrollTop=span>0?(nt/span)*max:0;}})();",
-        local_y
     ))
 }
 
@@ -1243,71 +1279,24 @@ impl Element for ReactWebViewElement {
             .map(|hitbox| hitbox.bounds)
             .unwrap_or(bounds);
         if let Some(view) = webview(self.element.global_id) {
-            let id = self.element.global_id;
-
-            // mouse-down: blur on outside clicks, and start a scrollbar drag when the
-            // press lands in the right-edge gutter. don't stop propagation — gpui still
-            // gets to focus the stage etc.; we only take over the motion on drag.
-            let down_view = view.clone();
-            window.on_mouse_event(move |event: &MouseDownEvent, phase, _, _| {
+            // Scroll, momentum, rubber-band, native text selection, and the grabbable
+            // overlay scrollbar all happen NATIVELY: GPUIView's `hitTest:` returns nil
+            // over this webview's rect (see hit_passthrough + the record_webview call in
+            // prepaint), so AppKit delivers the real NSEvent straight to the WKWebView
+            // sibling below the Metal layer. The page's own scroller handles it — no JS
+            // delta-forwarding, no synthetic scrollbar emulation. (Where a gpui surface
+            // — composer, dialogs, inspector menu — paints OVER the webview, that surface
+            // is the top-most painted element so hitTest keeps the event in gpui.)
+            //
+            // The one event we still want gpui-side is a click OUTSIDE the webview: it
+            // blurs the page's focus so a click elsewhere in the app moves focus off the
+            // stage. An outside click reaches GPUIView (no passthrough there), so this
+            // global handler runs; a click INSIDE never reaches gpui (passthrough), which
+            // is exactly right — the page keeps it.
+            window.on_mouse_event(move |event: &MouseDownEvent, _phase, _, _| {
                 if !bounds.contains(&event.position) {
-                    let _ = down_view.focus_parent();
-                    return;
+                    let _ = view.focus_parent();
                 }
-                if phase != DispatchPhase::Bubble {
-                    return;
-                }
-                let right = f32::from(bounds.origin.x) + f32::from(bounds.size.width);
-                if f32::from(event.position.x) >= right - WEBVIEW_SCROLLBAR_GUTTER {
-                    set_scrollbar_dragging(id, true);
-                    let local_y = f32::from(event.position.y) - f32::from(bounds.origin.y);
-                    if let Some(script) = webview_scrollbar_down_script(local_y) {
-                        let _ = down_view.evaluate_script(&script);
-                    }
-                }
-            });
-
-            // mouse-move: while a gutter drag is active, keep the thumb under the cursor.
-            // tracked globally (not gated on bounds) so the drag survives the cursor
-            // leaving the webview, exactly like a native scrollbar.
-            let move_view = view.clone();
-            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                if phase != DispatchPhase::Bubble || !scrollbar_dragging(id) {
-                    return;
-                }
-                let local_y = f32::from(event.position.y) - f32::from(bounds.origin.y);
-                if let Some(script) = webview_scrollbar_move_script(local_y) {
-                    let _ = move_view.evaluate_script(&script);
-                }
-                cx.stop_propagation();
-            });
-
-            // mouse-up: end any active gutter drag.
-            window.on_mouse_event(move |_event: &MouseUpEvent, phase, _, cx| {
-                if phase != DispatchPhase::Bubble {
-                    return;
-                }
-                if scrollbar_dragging(id) {
-                    set_scrollbar_dragging(id, false);
-                    cx.stop_propagation();
-                }
-            });
-
-            window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
-                if phase != DispatchPhase::Bubble || !bounds.contains(&event.position) {
-                    return;
-                }
-                let (dx, dy) = webview_scroll_delta(event.delta);
-                let left = -dx;
-                let top = -dy;
-                if left.abs() <= 0.01 && top.abs() <= 0.01 {
-                    return;
-                }
-                let Some(script) = webview_scroll_script(left, top) else {
-                    return;
-                };
-                let _ = view.evaluate_script(&script);
-                cx.stop_propagation();
             });
         }
     }
@@ -1324,35 +1313,5 @@ mod tests {
         let script = webview_scroll_script(-3.0, 12.0).expect("finite deltas produce a script");
         assert!(script.contains("scrollLeft+=-3.000"));
         assert!(script.contains("scrollTop+=12.000"));
-    }
-
-    #[test]
-    fn scrollbar_down_script_records_grab_and_scrolls() {
-        assert!(webview_scrollbar_down_script(f32::NAN).is_none());
-        let script = webview_scrollbar_down_script(48.0).expect("finite y produces a script");
-        // records the grab offset so the thumb tracks the cursor instead of jumping,
-        // and falls back to a non-scrollable no-op by nulling the grab.
-        assert!(script.contains("window.__rngpuiSbGrab"));
-        assert!(script.contains("48.000"));
-        assert!(script.contains("s.scrollTop="));
-    }
-
-    #[test]
-    fn scrollbar_move_script_requires_active_grab() {
-        assert!(webview_scrollbar_move_script(f32::NEG_INFINITY).is_none());
-        let script = webview_scrollbar_move_script(120.0).expect("finite y produces a script");
-        // bails out unless a drag is in progress, then maps cursor y back to scrollTop.
-        assert!(script.contains("if(window.__rngpuiSbGrab==null)return;"));
-        assert!(script.contains("120.000"));
-        assert!(script.contains("s.scrollTop="));
-    }
-
-    #[test]
-    fn scrollbar_drag_state_round_trips() {
-        assert!(!scrollbar_dragging(7));
-        set_scrollbar_dragging(7, true);
-        assert!(scrollbar_dragging(7));
-        set_scrollbar_dragging(7, false);
-        assert!(!scrollbar_dragging(7));
     }
 }

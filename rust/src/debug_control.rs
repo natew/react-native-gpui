@@ -141,6 +141,12 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
             dy: number(value, "dy").unwrap_or(0.0),
             reply,
         }),
+        "nativeScrollAt" => Ok(Incoming::DebugNativeScrollAt {
+            x: number(value, "x")?,
+            y: number(value, "y")?,
+            dy: number(value, "dy").unwrap_or(0.0),
+            reply,
+        }),
         "type" => Ok(Incoming::DebugTypeText {
             text: value
                 .get("text")

@@ -1368,6 +1368,17 @@ pub(crate) enum Incoming {
         dy: f32,
         reply: flume::Sender<serde_json::Value>,
     },
+    /// proof-of-native-scroll: run the REAL AppKit `hitTest:` at (x,y) and report the
+    /// resolved view class, then synthesize a real scroll-wheel `NSEvent` and deliver it
+    /// natively to that view via `scrollWheel:` — NO rngpui JS delta-forwarding. If the
+    /// hitTest passthrough is working, the resolved view is the WKWebView (or its scroll
+    /// view), not `GPUIView`, and the page's scroller moves from a true native event.
+    DebugNativeScrollAt {
+        x: f32,
+        y: f32,
+        dy: f32,
+        reply: flume::Sender<serde_json::Value>,
+    },
     DebugTypeText {
         text: String,
         reply: flume::Sender<serde_json::Value>,
@@ -2219,6 +2230,54 @@ fn main() {
                             break;
                         }
                     }
+                    Incoming::DebugNativeScrollAt { x, y, dy, reply } => {
+                        // proof the hitTest passthrough routes a REAL scroll-wheel NSEvent
+                        // natively to the WKWebView — no rngpui JS delta-forwarding. resolve
+                        // the webview id at the point (so we can read scrollY back), then run
+                        // the real AppKit hitTest + native scrollWheel: dispatch.
+                        let webview_id = pump
+                            .read_with(cx, |this, _| {
+                                inspector::webview_at(&this.root, x, y)
+                            })
+                            .ok()
+                            .flatten();
+                        #[cfg(target_os = "macos")]
+                        let (hit_class, dispatched) = window_handle
+                            .update(cx, |_root, window, _cx| {
+                                elements::webview::native_scroll_proof(
+                                    window,
+                                    x as f64,
+                                    y as f64,
+                                    dy as f64,
+                                )
+                            })
+                            .unwrap_or_else(|_| ("<update-failed>".into(), false));
+                        #[cfg(not(target_os = "macos"))]
+                        let (hit_class, dispatched) = ("<non-macos>".to_string(), false);
+                        // ask the page for its current scrollY so the caller can confirm a
+                        // NON-zero scroll resulted from the native event alone. read-only —
+                        // it posts the value back through the same onMessage bridge the
+                        // fixture already listens on.
+                        if let Some(id) = webview_id {
+                            let _ = pump.update(cx, |this, _| {
+                                if let Some(view) = this.webviews.get(&id) {
+                                    let _ = view.evaluate_script(
+                                        "window.ReactNativeWebView&&window.ReactNativeWebView.postMessage(JSON.stringify({type:'nativeScrollProbe',scrollY:window.scrollY}));",
+                                    );
+                                }
+                            });
+                        }
+                        let _ = reply.send(serde_json::json!({
+                            "ok": dispatched,
+                            "type": "nativeScrollAt",
+                            "hitClass": hit_class,
+                            "dispatched": dispatched,
+                            "webviewId": webview_id,
+                            // a webview region passes through hitTest (returns nil on
+                            // GPUIView), so AppKit resolves a WebKit view — never GPUIView.
+                            "passthrough": hit_class != "GPUIView",
+                        }));
+                    }
                     Incoming::AppCommands(config) => {
                         if cx.update(|cx| install_app_commands(config, cx)).is_err() {
                             break;
@@ -2453,6 +2512,7 @@ fn main() {
                             | Incoming::DebugRealTap { .. }
                             | Incoming::DebugRealMove { .. }
                             | Incoming::DebugResize { .. }
+                            | Incoming::DebugNativeScrollAt { .. }
                             | Incoming::AppCommands(_) => unreachable!(),
                         });
                         if applied.is_err() {

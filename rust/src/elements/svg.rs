@@ -6,27 +6,20 @@ use gpui::{
 };
 
 use crate::elements::{ReactElement, report_layout};
-use crate::style::ElementStyle;
 
 /// RN-bridge `<Svg name="…">` → a GPUI monochrome icon: an svg alpha-mask tinted
 /// by `color`. Icon name comes from the node's `text`, size/color from style.
 pub struct ReactSvgElement {
     element: Arc<ReactElement>,
     _window_id: u64,
-    _parent_style: Option<ElementStyle>,
     child: Option<AnyElement>,
 }
 
 impl ReactSvgElement {
-    pub fn new(
-        element: Arc<ReactElement>,
-        window_id: u64,
-        parent_style: Option<ElementStyle>,
-    ) -> Self {
+    pub fn new(element: Arc<ReactElement>, window_id: u64) -> Self {
         Self {
             element,
             _window_id: window_id,
-            _parent_style: parent_style,
             child: None,
         }
     }

@@ -7,27 +7,21 @@ use gpui::{
 };
 
 use crate::elements::{ReactElement, report_layout};
-use crate::style::{Dim, ElementStyle};
+use crate::style::Dim;
 
 /// `<Image source={{ uri }} />` → a GPUI `img`. `http(s)` uris load over the
 /// network via GPUI's image cache; anything else is treated as a local file path.
 pub struct ReactImageElement {
     element: Arc<ReactElement>,
     _window_id: u64,
-    _parent_style: Option<ElementStyle>,
     child: Option<AnyElement>,
 }
 
 impl ReactImageElement {
-    pub fn new(
-        element: Arc<ReactElement>,
-        window_id: u64,
-        parent_style: Option<ElementStyle>,
-    ) -> Self {
+    pub fn new(element: Arc<ReactElement>, window_id: u64) -> Self {
         Self {
             element,
             _window_id: window_id,
-            _parent_style: parent_style,
             child: None,
         }
     }

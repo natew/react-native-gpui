@@ -222,23 +222,24 @@ pub fn bounds_have_drawable_area(bounds: Bounds<Pixels>) -> bool {
 }
 
 /// Create a GPUI element from a ReactElement.
-pub fn create_element(
-    element: Arc<ReactElement>,
-    window_id: u64,
-    parent_style: Option<ElementStyle>,
-) -> AnyElement {
+///
+/// Every node's style is fully self-contained on `element.style` (text inheritance is
+/// resolved by the reconciler before commit, not here), so no parent style is threaded
+/// down — this used to clone a 63-field `ElementStyle` per child on every frame for a
+/// value no builder ever read.
+pub fn create_element(element: Arc<ReactElement>, window_id: u64) -> AnyElement {
     match element.element_type.as_str() {
-        "text" => ReactTextElement::new(element, window_id, parent_style).into_any_element(),
-        "svg" => ReactSvgElement::new(element, window_id, parent_style).into_any_element(),
-        "image" => ReactImageElement::new(element, window_id, parent_style).into_any_element(),
+        "text" => ReactTextElement::new(element, window_id, None).into_any_element(),
+        "svg" => ReactSvgElement::new(element, window_id).into_any_element(),
+        "image" => ReactImageElement::new(element, window_id).into_any_element(),
         "webview" => ReactWebViewElement::new(element).into_any_element(),
         "system" => ReactSystemElement::new(element).into_any_element(),
         "ghostty-terminal" => {
             ReactGhosttyTerminalElement::new(element, window_id).into_any_element()
         }
         "textinput" | "textarea" => {
-            ReactInputElement::new(element, window_id, parent_style).into_any_element()
+            ReactInputElement::new(element, window_id, None).into_any_element()
         }
-        _ => ReactDivElement::new(element, window_id, parent_style).into_element(),
+        _ => ReactDivElement::new(element, window_id).into_element(),
     }
 }

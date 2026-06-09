@@ -38,6 +38,7 @@ mod capture_png;
 mod debug_control;
 mod dump;
 mod elements;
+mod frame_trace;
 mod hermes;
 mod hit_passthrough;
 mod icons;
@@ -721,6 +722,8 @@ impl Render for ServiceApp {
         // reset the per-frame hit-test passthrough registry before this frame's prepaint
         // pass repopulates it (webview rects + occluder rects, for native webview events).
         hit_passthrough::begin_frame();
+        // flush the previous frame's stage breakdown + reset accumulators for this frame.
+        frame_trace::begin_render(self.root_dirty);
         if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some()
             && !FIRST_RENDER_LOGGED.swap(true, Ordering::SeqCst)
         {
@@ -1015,7 +1018,9 @@ impl Render for ServiceApp {
             self.root_dirty = false;
         } // end tree-lifecycle (root_dirty) gate
 
-        let root = create_element(self.root.clone(), 0, None);
+        let create_t0 = std::time::Instant::now();
+        let root = create_element(self.root.clone(), 0);
+        frame_trace::add_create(create_t0.elapsed());
         let mut frame = gpui::div()
             .size_full()
             .flex()

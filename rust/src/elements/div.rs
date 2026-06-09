@@ -985,7 +985,6 @@ fn overflow_mode(style: &ElementStyle) -> (bool, bool) {
 pub struct ReactDivElement {
     element: Arc<ReactElement>,
     window_id: u64,
-    _parent_style: Option<ElementStyle>,
     children: Vec<StackedChild>,
 }
 
@@ -995,15 +994,10 @@ struct StackedChild {
 }
 
 impl ReactDivElement {
-    pub fn new(
-        element: Arc<ReactElement>,
-        window_id: u64,
-        parent_style: Option<ElementStyle>,
-    ) -> Self {
+    pub fn new(element: Arc<ReactElement>, window_id: u64) -> Self {
         Self {
             element,
             window_id,
-            _parent_style: parent_style,
             children: Vec::new(),
         }
     }
@@ -1029,20 +1023,62 @@ impl ReactDivElement {
         ((right - left).max(px(0.0)), (bottom - top).max(px(0.0)))
     }
 
-    fn stacked_child_indices(&self) -> Vec<usize> {
-        stacked_child_indices_for(self.children.iter().map(|child| child.z_index))
+    /// The child indices in stacking (paint) order. In the overwhelmingly common case
+    /// where no child overrides `z-index`, document order already IS stacking order, so
+    /// this yields `0..len` with **zero allocation** — paint/prepaint each call it once
+    /// per div per frame, so at cliff scale (hundreds of divs) the old
+    /// `Vec`-allocate-then-collect on every call was pure per-frame heap churn. Only a div
+    /// that actually carries a z-reordered child pays for the sort + index Vec.
+    fn stacked_child_indices(&self) -> StackedChildOrder {
+        if self.children.iter().all(|child| child.z_index == 0) {
+            return StackedChildOrder::DocumentOrder(self.children.len());
+        }
+        StackedChildOrder::Reordered(stacked_child_indices_for(
+            self.children.iter().map(|child| child.z_index),
+        ))
     }
 }
 
+/// Stable z-index stacking order for a child z-index sequence (ascending z, ties keep
+/// document order). Only reached when some child overrides `z-index`.
 fn stacked_child_indices_for(z_indices: impl IntoIterator<Item = i32>) -> Vec<usize> {
-    let mut indexed = z_indices.into_iter().enumerate().collect::<Vec<_>>();
-    // fast path: when no child overrides z-index (the overwhelmingly common case)
-    // document order already is stacking order — skip the comparison sort + remap.
-    if indexed.iter().all(|(_, z_index)| *z_index == 0) {
-        return (0..indexed.len()).collect();
-    }
+    let mut indexed: Vec<(usize, i32)> = z_indices.into_iter().enumerate().collect();
     indexed.sort_by_key(|(index, z_index)| (*z_index, *index));
     indexed.into_iter().map(|(index, _)| index).collect()
+}
+
+/// Child paint order: either plain document order (no allocation) or an explicit
+/// z-sorted index list (only when a child overrides `z-index`). `iter()` yields a
+/// concrete (non-boxed) iterator so the common path allocates nothing.
+enum StackedChildOrder {
+    DocumentOrder(usize),
+    Reordered(Vec<usize>),
+}
+
+impl StackedChildOrder {
+    fn iter(&self) -> StackedChildOrderIter<'_> {
+        match self {
+            StackedChildOrder::DocumentOrder(len) => StackedChildOrderIter::Range(0..*len),
+            StackedChildOrder::Reordered(order) => {
+                StackedChildOrderIter::Slice(order.iter().copied())
+            }
+        }
+    }
+}
+
+enum StackedChildOrderIter<'a> {
+    Range(std::ops::Range<usize>),
+    Slice(std::iter::Copied<std::slice::Iter<'a, usize>>),
+}
+
+impl Iterator for StackedChildOrderIter<'_> {
+    type Item = usize;
+    fn next(&mut self) -> Option<usize> {
+        match self {
+            StackedChildOrderIter::Range(range) => range.next(),
+            StackedChildOrderIter::Slice(slice) => slice.next(),
+        }
+    }
 }
 
 fn target_receives_captured_pointer_event(
@@ -1250,6 +1286,8 @@ impl Element for ReactDivElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        let _trace = crate::frame_trace::layout_guard();
+        crate::frame_trace::note_rebuilt();
         let mut style = self.element.build_gpui_style(None);
         if let Some(key) = self.element.native_layout_key.as_deref() {
             let native = native_layout_override(key);
@@ -1266,8 +1304,6 @@ impl Element for ReactDivElement {
                 style.inset.top = px(y).into();
             }
         }
-        let inherited = self.element.style.clone();
-
         if style.display == Display::None {
             self.children.clear();
             let layout_id = window.request_layout(style, [], cx);
@@ -1280,7 +1316,7 @@ impl Element for ReactDivElement {
             .children
             .iter()
             .map(|child| StackedChild {
-                element: create_element(child.clone(), self.window_id, Some(inherited.clone())),
+                element: create_element(child.clone(), self.window_id),
                 z_index: child.style.z_index.unwrap_or(0),
             })
             .collect();
@@ -1331,6 +1367,7 @@ impl Element for ReactDivElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let _trace = crate::frame_trace::prepaint_guard();
         if self.element.style.is_display_none() {
             return DivPrepaintState::default();
         }
@@ -1436,13 +1473,15 @@ impl Element for ReactDivElement {
                 }
             };
             set_scroll(self.element.global_id, off);
+            let order = self.stacked_child_indices();
             window.with_element_offset(point(px(-off.x), px(-off.y)), |window| {
-                for index in self.stacked_child_indices() {
+                for index in order.iter() {
                     self.children[index].element.prepaint(window, cx);
                 }
             });
         } else {
-            for index in self.stacked_child_indices() {
+            let order = self.stacked_child_indices();
+            for index in order.iter() {
                 self.children[index].element.prepaint(window, cx);
             }
         }
@@ -1464,6 +1503,7 @@ impl Element for ReactDivElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let _trace = crate::frame_trace::paint_guard();
         if self.element.style.is_display_none() {
             return;
         }
@@ -2113,16 +2153,17 @@ impl Element for ReactDivElement {
             None
         };
 
+        let order = self.stacked_child_indices();
         style.paint(bounds, window, cx, |window, cx| {
             let _rounded_clip_guard = push_rounded_overflow_clip(rounded_clip);
             if let Some(mask) = overflow_mask {
                 window.with_content_mask(Some(mask), |window| {
-                    for index in self.stacked_child_indices() {
+                    for index in order.iter() {
                         self.children[index].element.paint(window, cx);
                     }
                 });
             } else {
-                for index in self.stacked_child_indices() {
+                for index in order.iter() {
                     self.children[index].element.paint(window, cx);
                 }
             }

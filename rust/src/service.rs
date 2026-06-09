@@ -1347,6 +1347,14 @@ pub(crate) enum Incoming {
         y: f32,
         reply: flume::Sender<serde_json::Value>,
     },
+    /// resize the real gpui window to (w, h) content px. test mode sets
+    /// is_resizable=false (blocking AX resize), so this command is the only way to
+    /// drive a window resize offscreen for perf measurement.
+    DebugResize {
+        w: f32,
+        h: f32,
+        reply: flume::Sender<serde_json::Value>,
+    },
     DebugDragAt {
         phase: String,
         x: f32,
@@ -2107,6 +2115,23 @@ fn main() {
                             Err(_) => break,
                         }
                     }
+                    Incoming::DebugResize { w, h, reply } => {
+                        let applied = window_handle.update(cx, |_root, window, cx| {
+                            window.resize(size(px(w), px(h)));
+                            cx.notify();
+                        });
+                        match applied {
+                            Ok(()) => {
+                                let _ = reply.send(serde_json::json!({
+                                    "ok": true,
+                                    "type": "resize",
+                                    "w": w,
+                                    "h": h,
+                                }));
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     Incoming::PickPaths {
                         id,
                         files,
@@ -2427,6 +2452,7 @@ fn main() {
                             | Incoming::DebugKeyPress { .. }
                             | Incoming::DebugRealTap { .. }
                             | Incoming::DebugRealMove { .. }
+                            | Incoming::DebugResize { .. }
                             | Incoming::AppCommands(_) => unreachable!(),
                         });
                         if applied.is_err() {

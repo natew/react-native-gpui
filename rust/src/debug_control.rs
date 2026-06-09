@@ -119,6 +119,11 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
             y: number(value, "y")?,
             reply,
         }),
+        "resize" => Ok(Incoming::DebugResize {
+            w: number(value, "w")?,
+            h: number(value, "h")?,
+            reply,
+        }),
         "dragAt" => Ok(Incoming::DebugDragAt {
             phase: value
                 .get("phase")

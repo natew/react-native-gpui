@@ -722,18 +722,23 @@ impl Render for ServiceApp {
         // per-frame WebView repositioning + the repeated whole-tree walks are what pinned
         // the main thread on-screen during a multi-component spring (the freeze). Skip it
         // unless the tree actually changed; the element renderers keep their last-set state.
+        // A worklet-driven layout change (pane resize) moved a yoga box this frame — run
+        // the lifecycle so native WebViews reposition. take() it unconditionally so the
+        // flag is consumed even when root_dirty already forces the lifecycle.
+        let layout_dirty = crate::anim_overlay::take_layout_dirty();
         if std::env::var_os("RNGPUI_RENDER_TRACE").is_some() {
             eprintln!(
-                "[render] root_dirty={} (lifecycle {})",
+                "[render] root_dirty={} layout_dirty={} (lifecycle {})",
                 self.root_dirty,
-                if self.root_dirty || render_gate_disabled() {
+                layout_dirty,
+                if self.root_dirty || render_gate_disabled() || layout_dirty {
                     "RUN"
                 } else {
                     "SKIP"
                 }
             );
         }
-        if self.root_dirty || render_gate_disabled() {
+        if self.root_dirty || render_gate_disabled() || layout_dirty {
             let lifecycle_t0 = std::time::Instant::now();
             // Ensure a persistent InputState entity exists for every text-input node,
             // subscribing once so edits stream back to JS as `changeText`, and observing

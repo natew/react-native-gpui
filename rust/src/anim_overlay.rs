@@ -38,6 +38,54 @@ use crate::style::ElementStyle;
 static OVERLAY: Lazy<Mutex<HashMap<u64, serde_json::Map<String, Value>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+// Set when an overlay op CHANGES a layout-box key (width/height/flex/inset/…), i.e. the
+// animated value actually moves the yoga box — a worklet-driven pane RESIZE. The render
+// gate then runs the (otherwise-skipped) tree lifecycle for that frame so native WebViews
+// reposition to follow the new layout. Paint-only animations (opacity, transform scale/y —
+// what dialogs/sheets use) never flip this, so the freeze fix stands: an opacity spring
+// still skips the per-frame WebView reposition + whole-tree walks. A dialog's frame-1 full
+// style does carry width/height, but it's STATIC (held, not changing) on every frame after,
+// so only that first frame flips it — one lifecycle frame, not a per-frame pin.
+static LAYOUT_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn is_layout_key(k: &str) -> bool {
+    matches!(
+        k,
+        "width"
+            | "height"
+            | "minWidth"
+            | "maxWidth"
+            | "minHeight"
+            | "maxHeight"
+            | "flex"
+            | "flexGrow"
+            | "flexShrink"
+            | "flexBasis"
+            | "top"
+            | "left"
+            | "right"
+            | "bottom"
+            | "marginTop"
+            | "marginLeft"
+            | "marginRight"
+            | "marginBottom"
+            | "paddingTop"
+            | "paddingLeft"
+            | "paddingRight"
+            | "paddingBottom"
+            | "gap"
+            | "rowGap"
+            | "columnGap"
+    )
+}
+
+/// True (clearing the flag) when an overlay op CHANGED a layout-box key since the last
+/// check — the render gate uses this to run the tree lifecycle (WebView reposition + layout)
+/// for a worklet-driven resize frame, while opacity/transform animation frames stay gated.
+pub fn take_layout_dirty() -> bool {
+    LAYOUT_DIRTY.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Apply a batch of per-node style overrides. Each entry is (globalId, styleObject).
 /// A style object that resolves empty clears that node's overlay. Returns true when
 /// anything actually changed (so the caller can skip the notify on a no-op frame).
@@ -74,6 +122,11 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
             match entry.get(&k) {
                 Some(existing) if existing == &v => {}
                 _ => {
+                    if is_layout_key(&k) {
+                        // a layout-box key actually MOVED this frame (resize) — let the
+                        // render gate run the lifecycle so native WebViews follow.
+                        LAYOUT_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                     entry.insert(k, v);
                     changed = true;
                 }

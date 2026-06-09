@@ -4,7 +4,7 @@
  * Native events (press / changeText / layout / resize) flow back the other way.
  */
 import { createElement, type ReactElement, type ComponentType } from "react";
-import Reconciler, { setCommitSink, serializeContainer, dispatchEvent, type Container } from "./reconciler";
+import Reconciler, { setCommitSink, serializeContainer, invalidateSerializeCaches, dispatchEvent, type Container } from "./reconciler";
 import { setEventBatcher, startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type SerializedNode } from "./runtime";
 import { toWireDelta } from "./wire-delta";
 
@@ -143,6 +143,10 @@ export function createRoot(options: RootOptions = {}): Root {
         pushTree(tree);
     });
     setAppearanceUpdateSink(() => {
+        // the scheme changed: every cached serialization may hold stale
+        // scheme-resolved colors (DynamicColorIOS bakes at serialize time) —
+        // drop all caches so this re-serialize resolves under the new scheme.
+        invalidateSerializeCaches(container);
         if (bridge) pushTree(serializeContainer(container));
     });
 

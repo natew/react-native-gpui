@@ -93,6 +93,24 @@ let commitUpdates = 0;
 let creates = 0;
 const serMissByGroup: Record<string, number> = {};
 
+// Serialized output bakes in values that depend on global state outside props —
+// DynamicColorIOS resolves against the CURRENT color scheme at serialize time — so
+// an appearance change must invalidate EVERY cache even though no props changed.
+// Without this, a node with a stable DynamicColor style (e.g. the chrome-tinted
+// divider) keeps its dark-resolved serialization forever after macOS reports
+// light, until some unrelated state change happens to re-render it. Called from
+// the appearance sink (render.ts) before the post-change re-serialize; appearance
+// flips are rare, so a one-shot O(tree) walk beats a per-hit epoch check.
+export function invalidateSerializeCaches(container: Container) {
+    const walk = (node: Instance | TextInstance) => {
+        if (isTextLike(node)) return;
+        node.dirty = true;
+        node.cached = undefined;
+        for (const child of node.children) walk(child);
+    };
+    for (const child of container.children) walk(child);
+}
+
 // Mark a node and its ancestors dirty: an ancestor's cached SerializedNode
 // embeds its children's nodes, so a child change must invalidate the chain up to
 // the root. Stops early once it hits an already-dirty ancestor.

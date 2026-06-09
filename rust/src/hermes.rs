@@ -546,6 +546,33 @@ fn install_num(
     unsafe { rng_hermes_install_num_fn(rt, cname.as_ptr(), f, ud) };
 }
 
+/// The JS Appearance module needs the system scheme BEFORE the first React commit
+/// (DynamicColorIOS resolves at serialize time), but the JS thread starts ahead of
+/// NSApplication/GPUI init. macOS publishes dark mode as the global user default
+/// `AppleInterfaceStyle` ("Dark"; absent = light), readable without an app instance.
+/// Best-effort: the window's `observe_window_appearance` event still corrects any
+/// mismatch right after open (and the reconciler invalidates its serialize caches
+/// on that event, so the correction is complete).
+#[cfg(target_os = "macos")]
+fn system_color_scheme() -> &'static str {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        let defaults: *mut Object = msg_send![class!(NSUserDefaults), standardUserDefaults];
+        let key: *mut Object = msg_send![
+            class!(NSString),
+            stringWithUTF8String: c"AppleInterfaceStyle".as_ptr()
+        ];
+        let style: *mut Object = msg_send![defaults, stringForKey: key];
+        if style.is_null() { "light" } else { "dark" }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_color_scheme() -> &'static str {
+    "dark"
+}
+
 /// Spawn the JS thread: create the Hermes runtime, install host fns, evaluate the preamble
 /// + `bundle`, then run the JS event loop. The first React commit (during bundle eval) sends
 ///
@@ -598,9 +625,10 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
 
             let env = std::env::vars().collect::<HashMap<String, String>>();
             let env_script = format!(
-                "globalThis.process={{env:{},pid:{}}};",
+                "globalThis.process={{env:{},pid:{}}};globalThis.__rngpuiInitialColorScheme=\"{}\";",
                 serde_json::to_string(&env).unwrap_or_else(|_| "{}".to_string()),
-                std::process::id()
+                std::process::id(),
+                system_color_scheme()
             );
             if let Err(e) = eval(rt, env_script.as_bytes(), "host-env.js") {
                 eprintln!("[hermes] env eval failed: {e}");

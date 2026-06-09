@@ -17,10 +17,14 @@ let systemColorScheme: Exclude<ColorSchemeName, null> = readSystemColorScheme();
 let colorSchemeOverride: ColorSchemeName | undefined;
 let appearanceUpdateSink: (() => void) | undefined;
 
-// The native host pushes the real system scheme via an `appearance` event when the window
-// opens (and on every macOS light/dark toggle) → applyNativeColorScheme. This is only the
-// pre-first-event default; it's corrected within the first frame.
+// The host injects the real system scheme as a global before the bundle evaluates
+// (hermes.rs reads AppleInterfaceStyle), so the FIRST serialize already resolves
+// DynamicColorIOS values under the right scheme — no dark flash in light mode. The
+// window's `appearance` event (→ applyNativeColorScheme) still corrects any
+// mismatch after open and on every macOS light/dark toggle.
 function readSystemColorScheme(): Exclude<ColorSchemeName, null> {
+    const injected = (globalThis as { __rngpuiInitialColorScheme?: unknown }).__rngpuiInitialColorScheme;
+    if (injected === "light" || injected === "dark") return injected;
     return "dark";
 }
 

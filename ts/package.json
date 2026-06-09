@@ -42,6 +42,7 @@
         "conformance:anim-overlay": "node scripts/anim-overlay-conformance.mjs",
         "conformance:reanimated": "node scripts/reanimated-conformance.mjs",
         "conformance:dialog-reanimated": "bun run scripts/dialog-reanimated-conformance.mjs",
+        "conformance:sustained-reanimated": "bun run scripts/sustained-reanimated-conformance.mjs",
         "prebuild:reanimated": "bun run scripts/prebuild-reanimated.mjs",
         "conformance:webview:render": "bun run scripts/webview-render-conformance.mjs",
         "conformance:webview:overlay": "bun run scripts/webview-overlay-conformance.mjs",

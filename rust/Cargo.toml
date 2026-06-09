@@ -43,3 +43,13 @@ cocoa = "0.26"
 core-foundation = "0.10"
 core-graphics = "0.24"
 objc = "0.2"
+
+# Patched gpui 0.2.2: makes `DispatchEventResult` `pub` (upstream `pub(crate)`) so the
+# `realtap` debug command can call `Window::dispatch_event` — the real OS-click event
+# path (hitbox hit-test + listeners) — to test on-screen clickability. Rust 2024's
+# `unnameable_types` otherwise forbids an external crate from producing the private
+# return type, even to discard it. The vendored copy is byte-identical to crates.io
+# gpui-0.2.2 except that one visibility change. The patch applies to gpui-component too
+# (it depends on the same gpui), so the whole graph shares one gpui.
+[patch.crates-io]
+gpui = { path = "vendor/gpui-0.2.2-patched" }

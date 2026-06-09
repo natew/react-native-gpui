@@ -76,6 +76,14 @@ fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::SeqCst)
 }
 
+/// Dispatch a real platform input through gpui's window event loop (the same hitbox
+/// hit-test + listener path an OS click takes). Used by `realtap` (debug_control) to test
+/// real clickability — unlike synth_tap, which invokes handlers straight off the tree.
+/// Relies on the vendored gpui patch that makes `DispatchEventResult` `pub`.
+fn dispatch_real_input(window: &mut Window, input: gpui::PlatformInput, cx: &mut App) {
+    let _ = window.dispatch_event(input, cx);
+}
+
 // Injected into every <WebView> before its content loads: the React Native bridge
 // global, so existing RN web content (and our own pages) can post to the host with
 // `window.ReactNativeWebView.postMessage(data)`. It tunnels through wry's IPC, which
@@ -446,6 +454,13 @@ fn root_theme_mode(root: &ReactElement) -> ThemeMode {
 
 struct ServiceApp {
     root: Arc<ReactElement>,
+    // true when `root` changed since the last full render. The per-frame `render` only
+    // re-walks the tree for the input/webview/system/ax/layout lifecycle when this is set
+    // — an overlay-only animation frame (`SetNodeStyle`) leaves `root` untouched, so it
+    // skips all those whole-tree walks AND the native WebView repositioning that otherwise
+    // ran on EVERY animation frame and pinned the main thread on-screen (the freeze). The
+    // element tree itself still rebuilds each frame (it reads the live overlay).
+    root_dirty: bool,
     dump_tree_path: Option<String>,
     last_w: f64,
     last_h: f64,
@@ -690,235 +705,253 @@ impl Render for ServiceApp {
             bridge::resize(w as f32, h as f32);
         }
 
-        // Ensure a persistent InputState entity exists for every text-input node,
-        // subscribing once so edits stream back to JS as `changeText`, and observing
-        // it so this view re-renders (and the edit shows) when the input changes.
-        let mut specs = Vec::new();
-        collect_inputs(&self.root, &mut specs);
-        let present: HashSet<u64> = specs.iter().map(|(id, _, _, _, _)| *id).collect();
-        self.inputs.retain(|id, _| present.contains(id));
-        self.input_values.retain(|id, _| present.contains(id));
-        self.input_secure.retain(|id, _| present.contains(id));
-        self.suppressed_input_changes
-            .retain(|id, _| present.contains(id));
-        for (id, placeholder, value, multiline, secure) in specs {
-            if !self.inputs.contains_key(&id) {
-                let initial_value = value.clone();
-                let state = cx.new(|cx| {
-                    let mut s = InputState::new(window, cx).placeholder(placeholder.clone());
-                    if multiline {
-                        s = s.multi_line(true);
-                    }
-                    if secure {
-                        s = s.masked(true);
-                    }
-                    if let Some(value) = initial_value {
-                        s = s.default_value(value);
-                    }
-                    s
-                });
-                cx.subscribe_in(
-                    &state,
-                    window,
-                    move |this, input, ev: &InputEvent, window, cx| match ev {
-                        InputEvent::Change => {
-                            let value = input.read(cx).value().to_string();
-                            if consume_suppressed_input_change(
-                                &mut this.suppressed_input_changes,
-                                id,
-                                &value,
-                            ) {
-                                return;
-                            }
-                            bridge::change_text(id, value.as_ref());
-                            bridge::change(id, value.as_ref());
+        // ── tree-lifecycle work (gated on `root_dirty`) ──────────────────────────────
+        // All of this is a pure function of `self.root`: text-input entities, native
+        // WebView creation + REPOSITIONING, <SystemView> retention, a11y tree sync,
+        // layout-dedup GC. On an overlay-only animation frame (`SetNodeStyle`) `root` is
+        // unchanged, so re-running it every frame is wasted work — and `set_webviews`'
+        // per-frame WebView repositioning + the repeated whole-tree walks are what pinned
+        // the main thread on-screen during a multi-component spring (the freeze). Skip it
+        // unless the tree actually changed; the element renderers keep their last-set state.
+        if std::env::var_os("RNGPUI_RENDER_TRACE").is_some() {
+            eprintln!(
+                "[render] root_dirty={} (lifecycle {})",
+                self.root_dirty,
+                if self.root_dirty { "RUN" } else { "SKIP" }
+            );
+        }
+        if self.root_dirty {
+            // Ensure a persistent InputState entity exists for every text-input node,
+            // subscribing once so edits stream back to JS as `changeText`, and observing
+            // it so this view re-renders (and the edit shows) when the input changes.
+            let mut specs = Vec::new();
+            collect_inputs(&self.root, &mut specs);
+            let present: HashSet<u64> = specs.iter().map(|(id, _, _, _, _)| *id).collect();
+            self.inputs.retain(|id, _| present.contains(id));
+            self.input_values.retain(|id, _| present.contains(id));
+            self.input_secure.retain(|id, _| present.contains(id));
+            self.suppressed_input_changes
+                .retain(|id, _| present.contains(id));
+            for (id, placeholder, value, multiline, secure) in specs {
+                if !self.inputs.contains_key(&id) {
+                    let initial_value = value.clone();
+                    let state = cx.new(|cx| {
+                        let mut s = InputState::new(window, cx).placeholder(placeholder.clone());
+                        if multiline {
+                            s = s.multi_line(true);
                         }
-                        InputEvent::PressEnter { secondary } => {
-                            bridge::key_press(id, "Enter", *secondary, false, false, false);
-                            if multiline {
-                                if *secondary {
+                        if secure {
+                            s = s.masked(true);
+                        }
+                        if let Some(value) = initial_value {
+                            s = s.default_value(value);
+                        }
+                        s
+                    });
+                    cx.subscribe_in(
+                        &state,
+                        window,
+                        move |this, input, ev: &InputEvent, window, cx| match ev {
+                            InputEvent::Change => {
+                                let value = input.read(cx).value().to_string();
+                                if consume_suppressed_input_change(
+                                    &mut this.suppressed_input_changes,
+                                    id,
+                                    &value,
+                                ) {
+                                    return;
+                                }
+                                bridge::change_text(id, value.as_ref());
+                                bridge::change(id, value.as_ref());
+                            }
+                            InputEvent::PressEnter { secondary } => {
+                                bridge::key_press(id, "Enter", *secondary, false, false, false);
+                                if multiline {
+                                    if *secondary {
+                                        let value = input.read(cx).value().to_string();
+                                        bridge::change_text(id, value.as_ref());
+                                        bridge::change(id, value.as_ref());
+                                        return;
+                                    }
+                                    let next = value_without_submit_newline(input.read(cx));
+                                    if let Some((next, cursor_position)) = next {
+                                        let submitted = next.clone();
+                                        bridge::change_text(id, next.as_ref());
+                                        bridge::change(id, next.as_ref());
+                                        suppress_next_input_change(
+                                            &mut this.suppressed_input_changes,
+                                            id,
+                                            next.clone(),
+                                        );
+                                        input.update(cx, |input, cx| {
+                                            input.set_value(next, window, cx);
+                                            input.set_cursor_position(cursor_position, window, cx);
+                                        });
+                                        bridge::submit(id, submitted.as_ref());
+                                        return;
+                                    }
                                     let value = input.read(cx).value().to_string();
-                                    bridge::change_text(id, value.as_ref());
-                                    bridge::change(id, value.as_ref());
-                                    return;
+                                    bridge::submit(id, value.as_ref());
+                                } else {
+                                    let value = input.read(cx).value().to_string();
+                                    bridge::submit(id, value.as_ref());
                                 }
-                                let next = value_without_submit_newline(input.read(cx));
-                                if let Some((next, cursor_position)) = next {
-                                    let submitted = next.clone();
-                                    bridge::change_text(id, next.as_ref());
-                                    bridge::change(id, next.as_ref());
+                            }
+                            InputEvent::Focus => {
+                                this.focused_input = Some(id);
+                                bridge::event(id, "focus");
+                            }
+                            InputEvent::Blur => {
+                                if this.focused_input == Some(id) {
+                                    this.focused_input = None;
+                                }
+                                bridge::event(id, "blur");
+                            }
+                        },
+                    )
+                    .detach();
+                    // re-render this view when the input's contents/cursor change
+                    cx.observe(&state, |_this, _input, cx| cx.notify()).detach();
+                    self.inputs.insert(id, state);
+                    self.input_values.insert(id, value);
+                    self.input_secure.insert(id, secure);
+                } else if self.input_values.get(&id) != Some(&value) {
+                    if let Some(next_value) = value.clone() {
+                        if let Some(state) = self.inputs.get(&id) {
+                            state.update(cx, |input, cx| {
+                                if input.value().as_ref() != next_value.as_str() {
+                                    let cursor_position =
+                                        position_for_byte_offset(&next_value, next_value.len());
                                     suppress_next_input_change(
-                                        &mut this.suppressed_input_changes,
+                                        &mut self.suppressed_input_changes,
                                         id,
-                                        next.clone(),
+                                        next_value.clone(),
                                     );
-                                    input.update(cx, |input, cx| {
-                                        input.set_value(next, window, cx);
-                                        input.set_cursor_position(cursor_position, window, cx);
-                                    });
-                                    bridge::submit(id, submitted.as_ref());
-                                    return;
+                                    input.set_value(next_value, window, cx);
+                                    input.set_cursor_position(cursor_position, window, cx);
                                 }
-                                let value = input.read(cx).value().to_string();
-                                bridge::submit(id, value.as_ref());
-                            } else {
-                                let value = input.read(cx).value().to_string();
-                                bridge::submit(id, value.as_ref());
-                            }
+                            });
                         }
-                        InputEvent::Focus => {
-                            this.focused_input = Some(id);
-                            bridge::event(id, "focus");
-                        }
-                        InputEvent::Blur => {
-                            if this.focused_input == Some(id) {
-                                this.focused_input = None;
-                            }
-                            bridge::event(id, "blur");
-                        }
-                    },
-                )
-                .detach();
-                // re-render this view when the input's contents/cursor change
-                cx.observe(&state, |_this, _input, cx| cx.notify()).detach();
-                self.inputs.insert(id, state);
-                self.input_values.insert(id, value);
-                self.input_secure.insert(id, secure);
-            } else if self.input_values.get(&id) != Some(&value) {
-                if let Some(next_value) = value.clone() {
+                    }
+                    self.input_values.insert(id, value);
+                }
+                if self.input_secure.get(&id).copied() != Some(secure) {
                     if let Some(state) = self.inputs.get(&id) {
                         state.update(cx, |input, cx| {
-                            if input.value().as_ref() != next_value.as_str() {
-                                let cursor_position =
-                                    position_for_byte_offset(&next_value, next_value.len());
-                                suppress_next_input_change(
-                                    &mut self.suppressed_input_changes,
-                                    id,
-                                    next_value.clone(),
-                                );
-                                input.set_value(next_value, window, cx);
-                                input.set_cursor_position(cursor_position, window, cx);
-                            }
+                            input.set_masked(secure, window, cx);
                         });
                     }
+                    self.input_secure.insert(id, secure);
                 }
-                self.input_values.insert(id, value);
             }
-            if self.input_secure.get(&id).copied() != Some(secure) {
-                if let Some(state) = self.inputs.get(&id) {
-                    state.update(cx, |input, cx| {
-                        input.set_masked(secure, window, cx);
-                    });
-                }
-                self.input_secure.insert(id, secure);
-            }
-        }
-        elements::input::set_entities(self.inputs.clone());
+            elements::input::set_entities(self.inputs.clone());
 
-        // Same lifecycle for <WebView>: create a native child view per id, then
-        // let the element resize and load it once layout has real bounds.
-        let mut wv_specs = Vec::new();
-        collect_webviews(&self.root, false, &mut wv_specs);
-        let present_wv: HashSet<u64> = wv_specs.iter().map(|(id, _, _, _)| *id).collect();
-        self.webviews.retain(|id, _| present_wv.contains(id));
-        let mut webview_content = HashMap::new();
-        for (id, content, is_html, hidden) in wv_specs {
-            webview_content.insert(
-                id,
-                WebViewContent {
-                    body: content,
-                    is_html,
-                },
-            );
-            let view = self.webviews.entry(id).or_insert_with(|| {
-                let event_dbg = std::env::var("RNGPUI_WEBVIEW_EVENT_DEBUG").is_ok();
-                let message_dbg = std::env::var("RNGPUI_WEBVIEW_MESSAGE_DEBUG").is_ok();
-                let inspector_enabled = self.inspector.enabled();
-                let initialization_script = if inspector_enabled {
-                    format!("{RN_WEBVIEW_SHIM}\n{}", inspector::WEBVIEW_INSPECTOR_SCRIPT)
-                } else {
-                    RN_WEBVIEW_SHIM.to_string()
-                };
-                let builder = wry::WebViewBuilder::new()
-                    .with_transparent(false)
-                    // RN-compatible bridge so page code can talk to the host:
-                    // window.ReactNativeWebView.postMessage(d) → the node's onMessage.
-                    .with_initialization_script(initialization_script)
-                    // page → host: forward every posted message to the JS side, where
-                    // it's dispatched to the node's onMessage handler by id.
-                    .with_ipc_handler(move |req| {
-                        let body = req.body();
-                        if message_dbg {
-                            eprintln!("[webview {id}] message: {body}");
-                        }
-                        if inspector_enabled && inspector::handle_webview_ipc(id, body) {
-                            return;
-                        }
-                        bridge::webview_message(id, body);
-                    })
-                    // page finished loading → fire the node's onLoad. Under DEBUG this is
-                    // also the quickest way to distinguish load from compositing issues.
-                    .with_on_page_load_handler(move |event, _url| {
-                        if matches!(event, wry::PageLoadEvent::Finished) {
-                            if event_dbg {
-                                eprintln!("[webview {id}] page-load finished");
+            // Same lifecycle for <WebView>: create a native child view per id, then
+            // let the element resize and load it once layout has real bounds.
+            let mut wv_specs = Vec::new();
+            collect_webviews(&self.root, false, &mut wv_specs);
+            let present_wv: HashSet<u64> = wv_specs.iter().map(|(id, _, _, _)| *id).collect();
+            self.webviews.retain(|id, _| present_wv.contains(id));
+            let mut webview_content = HashMap::new();
+            for (id, content, is_html, hidden) in wv_specs {
+                webview_content.insert(
+                    id,
+                    WebViewContent {
+                        body: content,
+                        is_html,
+                    },
+                );
+                let view = self.webviews.entry(id).or_insert_with(|| {
+                    let event_dbg = std::env::var("RNGPUI_WEBVIEW_EVENT_DEBUG").is_ok();
+                    let message_dbg = std::env::var("RNGPUI_WEBVIEW_MESSAGE_DEBUG").is_ok();
+                    let inspector_enabled = self.inspector.enabled();
+                    let initialization_script = if inspector_enabled {
+                        format!("{RN_WEBVIEW_SHIM}\n{}", inspector::WEBVIEW_INSPECTOR_SCRIPT)
+                    } else {
+                        RN_WEBVIEW_SHIM.to_string()
+                    };
+                    let builder = wry::WebViewBuilder::new()
+                        .with_transparent(false)
+                        // RN-compatible bridge so page code can talk to the host:
+                        // window.ReactNativeWebView.postMessage(d) → the node's onMessage.
+                        .with_initialization_script(initialization_script)
+                        // page → host: forward every posted message to the JS side, where
+                        // it's dispatched to the node's onMessage handler by id.
+                        .with_ipc_handler(move |req| {
+                            let body = req.body();
+                            if message_dbg {
+                                eprintln!("[webview {id}] message: {body}");
                             }
-                            bridge::event(id, "load");
-                        }
-                    });
-                #[cfg(target_os = "macos")]
-                let wv = {
-                    elements::webview::ensure_webview_host(window, id)
-                        .expect("failed to create webview host");
-                    let window_handle = window.window_handle().expect("No window handle");
-                    builder.build_as_child(&window_handle)
-                };
-                #[cfg(not(target_os = "macos"))]
-                let wv = {
-                    let window_handle = window.window_handle().expect("No window handle");
-                    builder.build_as_child(&window_handle)
-                };
-                let wv = wv.expect("failed to create webview");
-                let _ = wv.set_visible(!hidden);
-                Rc::new(wv)
-            });
-            if hidden {
-                #[cfg(target_os = "macos")]
-                elements::webview::hide_webview_host(id);
-                let _ = view.set_visible(false);
-            } else {
-                let _ = view.set_visible(true);
+                            if inspector_enabled && inspector::handle_webview_ipc(id, body) {
+                                return;
+                            }
+                            bridge::webview_message(id, body);
+                        })
+                        // page finished loading → fire the node's onLoad. Under DEBUG this is
+                        // also the quickest way to distinguish load from compositing issues.
+                        .with_on_page_load_handler(move |event, _url| {
+                            if matches!(event, wry::PageLoadEvent::Finished) {
+                                if event_dbg {
+                                    eprintln!("[webview {id}] page-load finished");
+                                }
+                                bridge::event(id, "load");
+                            }
+                        });
+                    #[cfg(target_os = "macos")]
+                    let wv = {
+                        elements::webview::ensure_webview_host(window, id)
+                            .expect("failed to create webview host");
+                        let window_handle = window.window_handle().expect("No window handle");
+                        builder.build_as_child(&window_handle)
+                    };
+                    #[cfg(not(target_os = "macos"))]
+                    let wv = {
+                        let window_handle = window.window_handle().expect("No window handle");
+                        builder.build_as_child(&window_handle)
+                    };
+                    let wv = wv.expect("failed to create webview");
+                    let _ = wv.set_visible(!hidden);
+                    Rc::new(wv)
+                });
+                if hidden {
+                    #[cfg(target_os = "macos")]
+                    elements::webview::hide_webview_host(id);
+                    let _ = view.set_visible(false);
+                } else {
+                    let _ = view.set_visible(true);
+                }
             }
-        }
-        elements::webview::set_webviews(self.webviews.clone(), webview_content);
+            elements::webview::set_webviews(self.webviews.clone(), webview_content);
 
-        // Parallel lifecycle for <SystemView>: tear down the native surface/tint/shadow
-        // views for any id that left the tree (card closed/removed). The views themselves
-        // are created lazily in the element's prepaint, so retaining present ids is all
-        // we do here.
-        let mut system_ids = HashSet::new();
-        collect_system_ids(&self.root, &mut system_ids);
-        elements::system::retain_system_views(&system_ids);
+            // Parallel lifecycle for <SystemView>: tear down the native surface/tint/shadow
+            // views for any id that left the tree (card closed/removed). The views themselves
+            // are created lazily in the element's prepaint, so retaining present ids is all
+            // we do here.
+            let mut system_ids = HashSet::new();
+            collect_system_ids(&self.root, &mut system_ids);
+            elements::system::retain_system_views(&system_ids);
 
-        if self.inspector.enabled() {
-            inspector::refresh_snapshot_cache(&self.root);
-        }
+            if self.inspector.enabled() {
+                inspector::refresh_snapshot_cache(&self.root);
+            }
 
-        // GC layout-dedup state for nodes that left the tree.
-        let mut node_ids = HashSet::new();
-        collect_node_ids(&self.root, &mut node_ids);
-        bridge::retain_layout(&node_ids);
-        let mut native_layout_keys = HashSet::new();
-        collect_native_layout_keys(&self.root, &mut native_layout_keys);
-        elements::retain_native_layout_keys(&native_layout_keys);
+            // GC layout-dedup state for nodes that left the tree.
+            let mut node_ids = HashSet::new();
+            collect_node_ids(&self.root, &mut node_ids);
+            bridge::retain_layout(&node_ids);
+            let mut native_layout_keys = HashSet::new();
+            collect_native_layout_keys(&self.root, &mut native_layout_keys);
+            elements::retain_native_layout_keys(&native_layout_keys);
 
-        let mut layout_ids = HashSet::new();
-        collect_layout_ids(&self.root, &mut layout_ids);
-        bridge::emit_cached_layout_for_new_subscribers(&layout_ids);
+            let mut layout_ids = HashSet::new();
+            collect_layout_ids(&self.root, &mut layout_ids);
+            bridge::emit_cached_layout_for_new_subscribers(&layout_ids);
 
-        #[cfg(target_os = "macos")]
-        ax::sync_tree(window, &self.root);
-        self.write_debug_dump();
+            #[cfg(target_os = "macos")]
+            ax::sync_tree(window, &self.root);
+            self.write_debug_dump();
+            self.root_dirty = false;
+        } // end tree-lifecycle (root_dirty) gate
 
         let root = create_element(self.root.clone(), 0, None);
         let mut frame = gpui::div()
@@ -1136,6 +1169,16 @@ pub(crate) enum Incoming {
         reply: flume::Sender<serde_json::Value>,
     },
     DebugTap {
+        x: f32,
+        y: f32,
+        reply: flume::Sender<serde_json::Value>,
+    },
+    /// dispatch a REAL gpui pointer event (MouseDown+MouseUp) through the window's actual
+    /// hitbox hit-test — the SAME path an OS click takes — and report whether a handler
+    /// fired. Unlike DebugTap (which reads the serialized tree and invokes handlers
+    /// directly), this exercises gpui's real event loop, so it catches a frozen/occluded
+    /// hitbox that `tap` is structurally blind to.
+    DebugRealTap {
         x: f32,
         y: f32,
         reply: flume::Sender<serde_json::Value>,
@@ -1486,6 +1529,7 @@ fn main() {
         // can update it directly.
         let content = cx.new(|_| ServiceApp {
             root: app_root,
+            root_dirty: true,
             dump_tree_path: std::env::var("RNGPUI_DUMP_TREE").ok(),
             last_w: 0.0,
             last_h: 0.0,
@@ -1715,6 +1759,76 @@ fn main() {
                             break;
                         }
                     }
+                    Incoming::DebugRealTap { x, y, reply } => {
+                        // dispatch a REAL pointer event through gpui's hitbox hit-test (the
+                        // same path an OS click takes). draw a fresh frame first so hitboxes
+                        // are current, snapshot the host-event counter, dispatch
+                        // MouseDown+MouseUp, then report the hit element + whether a JS
+                        // handler actually fired (delta in emitted events).
+                        let result = window_handle.update(cx, |_root, window, cx| {
+                            // dispatch against the last rendered frame's hitboxes. We do NOT
+                            // call window.draw() here — drawing re-enters the Root update and
+                            // panics ("already being updated"); the dispatched MouseMove below
+                            // re-runs hit-testing against the current rendered_frame, and the
+                            // pump already refreshed the window for any pending animation
+                            // frame before this command was processed.
+                            let position = gpui::point(px(x), px(y));
+                            let before = crate::bridge::events_emitted_count();
+                            // dispatch through gpui's REAL event loop + hitbox hit-test. The
+                            // return (`DispatchEventResult`) is a private gpui type, so each
+                            // call is funneled through `dispatch_real_input` (a free fn that
+                            // erases the return to `()`), then dropped — never named here.
+                            // a MouseMove first so gpui updates its hover/hit-test set to the
+                            // tap point, then a real down+up through the actual event loop.
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::MouseMove(MouseMoveEvent {
+                                    position,
+                                    pressed_button: None,
+                                    modifiers: gpui::Modifiers::default(),
+                                }),
+                                cx,
+                            );
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::MouseDown(MouseDownEvent {
+                                    button: MouseButton::Left,
+                                    position,
+                                    modifiers: gpui::Modifiers::default(),
+                                    click_count: 1,
+                                    first_mouse: false,
+                                }),
+                                cx,
+                            );
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::MouseUp(MouseUpEvent {
+                                    button: MouseButton::Left,
+                                    position,
+                                    modifiers: gpui::Modifiers::default(),
+                                    click_count: 1,
+                                }),
+                                cx,
+                            );
+                            crate::bridge::events_emitted_count().saturating_sub(before)
+                        });
+                        match result {
+                            Ok(emitted) => {
+                                let _ = reply.send(serde_json::json!({
+                                    "ok": true,
+                                    "type": "realtap",
+                                    "x": x,
+                                    "y": y,
+                                    // a real handler firing emits >=1 host event (press /
+                                    // mouseUp / click). 0 = the click reached no handler =
+                                    // the freeze / dead hitbox we're hunting.
+                                    "handlerFired": emitted > 0,
+                                    "eventsEmitted": emitted,
+                                }));
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     Incoming::PickPaths {
                         id,
                         files,
@@ -1824,6 +1938,7 @@ fn main() {
                                 bridge::emit_cached_layout_for_new_subscribers(&layout_ids);
                                 emit_definite_cached_layouts(&next_root);
                                 this.root = next_root;
+                                this.root_dirty = true;
                                 this.write_debug_dump();
                                 cx.notify();
                             }
@@ -2030,6 +2145,7 @@ fn main() {
                             | Incoming::Quit
                             | Incoming::DebugTypeText { .. }
                             | Incoming::DebugKeyPress { .. }
+                            | Incoming::DebugRealTap { .. }
                             | Incoming::AppCommands(_) => unreachable!(),
                         });
                         if applied.is_err() {

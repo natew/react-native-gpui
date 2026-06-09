@@ -22,7 +22,19 @@ static LAST_FRAME: Lazy<Mutex<HashMap<u64, (f32, f32, f32, f32)>>> =
 static LAYOUT_SUBSCRIBERS: Lazy<Mutex<std::collections::HashSet<u64>>> =
     Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
 
+// Total host events emitted to JS. `realtap` (debug_control) snapshots this before/after
+// dispatching a REAL gpui pointer event through the window's hitbox hit-test, so it can
+// report whether a JS handler actually fired (a real press/click emits one or more of
+// these). This is how we detect "the click reached a handler" through gpui's real event
+// loop — unlike synth_tap, which invokes handlers straight off the serialized tree.
+static EVENTS_EMITTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn events_emitted_count() -> u64 {
+    EVENTS_EMITTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn emit_line(line: &str) {
+    EVENTS_EMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // queue for the JS thread's loop, which calls __rngpui_onHostEvent(line) on the JS thread.
     crate::hermes::post("__rngpui_onHostEvent", line.to_string());
 }

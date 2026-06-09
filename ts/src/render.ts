@@ -93,7 +93,25 @@ export function createRoot(options: RootOptions = {}): Root {
             return;
         }
         if (lastTree && sameTree(tree, lastTree)) return;
-        bridge.update(toWireDelta(tree, sentNodes));
+        const wire = toWireDelta(tree, sentNodes);
+        if (typeof process !== "undefined" && process.env?.RNGPUI_WIRE_TRACE) {
+            // diagnostic: how much of the wire crossed as refs vs full nodes —
+            // pairs with RNGPUI_SERIALIZE_TRACE to localize delta regressions
+            // (memo hitting but wire full = the WeakSet membership is broken).
+            let refs = 0;
+            let full = 0;
+            const count = (n: SerializedNode) => {
+                if (n.ref) {
+                    refs++;
+                    return;
+                }
+                full++;
+                for (const c of n.children ?? []) count(c);
+            };
+            count(wire);
+            console.error(`[wire] refs=${refs} full=${full}`);
+        }
+        bridge.update(wire);
         lastTree = tree;
     };
 

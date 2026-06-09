@@ -29,6 +29,7 @@ struct InvokeCommand {
 static APP_COMMAND_BINDING_SLOTS: Lazy<Mutex<HashSet<AppCommandBindingSlot>>> =
     Lazy::new(|| Mutex::new(HashSet::new()));
 
+mod anim_overlay;
 #[cfg(target_os = "macos")]
 mod ax;
 mod bridge;
@@ -169,8 +170,9 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         .and_then(|v| v.as_array())
         .map(|frames| frames.iter().filter_map(parse_terminal_frame).collect())
         .unwrap_or_default();
-    let style = obj
-        .get("style")
+    let style_json = obj.get("style").filter(|v| v.is_object()).cloned();
+    let style = style_json
+        .as_ref()
         .map(ElementStyle::from_json)
         .unwrap_or_default();
     let children: Vec<Arc<ReactElement>> = obj
@@ -234,6 +236,7 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         accessibility,
         children,
         style,
+        style_json,
         cached_gpui_style,
     }))
 }
@@ -1031,6 +1034,7 @@ fn fallback_root() -> Arc<ReactElement> {
             flex_direction: Some("column".to_string()),
             ..Default::default()
         },
+        style_json: None,
         cached_gpui_style: None,
     })
 }
@@ -1083,6 +1087,12 @@ enum AppCommandMenuItem {
 pub(crate) enum Incoming {
     Quit,
     Tree(Arc<ReactElement>),
+    /// reanimated per-frame style overrides, coalesced to one host crossing per rAF
+    /// tick. Applied to the `anim_overlay` map + `cx.notify()` WITHOUT rebuilding
+    /// `root` — the off-thread-reanimated fast path.
+    SetNodeStyle {
+        ops: Vec<(u64, serde_json::Map<String, serde_json::Value>)>,
+    },
     Eval {
         id: u64,
         js: String,
@@ -1805,6 +1815,7 @@ fn main() {
                                 let mut node_ids = HashSet::new();
                                 collect_node_ids(&next_root, &mut node_ids);
                                 bridge::retain_layout(&node_ids);
+                                crate::anim_overlay::retain(&node_ids);
                                 let mut native_layout_keys = HashSet::new();
                                 collect_native_layout_keys(&next_root, &mut native_layout_keys);
                                 elements::retain_native_layout_keys(&native_layout_keys);
@@ -1815,6 +1826,15 @@ fn main() {
                                 this.root = next_root;
                                 this.write_debug_dump();
                                 cx.notify();
+                            }
+                            Incoming::SetNodeStyle { ops } => {
+                                // off-thread reanimated fast path: write the per-frame
+                                // overrides into the overlay and re-render WITHOUT
+                                // touching `root`. No React re-commit, no tree reparse.
+                                if crate::anim_overlay::apply_ops(ops) {
+                                    this.write_debug_dump();
+                                    cx.notify();
+                                }
                             }
                             Incoming::Eval { id, js } => {
                                 if let Some(view) = this.webviews.get(&id) {

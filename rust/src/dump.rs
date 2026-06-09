@@ -96,9 +96,17 @@ fn dump_node(el: &Arc<ReactElement>) -> Value {
     }
 
     // resolved style facts — the parsed ElementStyle, not the authored JSON (the
-    // service discards the raw object at parse time). Just the fields a layout/color
-    // diagnosis needs.
-    let style = resolved_style(&el.style);
+    // service discards the raw object at parse time). When reanimated has a live
+    // animated overlay for this node, report the MERGED style so the dump reflects the
+    // per-frame spring value (the conformance harness reads this to assert the ramp).
+    let effective_style = el
+        .style_json
+        .as_ref()
+        .filter(|_| crate::anim_overlay::has_overlay(el.global_id))
+        .and_then(|base_json| {
+            crate::anim_overlay::merged_style(el.global_id, &el.style, base_json)
+        });
+    let style = resolved_style(effective_style.as_ref().unwrap_or(&el.style));
     if !style.is_empty() {
         obj.insert("style".into(), Value::Object(style));
     }

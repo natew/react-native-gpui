@@ -7,6 +7,7 @@
 // Bun is used only as the dev bundler here; the output runs under Hermes.
 import { resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { reanimatedBunPlugin } from './reanimated-bun-plugin.mjs'
 
 const root = resolve(import.meta.dirname, '..') // ts/
 const args = process.argv.slice(2).filter((a) => !a.startsWith('--'))
@@ -24,6 +25,9 @@ const result = await Bun.build({
     'process.env.NODE_ENV': JSON.stringify(mode),
     __DEV__: mode === 'development' ? 'true' : 'false',
   },
+  // wire real react-native-reanimated@4 + worklets for the embedded Hermes target:
+  // worklet babel transform (content-gated) + native-seam redirect to ts/src/reanimated.
+  plugins: [reanimatedBunPlugin({ rngTsRoot: root })],
   sourcemap: 'none',
   throw: false,
 })

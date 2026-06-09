@@ -142,9 +142,20 @@ fn arg_str(arg: *const c_char) -> String {
         .into_owned()
 }
 
+// RNGPUI_ANIM_TRACE=1 logs every applyTree / setNodeStyle crossing so the reanimated
+// conformance harness can prove the fast path: during a spring, only `setNodeStyle`
+// fires (no `applyTree`), i.e. React doesn't re-commit per frame.
+static ANIM_TRACE: OnceLock<bool> = OnceLock::new();
+fn anim_trace() -> bool {
+    *ANIM_TRACE.get_or_init(|| std::env::var_os("RNGPUI_ANIM_TRACE").is_some())
+}
+
 extern "C" fn host_apply_tree(ud: *mut c_void, arg: *const c_char) {
     let ctx = ctx_ref(ud);
     let s = arg_str(arg);
+    if anim_trace() {
+        eprintln!("[anim-trace] applyTree bytes={}", s.len());
+    }
     match serde_json::from_str::<serde_json::Value>(&s) {
         Ok(v) => {
             if let Some(inc) = crate::parse_incoming(&v) {
@@ -157,6 +168,45 @@ extern "C" fn host_apply_tree(ud: *mut c_void, arg: *const c_char) {
 
 extern "C" fn host_log(_ud: *mut c_void, arg: *const c_char) {
     eprintln!("{}", arg_str(arg));
+}
+
+// reanimated fast path: the TS seam coalesces all `_updateProps` ops within one rAF
+// tick and crosses here ONCE per frame. The arg is `[[globalId, {styleKey: value}],
+// …]`; parse it into (id, style-object) pairs and hand them to the applier, which
+// updates the animated-style overlay + cx.notify() WITHOUT replacing `root`.
+extern "C" fn host_set_node_style(ud: *mut c_void, arg: *const c_char) {
+    let ctx = ctx_ref(ud);
+    let s = arg_str(arg);
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) else {
+        eprintln!("[hermes] setNodeStyle: bad json");
+        return;
+    };
+    let Some(arr) = value.as_array() else {
+        return;
+    };
+    let mut ops: Vec<(u64, serde_json::Map<String, serde_json::Value>)> =
+        Vec::with_capacity(arr.len());
+    for entry in arr {
+        let Some(pair) = entry.as_array() else {
+            continue;
+        };
+        if pair.len() != 2 {
+            continue;
+        }
+        let Some(id) = pair[0].as_u64() else { continue };
+        // a style object (animated keys) or null/empty → clear that node's overlay.
+        let style = pair[1]
+            .as_object()
+            .cloned()
+            .unwrap_or_else(serde_json::Map::new);
+        ops.push((id, style));
+    }
+    if !ops.is_empty() {
+        if anim_trace() {
+            eprintln!("[anim-trace] setNodeStyle ops={}", ops.len());
+        }
+        let _ = ctx.tree_tx.send(crate::Incoming::SetNodeStyle { ops });
+    }
 }
 
 extern "C" fn host_now(ud: *mut c_void, _arg: *const c_char) -> f64 {
@@ -531,6 +581,7 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
             let ud = (&*ctx as *const JsContext) as *mut c_void;
 
             install_void(rt, "__rngpui_applyTree", host_apply_tree, ud);
+            install_void(rt, "__rngpui_setNodeStyle", host_set_node_style, ud);
             install_void(rt, "__rngpui_log", host_log, ud);
             install_void(rt, "__rngpui_exit", host_exit, ud);
             install_void(rt, "__rngpui_reloadApp", host_reload_app, ud);

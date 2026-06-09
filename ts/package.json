@@ -39,6 +39,8 @@
         "kitchen": "node scripts/run-hermes-example.mjs examples/kitchen-sink.tsx --interactive",
         "conformance:animation": "node scripts/run-hermes-example.mjs examples/animation-conformance.tsx --timeout-ms 8000",
         "conformance:animation:diff": "bun run scripts/animation-frame-diff.mjs",
+        "conformance:anim-overlay": "node scripts/anim-overlay-conformance.mjs",
+        "conformance:reanimated": "RNGPUI_NO_ACTIVATE=1 RNGPUI_TEST_MODE=1 node scripts/run-hermes-example.mjs examples/reanimated-conformance.tsx --timeout-ms 8000",
         "conformance:webview:render": "bun run scripts/webview-render-conformance.mjs",
         "conformance:webview:overlay": "bun run scripts/webview-overlay-conformance.mjs",
         "conformance:diagnostics": "node scripts/diagnostics-conformance.mjs",
@@ -89,10 +91,15 @@
         "react-reconciler": "^0.31.0"
     },
     "devDependencies": {
+        "@babel/core": "^7.26.0",
+        "@babel/plugin-syntax-jsx": "^7.25.9",
+        "@babel/preset-typescript": "^7.26.0",
         "@types/node": "25.9.1",
         "@types/react": "^19.0.0",
         "@types/react-reconciler": "^0.31.0",
         "react": "^19.0.0",
+        "react-native-reanimated": "4.3.0",
+        "react-native-worklets": "0.8.1",
         "typescript": "^5.7.0"
     }
 }

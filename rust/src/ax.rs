@@ -787,6 +787,7 @@ mod tests {
             accessibility,
             children: Vec::new(),
             style: ElementStyle::default(),
+            style_json: None,
             cached_gpui_style: None,
         }
     }

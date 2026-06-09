@@ -33,6 +33,18 @@ export interface Instance {
         onSuccess: (left: number, top: number, width: number, height: number) => void,
         onFail?: () => void,
     ) => void;
+    // ── react-native-reanimated host-instance shims ──
+    // reanimated's createAnimatedComponent resolves an animated node's native tag via
+    // these RN fabric fields (findHostInstance fast path reads __nativeTag +
+    // __internalInstanceHandle + _viewConfig; getShadowNodeWrapperFromRef reads
+    // __internalInstanceHandle.stateNode.node). The gpui reconciler returns the
+    // Instance itself as the public instance, so we make `globalId` BE the viewTag and
+    // the shadowNodeWrapper — the reanimated-seam's `_updateProps` then maps an op's
+    // shadowNodeWrapper (= id) straight to the globalId Rust keys its animated overlay
+    // on. No separate registry, no patched reanimated internals.
+    __nativeTag: number;
+    __internalInstanceHandle: { stateNode: { node: number }; type: string };
+    _viewConfig: { uiViewClassName: string };
 }
 export interface TextInstance {
     id: number;
@@ -502,6 +514,12 @@ function createPublicInstance(type: string, props: Record<string, unknown>): Ins
         cached: undefined,
         cachedListGroup: undefined,
         hasPortal: false,
+        // reanimated host-instance shims — see the Instance interface. globalId IS the
+        // native tag + shadow-node wrapper, so the reanimated seam maps animated ops to
+        // the same id Rust's overlay uses.
+        __nativeTag: id,
+        __internalInstanceHandle: { stateNode: { node: id }, type },
+        _viewConfig: { uiViewClassName: type },
         measure(callback) {
             afterMeasuredLayout(id, () => {
                 const layout = layoutFor(id);

@@ -983,6 +983,7 @@ mod tests {
             accessibility: AccessibilityInfo::default(),
             children,
             style: ElementStyle::default(),
+            style_json: None,
             cached_gpui_style: None,
         })
     }

@@ -179,14 +179,12 @@ impl ReactElement {
         // which holds only the committed style). This is the SINGLE style path that
         // feeds both yoga layout (request_layout) and paint, so a width/height spring
         // reflows and an opacity/color spring repaints — see `crate::anim_overlay`.
-        if let Some(ref base_json) = self.style_json {
-            if crate::anim_overlay::has_overlay(self.global_id) {
-                if let Some(merged) =
-                    crate::anim_overlay::merged_style(self.global_id, &self.style, base_json)
-                {
-                    return merged.build_gpui_style(default_bg);
-                }
-            }
+        if let Some(ref base_json) = self.style_json
+            && crate::anim_overlay::has_overlay(self.global_id)
+            && let Some(merged) =
+                crate::anim_overlay::merged_style(self.global_id, &self.style, base_json)
+        {
+            return merged.build_gpui_style(default_bg);
         }
         // cache holds the default_bg=None variant (the only one live callers use);
         // recompute for the rare explicit-default case so the cache can't go stale.

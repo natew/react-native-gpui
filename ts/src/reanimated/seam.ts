@@ -405,17 +405,32 @@ function ensureFrameCallbackRegistry(): void {
 // the reconciler serializes them, so Rust's `from_json` reads them identically.
 // =============================================================================
 
+const SEAM_DEBUG =
+  typeof process !== 'undefined' && !!(process as { env?: Record<string, string> }).env?.RNGPUI_SEAM_DEBUG
+let updatePropsCalls = 0
+
 function engineUpdateProps(operations: Array<{ shadowNodeWrapper: unknown; updates: StyleProps }>): void {
   let any = false
   for (const op of operations) {
     const globalId = resolveGlobalId(op.shadowNodeWrapper)
-    if (globalId == null) continue
+    if (globalId == null) {
+      if (SEAM_DEBUG) {
+        console.error(
+          `[seam] _updateProps op dropped: unresolved target ${JSON.stringify(op.shadowNodeWrapper)} keys=${Object.keys(op.updates).join(',')}`,
+        )
+      }
+      continue
+    }
     const prev = PENDING_OPS.get(globalId) ?? {}
     for (const [key, value] of Object.entries(op.updates)) {
       prev[key] = normalizeUpdatePropValue(key, value)
     }
     PENDING_OPS.set(globalId, prev)
     any = true
+  }
+  if (SEAM_DEBUG) {
+    updatePropsCalls++
+    console.error(`[seam] _updateProps call #${updatePropsCalls} ops=${operations.length} any=${any}`)
   }
   if (any) scheduleFlush()
 }

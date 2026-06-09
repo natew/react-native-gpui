@@ -81,7 +81,11 @@
 
   // requestAnimationFrame is sugar over a ~16ms timer (on-demand frame clock: only ticks
   // while something has a frame pending). Tamagui's Animated driver rides this.
+  var __rafDebug = g.process && g.process.env && g.process.env.RNGPUI_RAF_DEBUG;
+  var __rafSeq = 0;
   g.requestAnimationFrame = function (cb) {
+    if (__rafDebug) { var n = ++__rafSeq; g.__rngpui_log('debug: rAF schedule #' + n);
+      return schedule(function () { g.__rngpui_log('debug: rAF fire #' + n); cb(g.__rngpui_now('')); }, 16, false); }
     return schedule(function () { cb(g.__rngpui_now('')); }, 16, false);
   };
   g.cancelAnimationFrame = function (id) { g.clearTimeout(id); };

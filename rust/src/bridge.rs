@@ -182,6 +182,26 @@ pub fn webview_message(id: u64, data: &str) {
     emit_value(json!({ "type": "event", "id": id, "event": "message", "value": data }));
 }
 
+/// Raw text the terminal element produced natively (clipboard paste, dropped
+/// file paths) that should be written straight to the PTY. Routed to the
+/// `GhosttyTerminal`'s `onInsertText` handler.
+pub fn terminal_text(id: u64, text: &str) {
+    emit_value(json!({ "type": "event", "id": id, "event": "terminalText", "value": text }));
+}
+
+/// The terminal element measured its grid from its painted bounds and real font
+/// cell metrics. Routed to the `GhosttyTerminal`'s `onMeasureViewport` handler
+/// so JS can size the PTY to fit the stage exactly.
+pub fn terminal_viewport(id: u64, cols: u16, rows: u16) {
+    emit_value(json!({
+        "type": "event",
+        "id": id,
+        "event": "terminalViewport",
+        "cols": cols,
+        "rows": rows
+    }));
+}
+
 /// Emit `layout` only if this node's rounded rect changed since last frame.
 pub fn layout_if_changed(id: u64, x: f32, y: f32, width: f32, height: f32) {
     remember_layout(id, x, y, width, height);

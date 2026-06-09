@@ -6,10 +6,11 @@ use std::sync::Arc;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use gpui::{
-    App, Bounds, Display, Element, ElementId, FontStyle, FontWeight, GlobalElementId,
-    HighlightStyle, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, LayoutId,
-    MouseButton, MouseDownEvent, ParentElement as _, Pixels, ScrollDelta, ScrollWheelEvent,
-    StrikethroughStyle, Styled as _, StyledText, UnderlineStyle, Window, div, px, rgba,
+    App, Bounds, Display, Element, ElementId, ExternalPaths, FontStyle, FontWeight,
+    GlobalElementId, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent,
+    LayoutId, MouseButton, MouseDownEvent, ParentElement as _, Pixels, ScrollDelta,
+    ScrollWheelEvent, StrikethroughStyle, Styled as _, StyledText, UnderlineStyle, Window, div, px,
+    rgba,
 };
 use libghostty_vt::render::{CellIterator, RowIterator};
 use libghostty_vt::style::{RgbColor, Underline};
@@ -19,6 +20,9 @@ use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 use crate::elements::{
     ReactElement, TerminalFrame, TerminalFrameKind, bounds_have_drawable_area, report_layout,
 };
+
+// the inner padding around the terminal grid (matches the root `.p(px(PAD))`).
+const PAD: f32 = 10.0;
 
 thread_local! {
     // Keyed by SESSION id (not the React element's `global_id`): the single
@@ -34,6 +38,11 @@ thread_local! {
     static TERMINALS: RefCell<HashMap<String, TerminalState>> = RefCell::new(HashMap::new());
     static TERMINAL_FOCUS: RefCell<HashMap<u64, gpui::FocusHandle>> = RefCell::new(HashMap::new());
     static TERMINAL_CLOCK: RefCell<u64> = const { RefCell::new(0) };
+    // last (cols, rows) the element measured from its own bounds and reported to
+    // JS, per element global_id. The element is the source of truth for size:
+    // it measures real font cell metrics against its painted bounds, so the grid
+    // fits the stage exactly instead of relying on a JS pixel-per-col guess.
+    static TERMINAL_MEASURED: RefCell<HashMap<u64, (u16, u16)>> = RefCell::new(HashMap::new());
 }
 
 // Keep at most this many warm per-session terminals; evict least-recently-used.
@@ -55,7 +64,6 @@ impl ReactGhosttyTerminalElement {
     }
 
     fn build_child(&self, window: &mut Window, cx: &mut App) -> gpui::AnyElement {
-        let rows = terminal_rows(&self.element);
         let style = &self.element.style;
         let font_size = style.font_size.unwrap_or(12.0);
         let line_height = style.line_height.unwrap_or(18.0);
@@ -64,25 +72,28 @@ impl ReactGhosttyTerminalElement {
         let background = style
             .background_color
             .unwrap_or_else(|| color_from_hex(0x050507));
+        let (rows, translate_y) = terminal_rows(&self.element, line_height);
         let focus_handle = terminal_focus_handle(self.element.global_id, cx);
         let click_focus_handle = focus_handle.clone();
         let listens_key_press = self.element.listens("keyPress");
         let listens_press = self.element.listens("press");
+        let listens_text = self.element.listens("terminalText");
         let element_id = self.element.global_id;
         let press_element_id = element_id;
+        let drop_element_id = element_id;
         let scroll_session_id = self
             .element
             .terminal_session_id
             .clone()
             .unwrap_or_else(|| "__terminal__".to_string());
 
-        let mut root = div()
+        let root = div()
             .size_full()
             .flex()
             .flex_col()
             .overflow_hidden()
             .bg(background)
-            .p(px(10.0))
+            .p(px(PAD))
             .track_focus(&focus_handle)
             .on_mouse_down(
                 MouseButton::Left,
@@ -95,8 +106,8 @@ impl ReactGhosttyTerminalElement {
             )
             .on_scroll_wheel(
                 move |event: &ScrollWheelEvent, window: &mut Window, cx: &mut App| {
-                    let rows = scroll_delta_rows(&event.delta, line_height);
-                    if rows.abs() < 0.01 || !scroll_terminal_viewport(&scroll_session_id, rows) {
+                    let dy = scroll_delta_pixels(&event.delta, line_height);
+                    if dy.abs() < 0.01 || !scroll_terminal_pixels(&scroll_session_id, dy) {
                         return;
                     }
                     window.refresh();
@@ -104,19 +115,54 @@ impl ReactGhosttyTerminalElement {
                 },
             )
             .on_key_down(move |event: &KeyDownEvent, _: &mut Window, cx: &mut App| {
-                if !listens_key_press || event.keystroke.modifiers.platform {
+                let keystroke = &event.keystroke;
+                let modifiers = keystroke.modifiers;
+                // Cmd+V: paste the macOS clipboard straight into the PTY. The
+                // raw keystroke path below drops every Cmd chord (those belong to
+                // the app's menu/command layer), so paste has to be special-cased
+                // here or it never reaches the terminal.
+                if modifiers.platform
+                    && !modifiers.control
+                    && !modifiers.alt
+                    && keystroke.key == "v"
+                {
+                    if listens_text
+                        && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+                        && !text.is_empty()
+                    {
+                        crate::bridge::terminal_text(element_id, &text);
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
+                // Other Cmd chords stay with the app (menus/shortcuts). Plain
+                // keys, Ctrl chords (Ctrl-W &c.), and Alt chords forward to the
+                // PTY through the keymap path.
+                if !listens_key_press || modifiers.platform {
                     return;
                 }
                 crate::bridge::key_press(
                     element_id,
-                    &js_key(&event.keystroke),
-                    event.keystroke.modifiers.shift,
-                    event.keystroke.modifiers.control,
-                    event.keystroke.modifiers.alt,
-                    event.keystroke.modifiers.platform,
+                    &js_key(keystroke),
+                    modifiers.shift,
+                    modifiers.control,
+                    modifiers.alt,
+                    modifiers.platform,
                 );
                 cx.stop_propagation();
-            });
+            })
+            .on_drop::<ExternalPaths>(
+                move |paths: &ExternalPaths, window: &mut Window, _: &mut App| {
+                    if !listens_text {
+                        return;
+                    }
+                    let payload = quote_dropped_paths(paths.paths());
+                    if !payload.is_empty() {
+                        crate::bridge::terminal_text(drop_element_id, &payload);
+                        window.refresh();
+                    }
+                },
+            );
 
         if rows.is_empty() {
             return root
@@ -125,6 +171,15 @@ impl ReactGhosttyTerminalElement {
                 .font_family(font_family)
                 .child("waiting for terminal snapshot")
                 .into_any_element();
+        }
+
+        // the grid lives in an inner column so the sub-row scroll offset
+        // (translate_y, 0..-line_height) can slide it smoothly inside the clipped
+        // root without moving the background/padding. translate_y is 0 while
+        // pinned to the live tail (the fast path).
+        let mut grid = div().flex().flex_col();
+        if translate_y.abs() > 0.01 {
+            grid = grid.mt(px(translate_y));
         }
 
         for row in rows {
@@ -159,7 +214,7 @@ impl ReactGhosttyTerminalElement {
                     )
                 }),
             );
-            root = root.child(
+            grid = grid.child(
                 div()
                     .h(px(line_height))
                     .whitespace_nowrap()
@@ -170,7 +225,51 @@ impl ReactGhosttyTerminalElement {
             );
         }
 
-        root.into_any_element()
+        root.child(grid).into_any_element()
+    }
+
+    /// Measure the available grid from the painted bounds and the real font cell
+    /// advance, then report the resulting (cols, rows) to JS so it can size the
+    /// PTY. This is the single source of truth for terminal size: the grid fits
+    /// the stage exactly instead of trusting a JS pixels-per-column estimate.
+    fn measure_viewport(&self, bounds: Bounds<Pixels>, window: &mut Window) {
+        if !self.element.listens("terminalViewport") {
+            return;
+        }
+        let style = &self.element.style;
+        let font_size = style.font_size.unwrap_or(12.0);
+        let line_height = style.line_height.unwrap_or(18.0).max(1.0);
+        let font_family = style.gpui_font_family().unwrap_or_else(|| "Menlo".into());
+        let font = gpui::font(font_family);
+        let text_system = window.text_system();
+        let font_id = text_system.resolve_font(&font);
+        let cell_width: f32 = text_system
+            .em_advance(font_id, px(font_size))
+            .map(Into::into)
+            .unwrap_or(font_size * 0.6)
+            .max(1.0);
+
+        let width: f32 = bounds.size.width.into();
+        let height: f32 = bounds.size.height.into();
+        let cols = (((width - PAD * 2.0).max(0.0)) / cell_width)
+            .floor()
+            .max(2.0) as u16;
+        let rows = (((height - PAD * 2.0).max(0.0)) / line_height)
+            .floor()
+            .max(1.0) as u16;
+
+        let id = self.element.global_id;
+        let changed = TERMINAL_MEASURED.with(|measured| {
+            let mut measured = measured.borrow_mut();
+            if measured.get(&id) == Some(&(cols, rows)) {
+                return false;
+            }
+            measured.insert(id, (cols, rows));
+            true
+        });
+        if changed {
+            crate::bridge::terminal_viewport(id, cols, rows);
+        }
     }
 }
 
@@ -234,6 +333,8 @@ impl Element for ReactGhosttyTerminalElement {
             return;
         }
 
+        self.measure_viewport(bounds, window);
+
         if let Some(child) = self.child.as_mut() {
             child.prepaint(window, cx);
         }
@@ -268,30 +369,36 @@ struct TerminalState {
     last_seq: u64,
     cols: u16,
     rows: u16,
-    scroll_remainder: f32,
-    /// Bumped whenever a wheel scroll actually moves the viewport, so the row
-    /// cache invalidates even though scrolling doesn't advance `last_seq`.
-    scroll_epoch: u64,
+    /// Pixel height of one rendered row, kept in sync with the element style so
+    /// the wheel handler (which only has the style line height) and the renderer
+    /// agree on the px<->row mapping.
+    line_height: f32,
+    /// Pixels scrolled up from the live tail. 0 == following the bottom (new
+    /// output keeps the view pinned); > 0 == parked in scrollback.
+    scroll_px: f32,
+    /// The ghostty viewport's current whole-row offset from the bottom. Tracked
+    /// so `position_viewport` knows where it left the viewport.
+    settled_rows: u16,
     /// Monotonic tick of the last access, for LRU eviction of warm terminals.
     last_used: u64,
-    /// Cached output of the last `render_rows()`, with the state it was
-    /// computed for. `build_child` runs in `request_layout`, which fires on
-    /// EVERY full tree re-render (input-cursor blink, the periodic session
-    /// poll, mouse moves, an unrelated scroll, …) — not just when terminal
-    /// bytes arrive. Re-running ghostty's `render.update` + full cell
-    /// iteration each of those times is wasted O(rows*cols) work and was the
-    /// dominant terminal-stage cost. Cache the rows and reuse them whenever
-    /// nothing relevant changed.
+    /// Cached output of the last `render_rows()`, with the state it was computed
+    /// for. `build_child` runs in `request_layout`, which fires on EVERY full
+    /// tree re-render (input-cursor blink, the periodic session poll, mouse
+    /// moves, …) — not just when terminal bytes arrive. Re-running ghostty's
+    /// `render.update` + full cell iteration each time is wasted O(rows*cols)
+    /// work. Cache the rows and reuse them whenever nothing relevant changed.
     cache: Option<RenderCache>,
 }
 
 struct RenderCache {
-    /// Highest applied frame seq + viewport the rows were rendered for. A
-    /// scroll bumps `epoch` so wheel scrolling still re-renders.
+    /// Highest applied frame seq + viewport + scrollback position the rows were
+    /// rendered for. The sub-row pixel offset is NOT part of the key: it only
+    /// affects the paint-time translate, so smooth scrolling within one row
+    /// reuses the cached rows.
     seq: u64,
     cols: u16,
     rows: u16,
-    epoch: u64,
+    settled: u16,
     rows_out: Vec<RenderedRow>,
 }
 
@@ -313,12 +420,16 @@ struct RowHighlight {
     faint: bool,
 }
 
-fn terminal_rows(element: &ReactElement) -> Vec<RenderedRow> {
+/// Build the rows to display plus the sub-row pixel translate to apply. Returns
+/// `(rows, translate_y)` where translate_y is 0 while pinned to the bottom and
+/// in `(-line_height, 0]` while scrolled (slides the grid up so the extra
+/// history row prepended at the top fills in smoothly).
+fn terminal_rows(element: &ReactElement, line_height: f32) -> (Vec<RenderedRow>, f32) {
     let session_id = element
         .terminal_session_id
         .clone()
         .unwrap_or_else(|| "__terminal__".to_string());
-    let mut rows = Vec::new();
+    let mut result = (Vec::new(), 0.0);
     let tick = TERMINAL_CLOCK.with(|clock| {
         let mut clock = clock.borrow_mut();
         *clock = clock.wrapping_add(1);
@@ -348,10 +459,11 @@ fn terminal_rows(element: &ReactElement) -> Vec<RenderedRow> {
         }
         let state = terminals.get_mut(&session_id).expect("terminal inserted");
         state.last_used = tick;
+        state.line_height = line_height.max(1.0);
         state.apply_frames(&element.terminal_frames);
-        rows = state.rows_for_render().unwrap_or_default();
+        result = state.rows_for_render().unwrap_or((Vec::new(), 0.0));
     });
-    rows
+    result
 }
 
 /// Drop the least-recently-used warm terminals once the map exceeds the cap,
@@ -387,38 +499,124 @@ impl TerminalState {
             last_seq: 0,
             cols,
             rows,
-            scroll_remainder: 0.0,
-            scroll_epoch: 0,
+            line_height: 18.0,
+            scroll_px: 0.0,
+            settled_rows: 0,
             last_used: 0,
             cache: None,
         })
     }
 
-    /// Return the rows for this render. Reuses the cached `Vec<RenderedRow>`
-    /// when nothing relevant changed since the last `render_rows()`
-    /// (same applied seq, same viewport, same scroll epoch), so the common
-    /// idle re-render skips ghostty's `render.update` + cell iteration.
-    fn rows_for_render(&mut self) -> Result<Vec<RenderedRow>, Box<dyn std::error::Error>> {
+    fn following(&self) -> bool {
+        self.scroll_px <= 0.5
+    }
+
+    fn scrollback_rows(&self) -> usize {
+        self.terminal.scrollback_rows().unwrap_or(0)
+    }
+
+    /// Apply an incoming pixel scroll delta (dy > 0 reveals history). Returns
+    /// whether the scroll position actually moved.
+    fn scroll_pixels(&mut self, dy: f32) -> bool {
+        let max_px = self.scrollback_rows() as f32 * self.line_height.max(1.0);
+        let next = (self.scroll_px + dy).clamp(0.0, max_px);
+        if (next - self.scroll_px).abs() < 0.01 {
+            return false;
+        }
+        self.scroll_px = next;
+        true
+    }
+
+    /// Move the ghostty viewport to `settled` whole rows up from the bottom,
+    /// using Bottom as a known reference so it is correct regardless of where the
+    /// viewport was left (e.g. after output auto-scrolled it).
+    fn position_viewport(&mut self, settled: u16) {
+        self.terminal.scroll_viewport(ScrollViewport::Bottom);
+        if settled > 0 {
+            self.terminal
+                .scroll_viewport(ScrollViewport::Delta(-(settled as isize)));
+        }
+        self.settled_rows = settled;
+    }
+
+    /// Return the rows to display + the sub-row translate. Reuses the cached
+    /// rows when the seq/size/scrollback position are unchanged; the translate
+    /// is always recomputed from the live pixel offset so smooth scrolling
+    /// within a single row stays cheap.
+    fn rows_for_render(&mut self) -> Result<(Vec<RenderedRow>, f32), Box<dyn std::error::Error>> {
+        let line_height = self.line_height.max(1.0);
+        let scrollback = self.scrollback_rows();
+        let max_px = scrollback as f32 * line_height;
+        self.scroll_px = self.scroll_px.clamp(0.0, max_px);
+
+        if self.following() {
+            // fast path: pinned to the live tail.
+            let rows = self.cached_or_render(0, |state| {
+                state.position_viewport(0);
+                state.render_rows()
+            })?;
+            return Ok((rows, 0.0));
+        }
+
+        let settled = ((self.scroll_px / line_height).floor() as usize).min(scrollback) as u16;
+        let frac = self.scroll_px - settled as f32 * line_height;
+
+        // the row just above the settled viewport, fetched by rendering one row
+        // higher, so the grid can slide it in as `frac` grows toward a full row.
+        let has_extra = (settled as usize) < scrollback;
+        let translate = if has_extra {
+            -(line_height - frac)
+        } else {
+            0.0
+        };
+
+        let rows = self.cached_or_render(settled, |state| {
+            let extra_top = if has_extra {
+                state.position_viewport(settled + 1);
+                state.render_rows()?.into_iter().next()
+            } else {
+                None
+            };
+            state.position_viewport(settled);
+            let main = state.render_rows()?;
+            let mut out = Vec::with_capacity(main.len() + 1);
+            if let Some(top) = extra_top {
+                out.push(top);
+            }
+            out.extend(main);
+            Ok(out)
+        })?;
+
+        Ok((rows, translate))
+    }
+
+    fn cached_or_render(
+        &mut self,
+        settled: u16,
+        build: impl FnOnce(&mut Self) -> Result<Vec<RenderedRow>, Box<dyn std::error::Error>>,
+    ) -> Result<Vec<RenderedRow>, Box<dyn std::error::Error>> {
         if let Some(cache) = &self.cache
             && cache.seq == self.last_seq
             && cache.cols == self.cols
             && cache.rows == self.rows
-            && cache.epoch == self.scroll_epoch
+            && cache.settled == settled
         {
             return Ok(cache.rows_out.clone());
         }
-        let rows_out = self.render_rows()?;
+        let rows_out = build(self)?;
         self.cache = Some(RenderCache {
             seq: self.last_seq,
             cols: self.cols,
             rows: self.rows,
-            epoch: self.scroll_epoch,
+            settled,
             rows_out: rows_out.clone(),
         });
         Ok(rows_out)
     }
 
     fn apply_frames(&mut self, frames: &[TerminalFrame]) {
+        let before_total = self.terminal.total_rows().unwrap_or(0);
+        let mut wrote = false;
         for frame in frames {
             if frame.seq <= self.last_seq {
                 continue;
@@ -430,18 +628,38 @@ impl TerminalState {
                     if let Some(bytes) = decode_frame(frame) {
                         self.terminal.vt_write(&bytes);
                     }
+                    wrote = true;
                 }
                 TerminalFrameKind::Bytes => {
                     self.resize_if_needed(frame.cols, frame.rows);
                     if let Some(bytes) = decode_frame(frame) {
                         self.terminal.vt_write(&bytes);
                     }
+                    wrote = true;
                 }
                 TerminalFrameKind::Resize => {
                     self.resize_if_needed(frame.cols, frame.rows);
                 }
             }
             self.last_seq = frame.seq;
+        }
+        if wrote {
+            if self.following() {
+                // keep the view pinned to the live tail as output streams in.
+                // ghostty only auto-follows if the viewport is already at the
+                // bottom, so pin it explicitly when the user hasn't scrolled away.
+                self.scroll_px = 0.0;
+                self.position_viewport(0);
+            } else {
+                // parked in scrollback: keep the SAME content in view as new
+                // lines push the bottom down, instead of letting the view drift.
+                let after_total = self.terminal.total_rows().unwrap_or(before_total);
+                let added = after_total.saturating_sub(before_total);
+                if added > 0 {
+                    let max_px = self.scrollback_rows() as f32 * self.line_height.max(1.0);
+                    self.scroll_px = (self.scroll_px + added as f32 * self.line_height).min(max_px);
+                }
+            }
         }
     }
 
@@ -454,6 +672,12 @@ impl TerminalState {
         if self.terminal.resize(cols, rows, 8, 16).is_ok() {
             self.cols = cols;
             self.rows = rows;
+            // a reflow leaves the viewport at an arbitrary spot, which showed up
+            // as stale "garbage" rows below the real content. Snap back to the
+            // live tail so the prompt is where it belongs.
+            self.scroll_px = 0.0;
+            self.position_viewport(0);
+            self.cache = None;
         }
     }
 
@@ -538,44 +762,47 @@ impl TerminalState {
     }
 }
 
-fn scroll_terminal_viewport(session_id: &str, rows: f32) -> bool {
+fn scroll_terminal_pixels(session_id: &str, dy: f32) -> bool {
     TERMINALS.with(|terminals| {
         let mut terminals = terminals.borrow_mut();
         let Some(state) = terminals.get_mut(session_id) else {
             return false;
         };
-        state.scroll_viewport(rows)
+        state.scroll_pixels(dy)
     })
 }
 
-fn scroll_delta_rows(delta: &ScrollDelta, line_height: f32) -> f32 {
+/// Convert a wheel/trackpad delta into pixels of terminal scroll. Trackpad
+/// deltas arrive as pixels (with the OS momentum tail) and pass straight
+/// through; wheel "lines" become whole rows. dy > 0 reveals history.
+fn scroll_delta_pixels(delta: &ScrollDelta, line_height: f32) -> f32 {
     let line_height = line_height.max(1.0);
     match delta {
-        ScrollDelta::Lines(point) => -point.y,
-        ScrollDelta::Pixels(point) => {
-            let pixels: f32 = point.y.into();
-            -pixels / line_height
-        }
+        ScrollDelta::Lines(point) => point.y * line_height,
+        ScrollDelta::Pixels(point) => point.y.into(),
     }
 }
 
-impl TerminalState {
-    fn scroll_viewport(&mut self, rows: f32) -> bool {
-        self.scroll_remainder += rows;
-        let whole = if self.scroll_remainder > 0.0 {
-            self.scroll_remainder.floor()
-        } else {
-            self.scroll_remainder.ceil()
-        };
-        if whole == 0.0 {
-            return false;
+/// Shell-quote dropped file paths the way a real terminal does, so the dropped
+/// text can be used as an argument. Single-quote wrap, escaping embedded quotes.
+fn quote_dropped_paths(paths: &[std::path::PathBuf]) -> String {
+    let mut out = String::new();
+    for path in paths {
+        let raw = path.to_string_lossy();
+        if !out.is_empty() {
+            out.push(' ');
         }
-        self.terminal
-            .scroll_viewport(ScrollViewport::Delta(whole as isize));
-        self.scroll_remainder -= whole;
-        self.scroll_epoch = self.scroll_epoch.wrapping_add(1);
-        true
+        if raw.is_empty() {
+            continue;
+        }
+        out.push('\'');
+        out.push_str(&raw.replace('\'', "'\\''"));
+        out.push('\'');
     }
+    if !out.is_empty() {
+        out.push(' ');
+    }
+    out
 }
 
 fn terminal_focus_handle(id: u64, cx: &mut App) -> gpui::FocusHandle {
@@ -637,8 +864,9 @@ fn color_from_hex(color: u32) -> Hsla {
 
 #[cfg(test)]
 mod tests {
-    use super::{js_named_key, scroll_delta_rows};
+    use super::{js_named_key, quote_dropped_paths, scroll_delta_pixels};
     use gpui::{ScrollDelta, point, px};
+    use std::path::PathBuf;
 
     #[test]
     fn maps_gpui_navigation_keys_to_js_names() {
@@ -657,14 +885,33 @@ mod tests {
     }
 
     #[test]
-    fn maps_scroll_wheel_delta_to_terminal_rows() {
+    fn trackpad_pixels_pass_through_wheel_lines_become_rows() {
+        // trackpad pixel deltas (with the OS momentum tail) pass straight through
+        // so scrolling is smooth, not quantized to whole rows.
         assert_eq!(
-            scroll_delta_rows(&ScrollDelta::Lines(point(0.0, -3.0)), 18.0),
-            3.0
+            scroll_delta_pixels(&ScrollDelta::Pixels(point(px(0.0), px(7.5))), 18.0),
+            7.5
+        );
+        // a wheel "line" maps to one terminal row.
+        assert_eq!(
+            scroll_delta_pixels(&ScrollDelta::Lines(point(0.0, -3.0)), 18.0),
+            -54.0
+        );
+    }
+
+    #[test]
+    fn quotes_dropped_paths_for_the_shell() {
+        assert_eq!(
+            quote_dropped_paths(&[PathBuf::from("/tmp/a b.txt")]),
+            "'/tmp/a b.txt' "
         );
         assert_eq!(
-            scroll_delta_rows(&ScrollDelta::Pixels(point(px(0.0), px(36.0))), 18.0),
-            -2.0
+            quote_dropped_paths(&[PathBuf::from("/a"), PathBuf::from("/b")]),
+            "'/a' '/b' "
+        );
+        assert_eq!(
+            quote_dropped_paths(&[PathBuf::from("/it's")]),
+            "'/it'\\''s' "
         );
     }
 
@@ -687,6 +934,7 @@ mod tests {
         state
             .rows_for_render()
             .unwrap()
+            .0
             .into_iter()
             .map(|r| r.text.trim_end().to_string())
             .collect()
@@ -716,21 +964,32 @@ mod tests {
     }
 
     #[test]
-    fn scroll_invalidates_the_row_cache() {
+    fn scrolling_up_parks_in_history_then_following_returns_to_bottom() {
         let mut state = TerminalState::new(20, 4).unwrap();
-        // fill enough lines to have scrollback to move into.
+        state.line_height = 18.0;
         for seq in 1..=40 {
             state.apply_frames(&[bytes_frame(seq, &format!("line {seq}\r\n"))]);
         }
-        let _ = row_texts(&mut state);
-        let epoch_before = state.scroll_epoch;
-        assert_eq!(state.cache.as_ref().unwrap().epoch, epoch_before);
+        // streaming output keeps us pinned to the live tail.
+        assert!(state.following());
+        let (_, translate) = state.rows_for_render().unwrap();
+        assert_eq!(translate, 0.0);
 
-        // a real scroll bumps the epoch, so the next render must rebuild.
-        assert!(state.scroll_viewport(-5.0));
-        assert_ne!(state.scroll_epoch, epoch_before);
-        let _ = row_texts(&mut state);
-        assert_eq!(state.cache.as_ref().unwrap().epoch, state.scroll_epoch);
+        // scrolling up by a few rows parks in scrollback with a sub-row offset.
+        assert!(state.scroll_pixels(45.0));
+        assert!(!state.following());
+        let (_, translate) = state.rows_for_render().unwrap();
+        assert!(
+            translate < 0.0 && translate > -18.0,
+            "translate={translate}"
+        );
+
+        // scrolling back to the bottom re-follows; new output snaps to the tail.
+        assert!(state.scroll_pixels(-1000.0));
+        assert!(state.following());
+        state.apply_frames(&[bytes_frame(41, "line 41\r\n")]);
+        assert!(state.following());
+        assert_eq!(state.scroll_px, 0.0);
     }
 
     #[test]

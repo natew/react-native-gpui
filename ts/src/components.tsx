@@ -307,6 +307,12 @@ export interface GhosttyTerminalProps extends AccessibilityProps {
     onPress?: (event: unknown) => void;
     onKeyPress?: (event: unknown) => void;
     onLayout?: (event: LayoutChangeEvent) => void;
+    // raw text produced natively (clipboard paste, dropped file paths) to write
+    // straight to the PTY.
+    onInsertText?: (text: string) => void;
+    // the grid the element measured from its own painted bounds + real font cell
+    // metrics; size the PTY to this so the terminal fits the stage exactly.
+    onMeasureViewport?: (viewport: { cols: number; rows: number }) => void;
 }
 
 export const GhosttyTerminal = forwardRef<unknown, GhosttyTerminalProps>(function GhosttyTerminal(props, ref) {

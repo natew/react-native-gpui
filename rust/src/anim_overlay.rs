@@ -45,20 +45,38 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
     if ops.is_empty() {
         return false;
     }
+    let trace = std::env::var_os("RNGPUI_OVERLAY_TRACE").is_some();
     let mut overlay = OVERLAY.lock().unwrap();
     let mut changed = false;
     for (id, style) in ops {
+        if trace {
+            eprintln!(
+                "[overlay] id={id} ops keys=[{}]",
+                style.keys().cloned().collect::<Vec<_>>().join(",")
+            );
+        }
         if style.is_empty() {
             if overlay.remove(&id).is_some() {
                 changed = true;
             }
             continue;
         }
-        match overlay.get(&id) {
-            Some(existing) if existing == &style => {}
-            _ => {
-                overlay.insert(id, style);
-                changed = true;
+        // MERGE per-key into the existing overlay — do NOT replace it. reanimated's
+        // `useAnimatedStyle` (e.g. Tamagui's dialog driver) emits the FULL animated
+        // style on the first frame (backgroundColor, borders, padding, radius, width,
+        // height, opacity, transform) but only the per-frame CHANGING keys thereafter
+        // (just `opacity`/`transform` once the spring is the only thing moving). A
+        // wholesale replace dropped backgroundColor (and the borders/padding/radius)
+        // after frame 1, so the dialog/overlay painted with no background. Merging keeps
+        // every key the node ever animated until a real Tree commit prunes it.
+        let entry = overlay.entry(id).or_default();
+        for (k, v) in style {
+            match entry.get(&k) {
+                Some(existing) if existing == &v => {}
+                _ => {
+                    entry.insert(k, v);
+                    changed = true;
+                }
             }
         }
     }
@@ -162,6 +180,38 @@ mod tests {
         retain(&present);
         assert!(has_overlay(1));
         assert!(!has_overlay(2));
+        OVERLAY.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn later_ops_merge_per_key_not_replace() {
+        // the dialog-background regression: reanimated's useAnimatedStyle emits the FULL
+        // animated style on frame 1 (backgroundColor + opacity + transform), then only the
+        // per-frame-changing keys thereafter (opacity/transform). A wholesale replace
+        // dropped backgroundColor after frame 1 → dialogs painted with no background.
+        let _serial = TEST_LOCK.lock().unwrap();
+        OVERLAY.lock().unwrap().clear();
+
+        let base_json = json!({ "width": 300.0, "height": 160.0 });
+        let base = ElementStyle::from_json(&base_json);
+
+        // frame 1: full animated style, including the background.
+        apply_ops(vec![(
+            7,
+            obj(json!({ "backgroundColor": "rgba(15,18,24,0.24)", "opacity": 0.0 })),
+        )]);
+        // frames 2..n: only the spring-driven keys.
+        apply_ops(vec![(7, obj(json!({ "opacity": 0.5 })))]);
+        apply_ops(vec![(7, obj(json!({ "opacity": 1.0 })))]);
+
+        let merged = merged_style(7, &base, &base_json).expect("overlay present");
+        // background MUST survive the later opacity-only ops.
+        assert!(
+            merged.background_color.is_some(),
+            "backgroundColor was dropped by a later opacity-only op (the dialog-bg bug)"
+        );
+        assert_eq!(merged.opacity, Some(1.0));
+
         OVERLAY.lock().unwrap().clear();
     }
 }

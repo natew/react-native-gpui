@@ -206,6 +206,13 @@ const widthsOrY = [...new Set(samples.map((s) => s.y).filter((v) => typeof v ===
 const rampOk =
   opacities.length > 3 && opacities[0] <= 0.4 && opacities[opacities.length - 1] >= 0.9
 const fastPathOk = setNodeStyle >= 10 && setNodeStyle > applyTree * 2
+// the dialog content's backgroundColor MUST be present once the animation is well under
+// way / settled — Tamagui moves bg to the animated path (committed = none), so the
+// off-thread overlay must keep painting it through the opacity-only frames. Sample the
+// LAST several frames (after frame 1's full-style op has been superseded by opacity-only
+// ops — exactly where the wholesale-replace bug dropped it).
+const lateBg = samples.slice(-8).map((s) => s.backgroundColor).filter((v) => typeof v === 'string')
+const bgPaintsOk = lateBg.length > 0
 
 console.log(
   [
@@ -215,12 +222,18 @@ console.log(
     `ySamples=${widthsOrY.length}`,
     `setNodeStyle=${setNodeStyle}`,
     `applyTree=${applyTree}`,
+    `lateBg=${lateBg[lateBg.length - 1] ?? 'none'}`,
     `ramp=${rampOk ? 'PASS' : 'FAIL'}`,
     `fastPath=${fastPathOk ? 'PASS' : 'FAIL'}`,
+    `bgPaints=${bgPaintsOk ? 'PASS' : 'FAIL'}`,
   ].join(' '),
 )
 if (!rampOk) fail(`dialog opacity did not ramp: [${opacities.join(',')}]`)
 if (!fastPathOk) fail(`fast path not proven: setNodeStyle=${setNodeStyle} applyTree=${applyTree}`)
+if (!bgPaintsOk)
+  fail(
+    `dialog content lost its backgroundColor during animation (the dialog-bg regression: the overlay dropped bg after the first full-style frame)`,
+  )
 console.log('DIALOG_REANIMATED_CONFORMANCE PASS')
 process.exit(0)
 
@@ -236,8 +249,14 @@ function readContentStyle(path) {
   if (!node) return null
   const style = node.style || {}
   // opacity is a direct style key; y/scale arrive via transform (not rendered by gpui)
-  // or as top — read what the overlay surfaces.
-  return { opacity: numOr(style.opacity), y: numOr(style.top) }
+  // or as top — read what the overlay surfaces. backgroundColor must survive the
+  // opacity-only frames (the dialog-bg regression: a wholesale overlay replace dropped
+  // it after frame 1, so the card painted with no background).
+  return {
+    opacity: numOr(style.opacity),
+    y: numOr(style.top),
+    backgroundColor: typeof style.backgroundColor === 'string' ? style.backgroundColor : undefined,
+  }
   function find(n, id) {
     if (n && typeof n === 'object') {
       if ((n.accessibility || {}).nativeID === id) return n

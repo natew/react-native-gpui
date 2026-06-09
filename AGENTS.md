@@ -90,7 +90,12 @@ and the **actual sampled pixel color** within those bounds.
 - `--session <dir>` or `RNGPUI_SESSION=<dir>` — reuse a kept driveable session for
   do-then-get workflows.
 - `close --session <dir>` — terminate the owned service and remove its session dir.
-- `--attach` — capture/describe a running window read-only (skips `agentbus-gpui-user`).
+- `--attach` — target a running rngpui window (the largest, driveable-first). This
+  **includes** the user's `agentbus-gpui-user` window — it is not skipped. `get *`
+  is read-only and safe against it (CGWindowList capture + a read-only tree dump, no
+  focus theft, no input). **Never** run `do`/`flow` with `--attach`: those inject
+  synthetic taps/keys and would drive the user's window. To drive, `--launch`/`--bundle`
+  your own offscreen instance.
 
 **Selectors:** `#42` (globalId), substring match on testID/identifier/nativeID/label/text/type,
 or `200,300` (literal window point).

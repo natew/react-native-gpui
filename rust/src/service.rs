@@ -564,13 +564,27 @@ struct ServiceApp {
     inspector: inspector::InspectorState,
     // id of the currently-focused text input, used by the debug CLI type/key driver.
     focused_input: Option<u64>,
+    // last time the RNGPUI_DUMP_TREE debug dump was written. the dump serializes the
+    // whole tree (~hundreds of KB) and writes it synchronously on the main thread; the
+    // SetNodeStyle animation path calls it every frame, so at 60Hz with gui-debug on it
+    // became a per-frame whole-tree-walk + serialize + blocking disk write that taxed the
+    // main thread (and made app-switch feel sluggish). throttle it — a debug dump a few
+    // times a second is plenty for inspection.
+    last_debug_dump: Option<std::time::Instant>,
 }
 
 impl ServiceApp {
-    fn write_debug_dump(&self) {
+    fn write_debug_dump(&mut self) {
         let Some(path) = self.dump_tree_path.as_ref() else {
             return;
         };
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_debug_dump {
+            if now.duration_since(last) < Duration::from_millis(150) {
+                return;
+            }
+        }
+        self.last_debug_dump = Some(now);
         let tree = dump::dump_tree(&self.root);
         if let Ok(json) = serde_json::to_string_pretty(&tree) {
             let _ = std::fs::write(path, json);
@@ -1733,6 +1747,7 @@ fn main() {
             webviews: HashMap::new(),
             inspector: inspector::InspectorState::from_env(),
             focused_input: None,
+            last_debug_dump: None,
         });
 
         let options = WindowOptions {

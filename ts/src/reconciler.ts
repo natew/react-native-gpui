@@ -60,8 +60,6 @@ export interface Container {
 
 let commit: ((tree: SerializedNode) => void) | null = null;
 let currentContainer: Container | null = null;
-const hoveredIds = new Set<number>();
-const pressedIds = new Set<number>();
 const measuredIds = new Set<number>();
 const layouts = new Map<number, LayoutRect>();
 const instances = new Map<number, Instance>();
@@ -164,6 +162,8 @@ const PROP_TO_EVENT: Record<string, string> = {
     onScroll: "scroll",
     onMessage: "message",
     onLoad: "load",
+    onInsertText: "terminalText",
+    onMeasureViewport: "terminalViewport",
 };
 const handlers = new Map<number, Record<string, Function>>();
 
@@ -176,17 +176,10 @@ function chainHandler(first: Function | undefined, next: Function) {
         : next;
 }
 
-function setPseudoState(set: Set<number>, id: number, active: boolean) {
-    const changed = active ? !set.has(id) : set.has(id);
-    if (!changed) return;
-    if (active) set.add(id);
-    else set.delete(id);
-    // hover/press changes this node's serialized style — invalidate just it.
-    markSerializeDirtyById(id);
-    requestPseudoCommit();
-}
-
-function requestPseudoCommit() {
+// force a re-commit (re-serialize the dirty container) outside React's render — used when a
+// native signal changes a node's serialized output (e.g. a measured layout grants the
+// 'layout' event). hover/press no longer take this path; they're resolved natively in the host.
+function requestRecommit() {
     if (commit && currentContainer) commit(serializeContainer(currentContainer));
 }
 
@@ -198,20 +191,9 @@ function registerHandlers(id: number, props: Record<string, unknown>) {
             map[event] = chainHandler(map[event], next);
         }
     }
-    if (props.hoverStyle) {
-        map.mouseEnter = chainHandler(map.mouseEnter, () => setPseudoState(hoveredIds, id, true));
-        map.mouseLeave = chainHandler(map.mouseLeave, () => setPseudoState(hoveredIds, id, false));
-    } else {
-        hoveredIds.delete(id);
-    }
-    if (props.pressStyle) {
-        map.pressIn = chainHandler(map.pressIn, () => setPseudoState(pressedIds, id, true));
-        map.pressOut = chainHandler(map.pressOut, () => setPseudoState(pressedIds, id, false));
-        map.responderTerminate = chainHandler(map.responderTerminate, () => setPseudoState(pressedIds, id, false));
-        map.mouseLeave = chainHandler(map.mouseLeave, () => setPseudoState(pressedIds, id, false));
-    } else {
-        pressedIds.delete(id);
-    }
+    // hoverStyle/pressStyle are resolved natively in the host (see serialize) — they wire NO
+    // JS event handlers here. Only the user's own onHoverIn/onPressIn/etc. (mapped above via
+    // PROP_TO_EVENT) produce listeners.
     if (Object.keys(map).length) handlers.set(id, map);
     else handlers.delete(id);
 }
@@ -235,6 +217,8 @@ export function dispatchEvent(
         scrollX?: number;
         scrollY?: number;
         layout?: unknown;
+        cols?: number;
+        rows?: number;
     },
 ) {
     if (event === "layout" && payload.layout && typeof payload.layout === "object") {
@@ -258,6 +242,9 @@ export function dispatchEvent(
     else if (event === "layout") result = fn({ nativeEvent: { layout: payload.layout } });
     else if (event === "keyPress") result = fn(createKeyPressEvent(payload));
     else if (event === "submit") result = fn(createSubmitEvent(payload.value ?? ""));
+    else if (event === "terminalText") result = fn(payload.value ?? "");
+    else if (event === "terminalViewport")
+        result = fn({ cols: payload.cols ?? 0, rows: payload.rows ?? 0 });
     else result = fn(createEvent(event, payload));
 
     if (result && typeof (result as Promise<unknown>).catch === "function") {
@@ -277,9 +264,9 @@ function requestMeasuredLayout(id: number): boolean {
         measuredIds.add(id);
         // gaining a 'layout' event changes this node's serialized `events`.
         markSerializeDirtyById(id);
-        requestPseudoCommit();
+        requestRecommit();
     } else if (!hasLayout) {
-        requestPseudoCommit();
+        requestRecommit();
     }
     return hasLayout;
 }
@@ -436,8 +423,6 @@ function cleanupInstance(node: Instance | TextInstance) {
     node.parent = null;
     node.cached = undefined;
     handlers.delete(node.id);
-    hoveredIds.delete(node.id);
-    pressedIds.delete(node.id);
     measuredIds.delete(node.id);
     layouts.delete(node.id);
     instances.delete(node.id);
@@ -867,16 +852,18 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
         const g = listGroup ?? "(none)";
         serMissByGroup[g] = (serMissByGroup[g] ?? 0) + 1;
     }
-    const baseStyle = (normalizePropsStyle(props) ?? {}) as Record<string, unknown>;
-    const hoverStyle =
-        props.hoverStyle && hoveredIds.has(inst.id)
-            ? ((normalizeStyle(props.hoverStyle as never) ?? {}) as Record<string, unknown>)
-            : undefined;
-    const pressStyle =
-        props.pressStyle && pressedIds.has(inst.id)
-            ? ((normalizeStyle(props.pressStyle as never) ?? {}) as Record<string, unknown>)
-            : undefined;
-    const style = { ...baseStyle, ...hoverStyle, ...pressStyle };
+    const style = (normalizePropsStyle(props) ?? {}) as Record<string, unknown>;
+    // hover/press are NOT merged into `style` here — they're emitted as separate deltas and
+    // resolved natively in the gpui host (the host reads its own hitbox hover/press state and
+    // merges the delta at paint). That keeps a hover off the JS thread entirely: no
+    // mouseEnter→setPseudoState→re-serialize→applyTree round-trip per row, which is what kept
+    // rapid sidebar hovering from holding 120fps.
+    const hoverStyle = props.hoverStyle
+        ? ((normalizeStyle(props.hoverStyle as never) ?? {}) as Record<string, unknown>)
+        : undefined;
+    const pressStyle = props.pressStyle
+        ? ((normalizeStyle(props.pressStyle as never) ?? {}) as Record<string, unknown>)
+        : undefined;
     const node: SerializedNode = { globalId: inst.id, type: "div" };
 
     switch (inst.type) {
@@ -952,6 +939,8 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
     }
 
     if (Object.keys(style).length) node.style = style;
+    if (hoverStyle && Object.keys(hoverStyle).length) node.hoverStyle = hoverStyle;
+    if (pressStyle && Object.keys(pressStyle).length) node.pressStyle = pressStyle;
     const nativeLayoutKey = stringProp(props, "nativeLayoutKey");
     if (nativeLayoutKey) node.nativeLayoutKey = nativeLayoutKey;
     const nativeResize = normalizeNativeResize(props.nativeResize);
@@ -963,6 +952,10 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
     if (eventNames.length) node.events = eventNames;
     const accessibility = serializeAccessibility(inst, node);
     if (accessibility) node.accessibility = accessibility;
+    // authored JSX source location stamped by the babel source-location plugin
+    // (data-rngs="<abs-path>:<line>:<col>"); the native inspector reads it for open-in-editor.
+    const source = stringProp(props, "data-rngs");
+    if (source) node.source = source;
 
     if (node.type === "div" || node.type === "svg" /* svg has no children but harmless */) {
         const kids = serializeChildren(inst.children, context, listGroup);

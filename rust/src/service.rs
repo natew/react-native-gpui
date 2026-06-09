@@ -44,6 +44,7 @@ mod icons;
 mod inspector;
 #[cfg(target_os = "macos")]
 mod liquid_glass;
+mod pseudo_style;
 mod style;
 
 use elements::webview::WebViewContent;
@@ -107,6 +108,16 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         .get("globalId")
         .and_then(|v| v.as_u64())
         .unwrap_or_else(next_id);
+    // stamp this node's authored JSX source into the inspector side-table — set at bundle
+    // time by the babel source-location plugin and carried through the reconciler as
+    // `source`. Kept off ReactElement so it doesn't touch the shared struct.
+    if let Some(source) = obj
+        .get("source")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        crate::inspector::remember_source(global_id, source);
+    }
     // `text` is overloaded by node type: text content, input placeholder, svg icon
     // name, or webview html — whichever the serializer set.
     let text = obj
@@ -192,6 +203,32 @@ fn parse_json_tree(value: &serde_json::Value) -> Option<Arc<ReactElement>> {
         .as_ref()
         .map(ElementStyle::from_json)
         .unwrap_or_default();
+    // native pseudo styles: the reconciler emits hoverStyle/pressStyle as separate DELTAS (never
+    // merged into `style`). Merge each over this node's own committed style json and build the
+    // resulting gpui::Style through the SAME path as the base style (identical color / shorthand /
+    // border-box handling), then stash it in the `pseudo_style` side-table (mirrors anim_overlay).
+    // `div` paint swaps it in when the node's hitbox reports hover/press — zero JS round-trip, no
+    // relayout. Built once per commit; pruned by `pseudo_style::retain` when the node leaves.
+    let build_pseudo = |key: &str| -> Option<gpui::Style> {
+        let delta = obj.get(key)?.as_object()?;
+        if delta.is_empty() {
+            return None;
+        }
+        let mut merged = style_json
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        for (k, v) in delta {
+            merged.insert(k.clone(), v.clone());
+        }
+        Some(ElementStyle::from_json(&serde_json::Value::Object(merged)).build_gpui_style(None))
+    };
+    let hover_style = build_pseudo("hoverStyle");
+    let press_style = build_pseudo("pressStyle");
+    if hover_style.is_some() || press_style.is_some() {
+        crate::pseudo_style::set(global_id, hover_style, press_style);
+    }
     let children: Vec<Arc<ReactElement>> = obj
         .get("children")
         .and_then(|v| v.as_array())
@@ -1041,7 +1078,9 @@ impl Render for ServiceApp {
                 }))
                 .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     let root = this.root.clone();
-                    if this.inspector.handle_mouse_down(&root, event, cx) {
+                    let size = window.viewport_size();
+                    let viewport = (size.width.into(), size.height.into());
+                    if this.inspector.handle_mouse_down(&root, event, viewport, cx) {
                         cx.stop_propagation();
                         cx.notify();
                         window.refresh();
@@ -1277,6 +1316,9 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
             _ => None,
         };
     }
+    // a full tree arrives here once per React commit; reset the source side-table so it
+    // holds only this commit's nodes (globalIds are reused across commits).
+    crate::inspector::clear_sources();
     parse_json_tree(v).map(Incoming::Tree)
 }
 
@@ -1955,6 +1997,7 @@ fn main() {
                                 collect_node_ids(&next_root, &mut node_ids);
                                 bridge::retain_layout(&node_ids);
                                 crate::anim_overlay::retain(&node_ids);
+                                crate::pseudo_style::retain(&node_ids);
                                 let mut native_layout_keys = HashSet::new();
                                 collect_native_layout_keys(&next_root, &mut native_layout_keys);
                                 elements::retain_native_layout_keys(&native_layout_keys);

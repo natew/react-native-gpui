@@ -13,6 +13,15 @@ export type SerializedNode = {
     globalId: number;
     type: string;
     style?: Record<string, unknown>;
+    /**
+     * pseudo-state style DELTAS applied NATIVELY in the gpui host (zero JS round-trip).
+     * The host claims a hitbox, reads its own hover/press state every frame, and paints
+     * the committed `style` merged with `hoverStyle`/`pressStyle` accordingly — so rapidly
+     * hovering many rows never re-enters React/serialize. Paint-only by contract (bg, color,
+     * border, opacity, shadow); a layout key here won't reflow.
+     */
+    hoverStyle?: Record<string, unknown>;
+    pressStyle?: Record<string, unknown>;
     accessibility?: SerializedAccessibility;
     text?: string;
     numberOfLines?: number;

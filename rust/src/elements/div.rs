@@ -85,6 +85,13 @@ struct DragReleaseTarget {
 static SCROLL: Lazy<Mutex<HashMap<u64, ScrollOffset>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static SCROLL_TO_END: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+// ids currently hovered/pressed for the sake of NATIVE pseudo styles (hoverStyle/pressStyle).
+// Separate from HOVER (which is maintained only for nodes with JS mouse listeners): a node may
+// carry a hoverStyle and have zero JS listeners. The paint pass reads the hitbox directly for
+// the style; these sets exist so the move/down/up listeners can detect a transition and ask for
+// a single on-demand repaint (we don't render continuously).
+static PSEUDO_HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static PRESSED: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static ACTIVE_MOUSE_TARGET: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
 static CAPTURED_MOUSE_UP_TARGET: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
 static ACTIVE_PRESS_DRAG: Lazy<Mutex<Option<ActivePressDrag>>> = Lazy::new(|| Mutex::new(None));
@@ -1337,6 +1344,9 @@ impl Element for ReactDivElement {
         // insert_hitbox must run in prepaint (gpui asserts the phase); mouse
         // listeners are wired in paint and query the hitbox's current hover state.
         let interactive = self.element.native_resize.is_some()
+            // a node with a native hover/press style needs a hitbox even with no JS listeners,
+            // so the paint pass can read its hover/press state and apply the pseudo style.
+            || crate::pseudo_style::has(self.element.global_id)
             || [
                 "click",
                 "mouseDown",
@@ -1463,6 +1473,28 @@ impl Element for ReactDivElement {
         }
 
         let mut style = self.element.build_gpui_style(None);
+        // native hover/press: when this node carries a pseudo style (see `crate::pseudo_style`) and
+        // its own hitbox reports hover (and, for press, a held left button), paint the precomputed
+        // pseudo variant. This is the whole point — a hover bg change repaints here on the host
+        // thread with ZERO JS round-trip and no relayout, so rapidly hovering rows holds frame
+        // rate. Skipped while a reanimated overlay is live for this node (that path owns the style
+        // for the frame).
+        if !crate::anim_overlay::has_overlay(self.element.global_id)
+            && let Some(pseudo) = crate::pseudo_style::get(self.element.global_id)
+            && let Some(hitbox) = prepaint.hitbox.as_ref()
+            && hitbox.is_hovered(window)
+        {
+            let pressed =
+                pseudo.press.is_some() && PRESSED.lock().unwrap().contains(&self.element.global_id);
+            let variant = if pressed {
+                pseudo.press
+            } else {
+                pseudo.hover.or(pseudo.press)
+            };
+            if let Some(variant) = variant {
+                style = variant;
+            }
+        }
         apply_rounded_overflow_clips_to_style(&mut style, bounds, window.rem_size());
         let (clip, scroll) = overflow_mode(&self.element.style);
 
@@ -1988,6 +2020,70 @@ impl Element for ReactDivElement {
                     });
                 }
             }
+        }
+
+        // native hover/press repaint: a pseudo node may have NO JS listeners, so the block above
+        // never runs for it. Wire the minimal mouse tracking that flips its hover/press state and
+        // asks for ONE on-demand repaint per transition (we render on demand, not continuously).
+        // The pseudo STYLE itself is resolved in paint straight from the hitbox; these listeners
+        // exist only to schedule the repaint that lets that resolution run.
+        if let Some(pseudo) = crate::pseudo_style::get(self.element.global_id)
+            && let Some(hitbox) = prepaint.hitbox.clone()
+        {
+            let id = self.element.global_id;
+            let has_press = pseudo.press.is_some();
+            let move_hitbox = hitbox.clone();
+            window.on_mouse_event(move |_ev: &MouseMoveEvent, phase, window, _cx| {
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                let inside = move_hitbox.is_hovered(window);
+                let mut hover = PSEUDO_HOVER.lock().unwrap();
+                if inside == hover.contains(&id) {
+                    return;
+                }
+                if inside {
+                    hover.insert(id);
+                } else {
+                    hover.remove(&id);
+                }
+                drop(hover);
+                // leaving the element also cancels an in-flight press on it.
+                if !inside {
+                    PRESSED.lock().unwrap().remove(&id);
+                }
+                window.refresh();
+            });
+            if has_press {
+                let down_hitbox = hitbox.clone();
+                window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, _cx| {
+                    if phase == DispatchPhase::Bubble
+                        && ev.button == MouseButton::Left
+                        && down_hitbox.is_hovered(window)
+                        && PRESSED.lock().unwrap().insert(id)
+                    {
+                        window.refresh();
+                    }
+                });
+                window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, _cx| {
+                    if phase == DispatchPhase::Bubble
+                        && ev.button == MouseButton::Left
+                        && PRESSED.lock().unwrap().remove(&id)
+                    {
+                        window.refresh();
+                    }
+                });
+            }
+            window.on_mouse_event(move |_ev: &MouseExitEvent, phase, window, _cx| {
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                let left_hover = PSEUDO_HOVER.lock().unwrap().remove(&id);
+                let left_press = PRESSED.lock().unwrap().remove(&id);
+                if left_hover || left_press {
+                    window.refresh();
+                }
+            });
         }
 
         if let Some(key) = self.element.native_layout_key.as_deref() {

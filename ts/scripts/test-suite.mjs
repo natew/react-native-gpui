@@ -16,6 +16,8 @@ const tasks = [
     { name: "typecheck", command: "npm", args: ["run", "typecheck"], cwd: root, timeoutMs: 20_000 },
     { name: "animated-driver", command: "bun", args: ["run", "scripts/animated-driver-unit.mjs"], cwd: root, timeoutMs: 10_000 },
     { name: "wire-delta", command: "bun", args: ["run", "scripts/wire-delta-unit.mjs"], cwd: root, timeoutMs: 10_000 },
+    { name: "appearance-serialize", command: "bun", args: ["run", "scripts/appearance-serialize-unit.tsx"], cwd: root, timeoutMs: 15_000 },
+    { name: "text-baseline", command: "bun", args: ["run", "scripts/text-baseline-conformance.mjs"], cwd: root, timeoutMs: 60_000 },
     { name: "cargo-test", command: "cargo", args: ["test"], cwd: `${repo}/rust`, timeoutMs: 25_000 },
     { name: "appearance", command: "bun", args: ["run", "scripts/appearance-conformance.ts"], cwd: root, timeoutMs: 10_000 },
     { name: "file-picker", command: "bun", args: ["run", "scripts/file-picker-conformance.ts"], cwd: root },

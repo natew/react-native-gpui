@@ -243,6 +243,33 @@ extern "C" fn host_exit(_ud: *mut c_void, arg: *const c_char) {
 }
 
 extern "C" fn host_reload_app(_ud: *mut c_void, _arg: *const c_char) {
+    // dev rebuild-on-reload: the launcher can set RNGPUI_RELOAD_CMD (e.g. a
+    // one-shot Hermes bundle build) so a reload picks up source edits without a
+    // separate watcher. runs synchronously — the exec below reads the bundle
+    // from disk, so it must complete first. a failed rebuild aborts the reload:
+    // re-exec'ing stale bytecode would silently mask the build error.
+    if let Ok(cmd) = std::env::var("RNGPUI_RELOAD_CMD")
+        && !cmd.trim().is_empty()
+    {
+        eprintln!("[hermes] reload: running RNGPUI_RELOAD_CMD: {cmd}");
+        match std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&cmd)
+            .status()
+        {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                eprintln!(
+                    "[hermes] reload aborted: RNGPUI_RELOAD_CMD exited with {status}; keeping the running bundle"
+                );
+                return;
+            }
+            Err(error) => {
+                eprintln!("[hermes] reload aborted: RNGPUI_RELOAD_CMD failed to spawn: {error}");
+                return;
+            }
+        }
+    }
     let exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(error) => {

@@ -1614,7 +1614,40 @@ fn spawn_parent_exit_watchdog() {
     });
 }
 
+// Redirect this process's stdout+stderr (append) to RNGPUI_LOG_PATH. When the app is
+// launched directly as the bundle's CFBundleExecutable (no shell wrapper), LaunchServices
+// gives it no stdout terminal, so the wrapper's `exec rngpui-service >> log 2>&1` is gone —
+// the service redirects its own fds instead. A wrapper that exec's into this binary splits
+// the LaunchServices identity (declared executable vs running image) and stalls Cmd+Tab
+// activation ~2s; running the real binary as CFBundleExecutable is the fix (see open-gpui.mjs).
+fn redirect_stdio_to_log() {
+    let Ok(path) = std::env::var("RNGPUI_LOG_PATH") else {
+        return;
+    };
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    use std::os::unix::io::AsRawFd;
+    let fd = file.as_raw_fd();
+    unsafe {
+        libc::dup2(fd, libc::STDOUT_FILENO);
+        libc::dup2(fd, libc::STDERR_FILENO);
+    }
+    // stdout/stderr now alias this fd; keep it open for the process lifetime.
+    std::mem::forget(file);
+}
+
 fn main() {
+    // launched as CFBundleExecutable, LaunchServices gives cwd `/`; RNGPUI_CWD restores the
+    // working dir the wrapper used to `cd` into (the gui root, for the Cmd+R reload build).
+    if let Ok(dir) = std::env::var("RNGPUI_CWD") {
+        let _ = std::env::set_current_dir(&dir);
+    }
+    redirect_stdio_to_log();
     let _ = STARTUP.set(std::time::Instant::now());
     spawn_parent_exit_watchdog();
     if let Ok(path) = std::env::var("RNGPUI_SERVICE_PID_FILE") {

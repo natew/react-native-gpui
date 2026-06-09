@@ -5421,6 +5421,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "lb-wry",
+ "libc",
  "libghostty-vt",
  "objc",
  "once_cell",

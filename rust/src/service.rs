@@ -734,6 +734,7 @@ impl Render for ServiceApp {
             );
         }
         if self.root_dirty || render_gate_disabled() {
+            let lifecycle_t0 = std::time::Instant::now();
             // Ensure a persistent InputState entity exists for every text-input node,
             // subscribing once so edits stream back to JS as `changeText`, and observing
             // it so this view re-renders (and the edit shows) when the input changes.
@@ -963,6 +964,12 @@ impl Render for ServiceApp {
             #[cfg(target_os = "macos")]
             ax::sync_tree(window, &self.root);
             self.write_debug_dump();
+            if std::env::var_os("RNGPUI_RENDER_TRACE").is_some() {
+                eprintln!(
+                    "[render] lifecycle took {:.2}ms",
+                    lifecycle_t0.elapsed().as_secs_f64() * 1000.0
+                );
+            }
             self.root_dirty = false;
         } // end tree-lifecycle (root_dirty) gate
 

@@ -95,6 +95,12 @@ impl ReactGhosttyTerminalElement {
             .bg(background)
             .p(px(PAD))
             .track_focus(&focus_handle)
+            // give the focused terminal a "Terminal" key context (parallel to gpui-component's
+            // "Input" on text fields). App-level bare-key bindings (enter/tab/arrows) scope
+            // themselves `!Input && !Terminal` so they never intercept a key the terminal owns
+            // and forwards to the PTY — otherwise a bare `enter` binding (focus.activate) eats
+            // the terminal's submit while every unbound key still types through.
+            .key_context("Terminal")
             .on_mouse_down(
                 MouseButton::Left,
                 move |_: &MouseDownEvent, window: &mut Window, _: &mut App| {

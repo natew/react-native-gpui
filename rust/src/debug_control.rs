@@ -163,6 +163,14 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
                 .to_string(),
             reply,
         }),
+        "realKey" => Ok(Incoming::DebugRealKey {
+            key: value
+                .get("key")
+                .and_then(Value::as_str)
+                .ok_or("realKey command needs key")?
+                .to_string(),
+            reply,
+        }),
         _ => Err("unknown debug command"),
     }
 }

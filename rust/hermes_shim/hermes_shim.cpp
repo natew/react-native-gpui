@@ -6,7 +6,10 @@
 #include <hermes/hermes.h>
 #include <jsi/jsi.h>
 
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <string>
@@ -16,6 +19,21 @@ namespace jsi = facebook::jsi;
 namespace {
 struct Box {
   std::unique_ptr<facebook::hermes::HermesRuntime> rt;
+};
+
+// A jsi::MutableBuffer that points at an externally-owned, process-lifetime region. It is
+// intentionally non-owning: the destructor frees nothing, so the same raw pointer can back
+// ArrayBuffers in any number of runtimes (and the Rust/C side keeps writing to it). The
+// region is allocated by rng_hermes_shared_buffer_create and never freed.
+class SharedMutableBuffer : public jsi::MutableBuffer {
+ public:
+  SharedMutableBuffer(uint8_t* data, size_t len) : data_(data), len_(len) {}
+  size_t size() const override { return len_; }
+  uint8_t* data() override { return data_; }
+
+ private:
+  uint8_t* data_;
+  size_t len_;
 };
 
 void set_err(char* errbuf, size_t cap, const char* msg) {
@@ -119,6 +137,26 @@ void rng_hermes_drain_microtasks(void* h) {
     box->rt->drainMicrotasks();
   } catch (...) {
   }
+}
+
+void* rng_hermes_shared_buffer_create(size_t len) {
+  // 8-byte aligned so JS Float64 slots are aligned (tear-free aligned loads/stores on
+  // arm64). Zero-initialized. Never freed — process-lifetime per the contract above.
+  void* p = nullptr;
+  if (posix_memalign(&p, 8, len ? len : 8) != 0 || !p) return nullptr;
+  std::memset(p, 0, len ? len : 8);
+  return p;
+}
+
+void rng_hermes_install_shared_buffer(void* h, const char* name, void* buffer, size_t len) {
+  auto* box = static_cast<Box*>(h);
+  auto& rt = *box->rt;
+  // Non-owning MutableBuffer over the shared region; Hermes' createArrayBuffer takes a
+  // shared_ptr<MutableBuffer> and uses its data() pointer directly (no copy), giving a real
+  // JS ArrayBuffer whose backing store IS this memory.
+  auto mb = std::make_shared<SharedMutableBuffer>(static_cast<uint8_t*>(buffer), len);
+  jsi::ArrayBuffer ab(rt, std::move(mb));
+  rt.global().setProperty(rt, std::string(name).c_str(), ab);
 }
 
 }  // extern "C"

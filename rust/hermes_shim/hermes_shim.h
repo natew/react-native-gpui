@@ -33,6 +33,19 @@ int rng_hermes_call1(void* rt, const char* name, const char* arg, char* errbuf, 
 // Run the JS microtask queue (Promises). Call after each task batch.
 void rng_hermes_drain_microtasks(void* rt);
 
+// Allocate a process-lifetime shared byte buffer (zero-initialized, 8-byte aligned).
+// Returns an opaque pointer to the region. Never freed (lives for the process lifetime);
+// the same pointer is handed to rng_hermes_install_shared_buffer for one or more runtimes.
+void* rng_hermes_shared_buffer_create(size_t len);
+
+// Expose `buffer` (created above) to runtime `rt` as global `name` — a JS ArrayBuffer
+// whose backing store IS that memory (no copy). Installable into multiple runtimes; each
+// gets its own ArrayBuffer object over the same bytes. Cross-runtime/cross-thread
+// visibility relies on aligned 8-byte loads/stores (tear-free on arm64) plus the host's
+// existing cross-thread message passing for ordering — the same contract
+// SharedArrayBuffer + postMessage gives the web pattern this ports.
+void rng_hermes_install_shared_buffer(void* rt, const char* name, void* buffer, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

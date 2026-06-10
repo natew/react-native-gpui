@@ -47,6 +47,7 @@
         "prebuild:reanimated": "bun run scripts/prebuild-reanimated.mjs",
         "conformance:webview:render": "bun run scripts/webview-render-conformance.mjs",
         "conformance:webview:overlay": "bun run scripts/webview-overlay-conformance.mjs",
+        "conformance:card-corner-shadow": "bun run scripts/card-corner-shadow-conformance.mjs",
         "conformance:diagnostics": "node scripts/diagnostics-conformance.mjs",
         "conformance:file-picker": "bun run scripts/file-picker-conformance.ts",
         "conformance:display-none": "bun run scripts/display-none-conformance.ts",

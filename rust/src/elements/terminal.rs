@@ -87,12 +87,32 @@ impl ReactGhosttyTerminalElement {
             .clone()
             .unwrap_or_else(|| "__terminal__".to_string());
 
-        let root = div()
+        // the element's resolved corner radii. The outer `style.paint` (in this
+        // element's `paint`) already paints a rounded background + drop shadow from
+        // `corner_radii`, but this inner root paints its OWN `size_full` background
+        // that would square those corners back off — so it must round to the SAME
+        // radii. That also turns its `overflow_hidden` into a rounded clip, so the
+        // grid text never paints past the rounded edge.
+        let (r_tl, r_tr, r_bl, r_br) = terminal_corner_radii(style);
+        let mut root = div()
             .size_full()
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(background)
+            .bg(background);
+        if r_tl > 0.0 {
+            root = root.rounded_tl(px(r_tl));
+        }
+        if r_tr > 0.0 {
+            root = root.rounded_tr(px(r_tr));
+        }
+        if r_bl > 0.0 {
+            root = root.rounded_bl(px(r_bl));
+        }
+        if r_br > 0.0 {
+            root = root.rounded_br(px(r_br));
+        }
+        let root = root
             .p(px(PAD))
             .track_focus(&focus_handle)
             // give the focused terminal a "Terminal" key context (parallel to gpui-component's
@@ -809,6 +829,28 @@ fn quote_dropped_paths(paths: &[std::path::PathBuf]) -> String {
         out.push(' ');
     }
     out
+}
+
+/// Resolve the four corner radii (top-left, top-right, bottom-left, bottom-right)
+/// from the element style: per-corner overrides fall back to the `borderRadius`
+/// shorthand, else 0. Mirrors the webview's `webview_corner_clip` so the terminal
+/// rounds to the same radius the stage card uses.
+fn terminal_corner_radii(style: &crate::style::ElementStyle) -> (f32, f32, f32, f32) {
+    let r = style.border_radius;
+    (
+        style.border_top_left_radius.or(r).unwrap_or(0.0).max(0.0),
+        style.border_top_right_radius.or(r).unwrap_or(0.0).max(0.0),
+        style
+            .border_bottom_left_radius
+            .or(r)
+            .unwrap_or(0.0)
+            .max(0.0),
+        style
+            .border_bottom_right_radius
+            .or(r)
+            .unwrap_or(0.0)
+            .max(0.0),
+    )
 }
 
 fn terminal_focus_handle(id: u64, cx: &mut App) -> gpui::FocusHandle {

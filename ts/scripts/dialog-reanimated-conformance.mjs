@@ -181,10 +181,12 @@ child.stdout?.on('data', (c) => (output += c.toString()))
 child.stderr?.on('data', (c) => (output += c.toString()))
 
 const samples = []
+const exitSamples = []
+let exitUnmounted = false
 try {
   await waitFor(() => output.includes('CONFORMANCE dialog OPENING'), 7000, 'OPENING')
   const deadline = Date.now() + 2200
-  while (Date.now() < deadline && !output.includes('CONFORMANCE dialog PASS')) {
+  while (Date.now() < deadline && !output.includes('CONFORMANCE dialog CLOSING')) {
     const s = readContentStyle(dumpPath)
     if (s) samples.push(s)
     // 8ms: the enter animation ticks at the display rate (120Hz on ProMotion since
@@ -192,7 +194,19 @@ try {
     // first-sample <= 0.4 assertion.
     await sleep(8)
   }
+  // exit window: AnimatePresence must keep the content mounted while the exit
+  // spring ramps opacity back down; the content unmounting with no descending
+  // samples is the dialog-exit-snap regression.
+  await waitFor(() => output.includes('CONFORMANCE dialog CLOSING'), 4000, 'CLOSING')
+  const exitDeadline = Date.now() + 2200
+  while (Date.now() < exitDeadline && !output.includes('CONFORMANCE dialog PASS')) {
+    const s = readContentStyle(dumpPath)
+    if (s) exitSamples.push(s)
+    else if (exitSamples.length) exitUnmounted = true
+    await sleep(8)
+  }
   await waitFor(() => output.includes('CONFORMANCE dialog PASS'), 4000, 'PASS')
+  if (!exitUnmounted && !readContentStyle(dumpPath)) exitUnmounted = true
 } catch (e) {
   stop()
   fail(`${e instanceof Error ? e.message : String(e)}\n--- output (tail) ---\n${output.split('\n').slice(-40).join('\n')}`)
@@ -223,6 +237,24 @@ const fastPathOk = setNodeStyle >= 10 && setNodeStyle > applyTree * 2
 const lateBg = samples.slice(-8).map((s) => s.backgroundColor).filter((v) => typeof v === 'string')
 const bgPaintsOk = lateBg.length > 0
 
+// exit: distinct DESCENDING opacities sampled while the content is still mounted.
+// a snap shows 0-2 distinct values (settled 1.0, maybe one mid frame) before the
+// node vanishes; a real exit spring shows a multi-frame ramp from ~1 toward 0,
+// and the content must actually unmount once the exit completes.
+const exitOpacities = [
+  ...new Set(
+    exitSamples
+      .map((s) => s.opacity)
+      .filter((v) => typeof v === 'number')
+      .map((v) => Math.round(v * 100) / 100),
+  ),
+].sort((a, b) => b - a)
+const exitRampOk =
+  exitOpacities.length > 3 &&
+  exitOpacities[0] >= 0.9 &&
+  exitOpacities[exitOpacities.length - 1] <= 0.6
+const exitUnmountOk = exitUnmounted
+
 console.log(
   [
     'DIALOG_REANIMATED_CONFORMANCE',
@@ -232,9 +264,12 @@ console.log(
     `setNodeStyle=${setNodeStyle}`,
     `applyTree=${applyTree}`,
     `lateBg=${lateBg[lateBg.length - 1] ?? 'none'}`,
+    `exitOpacities=[${exitOpacities.join(',')}]`,
     `ramp=${rampOk ? 'PASS' : 'FAIL'}`,
     `fastPath=${fastPathOk ? 'PASS' : 'FAIL'}`,
     `bgPaints=${bgPaintsOk ? 'PASS' : 'FAIL'}`,
+    `exitRamp=${exitRampOk ? 'PASS' : 'FAIL'}`,
+    `exitUnmount=${exitUnmountOk ? 'PASS' : 'FAIL'}`,
   ].join(' '),
 )
 if (!rampOk) fail(`dialog opacity did not ramp: [${opacities.join(',')}]`)
@@ -243,6 +278,11 @@ if (!bgPaintsOk)
   fail(
     `dialog content lost its backgroundColor during animation (the dialog-bg regression: the overlay dropped bg after the first full-style frame)`,
   )
+if (!exitRampOk)
+  fail(
+    `dialog exit did not ramp (snap): exit opacities [${exitOpacities.join(',')}] — the driver never re-fed the exit-style target`,
+  )
+if (!exitUnmountOk) fail('dialog content never unmounted after exit completed')
 console.log('DIALOG_REANIMATED_CONFORMANCE PASS')
 process.exit(0)
 

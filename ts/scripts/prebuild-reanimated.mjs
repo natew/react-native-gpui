@@ -277,6 +277,13 @@ if (tamaguiAnimReanimated) {
       'react-native-reanimated',
       '@tamagui/core',
       '@tamagui/web',
+      // MUST stay external: it holds the PresenceContext singleton. inlining it
+      // gave the driver chunk a PRIVATE copy of that React context while
+      // Dialog/AnimatePresence (app-bundled) provided presence on the app's copy
+      // — `animationDriver.usePresence()` always read null, no child registered
+      // with PresenceChild, AnimatePresence completed exits in the same tick,
+      // and every dialog exit snapped instead of animating.
+      '@tamagui/use-presence',
       'tamagui',
     ],
   )

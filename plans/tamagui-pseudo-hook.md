@@ -26,9 +26,12 @@ both laggier than the hitbox and the reason fast sweeps skip rows.
 2. **rngpui pseudo registry.** A JS registry maps globalId → listener.
    Components register on mount (the reconciler Instance's `.id` IS the
    globalId).
-3. **Tamagui core hook.** `@tamagui/core` gains a renderer pseudo-driver
-   registration (shape TBD, roughly: `setRendererPseudoDriver({ subscribe(host
-   instance, listener) => dispose })`). When a driver is present:
+3. **Tamagui core hook.** `@tamagui/core` gains ONE extension point for
+   renderer platforms (user direction: a single `setupPlatformDriver(driver)`
+   so more capabilities slot in over time — pseudo states now; later candidates:
+   measure, focus, scroll). First capability:
+   `driver.pseudo: { subscribe(hostInstance, listener) => dispose }`.
+   When a platform driver with `pseudo` is present:
    - createComponent skips wiring its own hover (and optionally press) event
      handlers entirely;
    - the avoidReRenders gate opens for ANY component with pseudo styles (no

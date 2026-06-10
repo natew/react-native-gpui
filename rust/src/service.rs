@@ -644,16 +644,36 @@ struct ServiceApp {
     // main thread (and made app-switch feel sluggish). throttle it — a debug dump a few
     // times a second is plenty for inspection.
     last_debug_dump: Option<std::time::Instant>,
+    // a throttled dump has a trailing-edge flush scheduled. without it the LAST
+    // update of a burst was dropped forever: a commit landing <150ms after the
+    // initial tree never reached the dump file, so dump-file consumers (harness
+    // gates, capture tooling) read stale state while the live tree had moved on.
+    debug_dump_scheduled: bool,
 }
 
 impl ServiceApp {
-    fn write_debug_dump(&mut self) {
+    fn write_debug_dump(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.dump_tree_path.as_ref() else {
             return;
         };
         let now = std::time::Instant::now();
         if let Some(last) = self.last_debug_dump {
-            if now.duration_since(last) < Duration::from_millis(150) {
+            let elapsed = now.duration_since(last);
+            if elapsed < Duration::from_millis(150) {
+                // trailing edge: re-run after the throttle window so the final
+                // state of a burst always lands on disk.
+                if !self.debug_dump_scheduled {
+                    self.debug_dump_scheduled = true;
+                    let delay = Duration::from_millis(160).saturating_sub(elapsed);
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(delay).await;
+                        let _ = this.update(cx, |this, cx| {
+                            this.debug_dump_scheduled = false;
+                            this.write_debug_dump(cx);
+                        });
+                    })
+                    .detach();
+                }
                 return;
             }
         }
@@ -1250,7 +1270,7 @@ impl Render for ServiceApp {
 
             #[cfg(target_os = "macos")]
             ax::sync_tree(window, &self.root);
-            self.write_debug_dump();
+            self.write_debug_dump(cx);
             if std::env::var_os("RNGPUI_RENDER_TRACE").is_some() {
                 eprintln!(
                     "[render] lifecycle took {:.2}ms",
@@ -2051,6 +2071,7 @@ fn main() {
             inspector: inspector::InspectorState::from_env(),
             focused_input: None,
             last_debug_dump: None,
+            debug_dump_scheduled: false,
         });
 
         let options = WindowOptions {
@@ -2667,7 +2688,7 @@ fn main() {
                                 emit_definite_cached_layouts(&next_root);
                                 this.root = next_root;
                                 this.root_dirty = true;
-                                this.write_debug_dump();
+                                this.write_debug_dump(cx);
                                 cx.notify();
                             }
                             Incoming::SetNodeStyle { ops } => {
@@ -2675,7 +2696,7 @@ fn main() {
                                 // overrides into the overlay and re-render WITHOUT
                                 // touching `root`. No React re-commit, no tree reparse.
                                 if crate::anim_overlay::apply_ops(ops) {
-                                    this.write_debug_dump();
+                                    this.write_debug_dump(cx);
                                     cx.notify();
                                 }
                             }

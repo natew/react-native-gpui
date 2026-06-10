@@ -119,6 +119,19 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
             y: number(value, "y")?,
             reply,
         }),
+        // a REAL press-drag: MouseDown at (x,y) → `steps` interpolated MouseMoves
+        // (pressed_button=Left, so ev.dragging()) to (x2,y2) → MouseUp, dispatched
+        // through gpui's actual event loop. exercises the live press-drag sweep
+        // (cross-row scrub) an OS drag takes — the synth `dragAt` path bypasses it.
+        // `steps` low = a fast flick (big jumps between samples).
+        "realdrag" => Ok(Incoming::DebugRealDrag {
+            x: number(value, "x")?,
+            y: number(value, "y")?,
+            x2: number(value, "x2")?,
+            y2: number(value, "y2")?,
+            steps: number(value, "steps").unwrap_or(8.0) as u32,
+            reply,
+        }),
         "resize" => Ok(Incoming::DebugResize {
             w: number(value, "w")?,
             h: number(value, "h")?,

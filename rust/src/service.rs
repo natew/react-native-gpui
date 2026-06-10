@@ -1507,6 +1507,14 @@ pub(crate) enum Incoming {
         y: f32,
         reply: flume::Sender<serde_json::Value>,
     },
+    DebugRealDrag {
+        x: f32,
+        y: f32,
+        x2: f32,
+        y2: f32,
+        steps: u32,
+        reply: flume::Sender<serde_json::Value>,
+    },
     /// resize the real gpui window to (w, h) content px. test mode sets
     /// is_resizable=false (blocking AX resize), so this command is the only way to
     /// drive a window resize offscreen for perf measurement.
@@ -2369,6 +2377,78 @@ fn main() {
                             Err(_) => break,
                         }
                     }
+                    Incoming::DebugRealDrag {
+                        x,
+                        y,
+                        x2,
+                        y2,
+                        steps,
+                        reply,
+                    } => {
+                        // a real press-drag through gpui's event loop: down at the
+                        // start, `steps` interpolated moves with the button HELD
+                        // (pressed_button=Left ⇒ ev.dragging()), then up. This is the
+                        // live cross-row scrub path; counts host events emitted so a
+                        // gate can assert each swept row activated (grant per row).
+                        let result = window_handle.update(cx, |_root, window, cx| {
+                            let before = crate::bridge::events_emitted_count();
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::MouseMove(MouseMoveEvent {
+                                    position: gpui::point(px(x), px(y)),
+                                    pressed_button: None,
+                                    modifiers: gpui::Modifiers::default(),
+                                }),
+                                cx,
+                            );
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::MouseDown(MouseDownEvent {
+                                    button: MouseButton::Left,
+                                    position: gpui::point(px(x), px(y)),
+                                    modifiers: gpui::Modifiers::default(),
+                                    click_count: 1,
+                                    first_mouse: false,
+                                }),
+                                cx,
+                            );
+                            let n = steps.max(1);
+                            for i in 1..=n {
+                                let t = i as f32 / n as f32;
+                                dispatch_real_input(
+                                    window,
+                                    gpui::PlatformInput::MouseMove(MouseMoveEvent {
+                                        position: gpui::point(px(x + (x2 - x) * t), px(y + (y2 - y) * t)),
+                                        pressed_button: Some(MouseButton::Left),
+                                        modifiers: gpui::Modifiers::default(),
+                                    }),
+                                    cx,
+                                );
+                            }
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::MouseUp(MouseUpEvent {
+                                    button: MouseButton::Left,
+                                    position: gpui::point(px(x2), px(y2)),
+                                    modifiers: gpui::Modifiers::default(),
+                                    click_count: 1,
+                                }),
+                                cx,
+                            );
+                            window.refresh();
+                            crate::bridge::events_emitted_count().saturating_sub(before)
+                        });
+                        match result {
+                            Ok(emitted) => {
+                                let _ = reply.send(serde_json::json!({
+                                    "ok": true,
+                                    "type": "realdrag",
+                                    "eventsEmitted": emitted,
+                                }));
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     Incoming::DebugResize { w, h, reply } => {
                         let applied = window_handle.update(cx, |_root, window, cx| {
                             window.resize(size(px(w), px(h)));
@@ -2796,6 +2876,7 @@ fn main() {
                             | Incoming::DebugRealKey { .. }
                             | Incoming::DebugRealTap { .. }
                             | Incoming::DebugRealMove { .. }
+                            | Incoming::DebugRealDrag { .. }
                             | Incoming::DebugResize { .. }
                             | Incoming::DebugNativeScrollAt { .. }
                             | Incoming::AppCommands(_) => unreachable!(),

@@ -92,6 +92,14 @@ static HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()
 // a single on-demand repaint (we don't render continuously).
 static PSEUDO_HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static PRESSED: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+// RNGPUI_DRAG_TRACE=1 logs the live press-drag-sweep gate (mouse-down arming +
+// per-row cross-sweep activation) so a real scrub can be diagnosed — synth gates
+// pass without exercising the live gpui pointer path (the gesture gap).
+static DRAG_TRACE: Lazy<bool> = Lazy::new(|| std::env::var_os("RNGPUI_DRAG_TRACE").is_some());
+fn drag_trace() -> bool {
+    *DRAG_TRACE
+}
 static ACTIVE_MOUSE_TARGET: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
 static CAPTURED_MOUSE_UP_TARGET: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
 static ACTIVE_PRESS_DRAG: Lazy<Mutex<Option<ActivePressDrag>>> = Lazy::new(|| Mutex::new(None));
@@ -1769,6 +1777,12 @@ impl Element for ReactDivElement {
                             }
                             let active_target = *active;
                             drop(active);
+                            if drag_trace() {
+                                eprintln!(
+                                    "[drag-trace] DOWN id={id} press_action={press_action} active_target={active_target:?} group={:?}",
+                                    press_group_for_down
+                                );
+                            }
                             if press_action && active_target == Some(id) {
                                 *ACTIVE_PRESS_DRAG.lock().unwrap() = Some(ActivePressDrag {
                                     start_id: id,
@@ -1999,8 +2013,16 @@ impl Element for ReactDivElement {
                                 layout_bounds,
                                 ev.modifiers,
                             );
+                            if drag_trace() {
+                                eprintln!(
+                                    "[drag-trace] ENTER id={id} dragging={} press_action={press_action} group={:?} active_drag={}",
+                                    ev.dragging(),
+                                    press_group_for_move,
+                                    ACTIVE_PRESS_DRAG.lock().unwrap().is_some()
+                                );
+                            }
                             if ev.dragging() && press_action {
-                                activate_drag_press_if_needed(
+                                let activated = activate_drag_press_if_needed(
                                     id,
                                     &press_group_for_move,
                                     &event_names_for_move,
@@ -2008,6 +2030,9 @@ impl Element for ReactDivElement {
                                     layout_bounds,
                                     ev.modifiers,
                                 );
+                                if drag_trace() {
+                                    eprintln!("[drag-trace]   activate id={id} -> {activated}");
+                                }
                             }
                         } else if !inside && was_inside {
                             hover.remove(&id);

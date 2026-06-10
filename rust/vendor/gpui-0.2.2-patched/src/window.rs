@@ -210,6 +210,9 @@ slotmap::new_key_type! {
 
 thread_local! {
     pub(crate) static ELEMENT_ARENA: RefCell<Arena> = RefCell::new(Arena::new(1024 * 1024));
+    // rngpui: set while dispatch_event is replaying interpolated intermediate drag
+    // moves, so those recursive dispatches don't themselves re-interpolate.
+    static DRAG_INTERP_ACTIVE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Returned when the element arena has been used and so must be cleared before the next draw.
@@ -3637,6 +3640,39 @@ impl Window {
     /// Dispatch a mouse or keyboard event on the window.
     #[profiling::function]
     pub fn dispatch_event(&mut self, event: PlatformInput, cx: &mut App) -> DispatchEventResult {
+        // rngpui: never-miss-a-row drag interpolation. A held-button move that jumps
+        // a large distance in one platform sample (a fast scrub/flick) would otherwise
+        // skip every row between the previous position and this one — hit-testing only
+        // sees the endpoints. Before handling the real move, replay it as a series of
+        // intermediate moves ~one sub-row apart so EVERY element the pointer crossed
+        // gets a hover/press-sweep sample, regardless of how fast the pointer moved.
+        // Gated on a held button (drag/scrub only), guarded against re-entry, and a no-op
+        // for normal-speed moves whose delta is under one step.
+        if !DRAG_INTERP_ACTIVE.with(|c| c.get())
+            && let PlatformInput::MouseMove(m) = &event
+            && m.pressed_button.is_some()
+        {
+            let prev = self.mouse_position;
+            let dx: f32 = (m.position.x - prev.x).into();
+            let dy: f32 = (m.position.y - prev.y).into();
+            let dist = dx.hypot(dy);
+            const STEP_PX: f32 = 16.0;
+            if dist > STEP_PX {
+                let steps = (dist / STEP_PX).ceil() as usize;
+                let (target, button, modifiers) = (m.position, m.pressed_button, m.modifiers);
+                DRAG_INTERP_ACTIVE.with(|c| c.set(true));
+                for i in 1..steps {
+                    let t = i as f32 / steps as f32;
+                    let pos = point(prev.x + (target.x - prev.x) * t, prev.y + (target.y - prev.y) * t);
+                    self.dispatch_event(
+                        PlatformInput::MouseMove(MouseMoveEvent { position: pos, pressed_button: button, modifiers }),
+                        cx,
+                    );
+                }
+                DRAG_INTERP_ACTIVE.with(|c| c.set(false));
+            }
+        }
+
         self.last_input_timestamp.set(Instant::now());
         // Handlers may set this to false by calling `stop_propagation`.
         cx.propagate_event = true;

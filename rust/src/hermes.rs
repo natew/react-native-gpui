@@ -863,12 +863,15 @@ pub fn start_ui(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
 // drains it (each event can trigger a re-render), so it backs up exponentially and freezes.
 // Discrete events (press / key / changeText / ready / appearance / fetch / ws) are never
 // coalesced — order and every occurrence matter.
-#[derive(Hash, PartialEq, Eq)]
+#[derive(Hash, PartialEq, Eq, Debug)]
 enum CKey {
     Resize,
     Layout(u64),
     Move(u64),
     Scroll(u64),
+    // renderer→JS pseudo lane: a fast hover sweep flips many nodes per frame. The payload
+    // carries the node's ABSOLUTE hovered/pressed state, so latest-wins per node is lossless.
+    Pseudo(u64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -921,7 +924,8 @@ fn coalesce_key(arg: &str) -> Option<CKey> {
     let layout = arg.contains("\"event\":\"layout\"");
     let mv = arg.contains("\"event\":\"mouseMove\"");
     let scroll = arg.contains("\"event\":\"scroll\"");
-    if !(resize || layout || mv || scroll) {
+    let pseudo = arg.contains("\"event\":\"pseudo\"");
+    if !(resize || layout || mv || scroll || pseudo) {
         return None;
     }
     if resize {
@@ -935,8 +939,10 @@ fn coalesce_key(arg: &str) -> Option<CKey> {
         Some(CKey::Layout(id))
     } else if mv {
         Some(CKey::Move(id))
-    } else {
+    } else if scroll {
         Some(CKey::Scroll(id))
+    } else {
+        Some(CKey::Pseudo(id))
     }
 }
 
@@ -1113,7 +1119,28 @@ fn perf_batch_label(batch: &[JsCall]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{QueueClass, queue_class};
+    use super::{CKey, QueueClass, coalesce_key, queue_class};
+
+    #[test]
+    fn pseudo_events_coalesce_latest_wins_per_node() {
+        // pseudo carries absolute state, so latest-wins per node is lossless: two flips of
+        // the same node share a key (older drops), different nodes get distinct keys.
+        let a1 = r#"{"type":"event","id":7,"event":"pseudo","hovered":true,"pressed":false}"#;
+        let a2 = r#"{"type":"event","id":7,"event":"pseudo","hovered":false,"pressed":false}"#;
+        let b = r#"{"type":"event","id":8,"event":"pseudo","hovered":true,"pressed":false}"#;
+        assert_eq!(coalesce_key(a1), Some(CKey::Pseudo(7)));
+        assert_eq!(coalesce_key(a1), coalesce_key(a2));
+        assert_ne!(coalesce_key(a1), coalesce_key(b));
+        // pseudo must not be misclassified as a coalescible mouseMove/scroll/layout key.
+        assert_ne!(coalesce_key(a1), Some(CKey::Move(7)));
+    }
+
+    #[test]
+    fn pseudo_events_are_not_discrete_input() {
+        // the lane is renderer-driven, not a tap React must run before async — it coalesces.
+        let arg = r#"{"type":"event","id":7,"event":"pseudo","hovered":true,"pressed":false}"#;
+        assert_eq!(queue_class("__rngpui_onHostEvent", arg), QueueClass::Other);
+    }
 
     #[test]
     fn discrete_tap_events_outrank_async_completions() {

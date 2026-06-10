@@ -138,6 +138,20 @@ fn mouse_event_inner(
     emit_value(event);
 }
 
+/// A node's native hover/press pseudo state flipped (opt-in via `pseudoEvents: true`).
+/// Carries the ABSOLUTE state (`hovered`/`pressed`), so the queue coalescer can drop all
+/// but the latest per node losslessly. Routed by the rngpui pseudo registry (ts/src/
+/// platform-driver.ts) to the tamagui platform driver — never to a React event handler.
+pub fn pseudo(id: u64, hovered: bool, pressed: bool) {
+    emit_value(json!({
+        "type": "event",
+        "id": id,
+        "event": "pseudo",
+        "hovered": hovered,
+        "pressed": pressed
+    }));
+}
+
 pub fn scroll_event(id: u64, x: f32, y: f32) {
     emit_value(json!({
         "type": "event",

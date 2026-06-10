@@ -172,6 +172,11 @@ pub struct ReactElement {
     /// precomputed at parse: `pseudo_style` holds a native hover/press style for this
     /// node (avoids a global-map lock per node per frame in prepaint).
     pub has_pseudo_style: bool,
+    /// opt-in (`pseudoEvents: true` prop): emit a coalesced `pseudo` host event to JS on
+    /// every native hover/press flip of this node's hitbox, so a renderer-side driver
+    /// (tamagui's platform driver) can drive pseudo state without a React-event lane.
+    /// Opt-in so we never spam an event for every hitbox in the app.
+    pub pseudo_events: bool,
 }
 
 /// Event names that make a node claim a hitbox (pointer/press input of any kind).

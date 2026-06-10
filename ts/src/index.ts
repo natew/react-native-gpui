@@ -143,3 +143,7 @@ export {
 
 // low-level bridge (escape hatch)
 export { startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type SerializedNode } from "./runtime";
+
+// renderer platform driver — tamagui's @tamagui/core setupPlatformDriver(platformDriver)
+// consumes this for renderer-owned pseudo (hover/press) states. See platform-driver.ts.
+export { platformDriver, registerPseudoListener, type PseudoState, type PseudoListener } from "./platform-driver";

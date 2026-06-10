@@ -64,6 +64,11 @@ const measuredIds = new Set<number>();
 const layouts = new Map<number, LayoutRect>();
 const instances = new Map<number, Instance>();
 const pendingMeasures = new Map<number, Array<() => void>>();
+// globalIds that opted into the renderer→JS pseudo lane (set imperatively by the
+// platform driver via setPseudoEvents). serialize() emits `pseudoEvents: true` for
+// these so the host wires the hover/press flip → `pseudo` event emit. Mirrors
+// `measuredIds`: a side set the serializer reads, not a React prop.
+const pseudoEventIds = new Set<number>();
 const layoutSignatures = new Map<number, string>();
 const PORTAL_HOST_TYPE = "RNTPortalHostView";
 const PORTAL_VIEW_TYPE = "RNTPortalView";
@@ -199,6 +204,18 @@ function chainHandler(first: Function | undefined, next: Function) {
 // 'layout' event). hover/press no longer take this path; they're resolved natively in the host.
 function requestRecommit() {
     if (commit && currentContainer) commit(serializeContainer(currentContainer));
+}
+
+/** The platform driver opts a node into (or out of) the renderer→JS pseudo lane by
+ * globalId. Toggles `pseudoEvents` in the serializer's side set, marks the node dirty,
+ * and recommits so the host learns the flag without a React render. */
+export function setPseudoEvents(id: number, on: boolean): void {
+    const had = pseudoEventIds.has(id);
+    if (on === had) return;
+    if (on) pseudoEventIds.add(id);
+    else pseudoEventIds.delete(id);
+    markSerializeDirtyById(id);
+    requestRecommit();
 }
 
 function registerHandlers(id: number, props: Record<string, unknown>) {
@@ -442,6 +459,7 @@ function cleanupInstance(node: Instance | TextInstance) {
     node.cached = undefined;
     handlers.delete(node.id);
     measuredIds.delete(node.id);
+    pseudoEventIds.delete(node.id);
     layouts.delete(node.id);
     instances.delete(node.id);
     layoutSignatures.delete(node.id);
@@ -959,6 +977,7 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
     if (Object.keys(style).length) node.style = style;
     if (hoverStyle && Object.keys(hoverStyle).length) node.hoverStyle = hoverStyle;
     if (pressStyle && Object.keys(pressStyle).length) node.pressStyle = pressStyle;
+    if (pseudoEventIds.has(inst.id)) node.pseudoEvents = true;
     const nativeLayoutKey = stringProp(props, "nativeLayoutKey");
     if (nativeLayoutKey) node.nativeLayoutKey = nativeLayoutKey;
     const nativeResize = normalizeNativeResize(props.nativeResize);

@@ -271,6 +271,14 @@ fn parse_json_tree(
     if has_pseudo_style {
         crate::pseudo_style::set(global_id, hover_style, press_style);
     }
+    // opt-in renderer→JS pseudo lane: a node sets `pseudoEvents: true` (the tamagui
+    // platform driver does this via the rngpui pseudo registry) to ask the host to emit a
+    // coalesced `pseudo` event on each native hover/press flip. Opt-in so we don't spam an
+    // event per hitbox; `div` paint only emits for nodes carrying this flag.
+    let pseudo_events = obj
+        .get("pseudoEvents")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let children: Vec<Arc<ReactElement>> = obj
         .get("children")
         .and_then(|v| v.as_array())
@@ -345,6 +353,7 @@ fn parse_json_tree(
         cached_gpui_style,
         interactive,
         has_pseudo_style,
+        pseudo_events,
     }))
 }
 
@@ -1292,6 +1301,7 @@ fn fallback_root() -> Arc<ReactElement> {
         cached_gpui_style: None,
         interactive: false,
         has_pseudo_style: false,
+        pseudo_events: false,
     })
 }
 

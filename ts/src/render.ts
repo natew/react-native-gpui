@@ -14,6 +14,7 @@ setEventBatcher((run) => (Reconciler as { batchedUpdates(fn: (a: unknown) => voi
 import { AppCommands, setCommandSink } from "./commands";
 import { Dimensions } from "./Dimensions";
 import { applyNativeColorScheme, setAppearanceUpdateSink } from "./colors";
+import { dispatchPseudo } from "./platform-driver";
 
 const EMPTY_NODES: ReadonlyArray<SerializedNode> = [];
 const EMPTY_STYLE: Readonly<Record<string, unknown>> = {};
@@ -134,6 +135,13 @@ export function createRoot(options: RootOptions = {}): Root {
                 console.error(`[appearance] native colorScheme=${e.colorScheme}`);
             }
             applyNativeColorScheme(e.colorScheme);
+            return;
+        }
+        // renderer→JS pseudo lane: a native hover/press flip routes to the platform
+        // driver's listeners (tamagui), NOT the React event path — so a hover never
+        // triggers a React commit. Handled before dispatchEvent so it never falls through.
+        if (e.type === "event" && e.event === "pseudo") {
+            dispatchPseudo(e.id, e.hovered ?? false, e.pressed ?? false);
             return;
         }
         // a native UI event → route to the React handler; its setState (if any)

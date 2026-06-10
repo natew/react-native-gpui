@@ -1406,6 +1406,9 @@ impl Element for ReactDivElement {
             // so the paint pass can read its hover/press state and apply the pseudo style.
             // both facts are precomputed at parse (this runs per node per frame).
             || self.element.has_pseudo_style
+            // a node that only opted into the renderer→JS pseudo lane (pseudoEvents) also
+            // needs a hitbox so the paint pass can detect hover/press flips and emit them.
+            || self.element.pseudo_events
             || self.element.interactive;
         let cursor = self.element.style.cursor.is_some();
         let hitbox = if interactive || scroll || cursor {
@@ -2066,16 +2069,39 @@ impl Element for ReactDivElement {
             }
         }
 
-        // native hover/press repaint: a pseudo node may have NO JS listeners, so the block above
-        // never runs for it. Wire the minimal mouse tracking that flips its hover/press state and
-        // asks for ONE on-demand repaint per transition (we render on demand, not continuously).
-        // The pseudo STYLE itself is resolved in paint straight from the hitbox; these listeners
-        // exist only to schedule the repaint that lets that resolution run.
-        if let Some(pseudo) = crate::pseudo_style::get(self.element.global_id)
+        // native hover/press repaint + renderer→JS pseudo lane. Two opt-ins share the same
+        // minimal hitbox tracking here (a pseudo node may have NO JS listeners, so the
+        // listener block above never runs for it):
+        //   • `has_pseudo_style` → swap the precomputed pseudo variant in PAINT on a flip;
+        //     these listeners only schedule the on-demand repaint that lets that run.
+        //   • `pseudo_events` → emit a coalesced `pseudo` host event on each flip, so the
+        //     tamagui platform driver can drive pseudo state with no React-event lane.
+        // The flip is detected once here (PSEUDO_HOVER / PRESSED are the state of record);
+        // both outputs ride off the same transition so they can't diverge.
+        let pseudo = crate::pseudo_style::get(self.element.global_id);
+        let wants_events = self.element.pseudo_events;
+        if (pseudo.is_some() || wants_events)
             && let Some(hitbox) = prepaint.hitbox.clone()
         {
             let id = self.element.global_id;
-            let has_press = pseudo.press.is_some();
+            let has_style = pseudo.is_some();
+            // track press whenever a press style exists OR the JS lane wants press flips.
+            let track_press = pseudo.as_ref().is_some_and(|p| p.press.is_some()) || wants_events;
+            // a flip's outputs: refresh the window when a native pseudo style needs to repaint,
+            // and emit the coalesced `pseudo` event (absolute hovered/pressed) when opted in.
+            let emit_pseudo = move |hovered: bool, pressed: bool, window: &mut Window| {
+                if has_style {
+                    // a native hover/press transition swaps the precomputed variant in PAINT
+                    // only — it never re-lays-out, even if the style carries width/padding. So
+                    // this repaint is geometry-stable: arm the retained-layout fast path so it
+                    // skips the ~7ms taffy solve.
+                    crate::anim_overlay::mark_paint_only_frame();
+                    window.refresh();
+                }
+                if wants_events {
+                    crate::bridge::pseudo(id, hovered, pressed);
+                }
+            };
             let move_hitbox = hitbox.clone();
             window.on_mouse_event(move |_ev: &MouseMoveEvent, phase, window, _cx| {
                 if phase != DispatchPhase::Bubble {
@@ -2093,17 +2119,15 @@ impl Element for ReactDivElement {
                 }
                 drop(hover);
                 // leaving the element also cancels an in-flight press on it.
-                if !inside {
+                let pressed = if inside {
+                    PRESSED.lock().unwrap().contains(&id)
+                } else {
                     PRESSED.lock().unwrap().remove(&id);
-                }
-                // a native hover transition swaps the precomputed hover variant in PAINT
-                // only (div.rs paint, after layout) — it never re-lays-out, even if the
-                // hoverStyle carries width/padding. So this repaint is geometry-stable:
-                // arm the retained-layout fast path so it skips the ~7ms taffy solve.
-                crate::anim_overlay::mark_paint_only_frame();
-                window.refresh();
+                    false
+                };
+                emit_pseudo(inside, pressed, window);
             });
-            if has_press {
+            if track_press {
                 let down_hitbox = hitbox.clone();
                 window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, _cx| {
                     if phase == DispatchPhase::Bubble
@@ -2111,8 +2135,7 @@ impl Element for ReactDivElement {
                         && down_hitbox.is_hovered(window)
                         && PRESSED.lock().unwrap().insert(id)
                     {
-                        crate::anim_overlay::mark_paint_only_frame();
-                        window.refresh();
+                        emit_pseudo(true, true, window);
                     }
                 });
                 window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, _cx| {
@@ -2120,8 +2143,8 @@ impl Element for ReactDivElement {
                         && ev.button == MouseButton::Left
                         && PRESSED.lock().unwrap().remove(&id)
                     {
-                        crate::anim_overlay::mark_paint_only_frame();
-                        window.refresh();
+                        let hovered = PSEUDO_HOVER.lock().unwrap().contains(&id);
+                        emit_pseudo(hovered, false, window);
                     }
                 });
             }
@@ -2132,8 +2155,7 @@ impl Element for ReactDivElement {
                 let left_hover = PSEUDO_HOVER.lock().unwrap().remove(&id);
                 let left_press = PRESSED.lock().unwrap().remove(&id);
                 if left_hover || left_press {
-                    crate::anim_overlay::mark_paint_only_frame();
-                    window.refresh();
+                    emit_pseudo(false, false, window);
                 }
             });
         }

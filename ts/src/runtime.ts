@@ -26,6 +26,11 @@ export type SerializedNode = {
      */
     hoverStyle?: Record<string, unknown>;
     pressStyle?: Record<string, unknown>;
+    /** opt-in renderer→JS pseudo lane: when true, the host emits a coalesced `pseudo`
+     * event ({hovered, pressed}) on every native hover/press flip of this node's hitbox,
+     * routed by the pseudo registry (platform-driver.ts) to a renderer-platform driver
+     * (tamagui). Set imperatively via `platformDriver.pseudo.subscribe`, not a React prop. */
+    pseudoEvents?: boolean;
     /** authored JSX source location ("<abs-path>:<line>:<col>"), stamped at bundle time by
      * the babel source-location plugin; the native inspector reads it for open-in-editor. */
     source?: string;
@@ -127,6 +132,9 @@ export type BridgeEvent =
           /** GhosttyTerminal `terminalViewport` measure: grid cols/rows */
           cols?: number;
           rows?: number;
+          /** `pseudo` lane: absolute native hover/press state of the node's hitbox */
+          hovered?: boolean;
+          pressed?: boolean;
       };
 
 export interface Bridge {

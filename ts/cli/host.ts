@@ -99,6 +99,68 @@ export type DumpNode = {
     nativeListGroup?: string;
 };
 
+function countWebviews(node: DumpNode): number {
+    let n = node.type === "webview" ? 1 : 0;
+    for (const child of node.children ?? []) n += countWebviews(child);
+    return n;
+}
+
+function firstWebviewBounds(node: DumpNode): { x: number; y: number; width: number; height: number } | null {
+    if (node.type === "webview" && node.bounds && node.bounds.width > 4 && node.bounds.height > 4) return node.bounds;
+    for (const child of node.children ?? []) {
+        const found = firstWebviewBounds(child);
+        if (found) return found;
+    }
+    return null;
+}
+
+// Poll the live capture frame until the webview region has painted content
+// (pixel variance above a flat-background floor). A WKWebView underlay loads +
+// renders its HTML asynchronously after the gpui tree commits — and under load
+// that can exceed any fixed sleep — so wait for the pixels, not the clock. A
+// genuinely-empty webview just hits the budget and proceeds (best-effort).
+async function waitForWebviewContent(
+    capturePath: string,
+    bounds: { x: number; y: number; width: number; height: number },
+    windowLogicalWidth: number,
+): Promise<void> {
+    const { readPng } = await import("../scripts/png.mjs");
+    const budgetMs = Number(process.env.RNGPUI_SHOT_WEBVIEW_BUDGET_MS) || 4000;
+    const deadline = Date.now() + budgetMs;
+    while (Date.now() < deadline) {
+        try {
+            if (existsSync(capturePath) && statSync(capturePath).size > 0) {
+                const img = (await readPng(capturePath)) as { width: number; height: number; rgba: Uint8Array };
+                const scale = img.width / windowLogicalWidth; // capture is HiDPI (≈2x)
+                const x0 = Math.max(0, Math.round((bounds.x + bounds.width * 0.15) * scale));
+                const x1 = Math.min(img.width, Math.round((bounds.x + bounds.width * 0.85) * scale));
+                const y0 = Math.max(0, Math.round((bounds.y + bounds.height * 0.1) * scale));
+                const y1 = Math.min(img.height, Math.round((bounds.y + bounds.height * 0.7) * scale));
+                // luminance variance over the region: flat (loading) ≈ 0, text content ≫ 0.
+                let sum = 0;
+                let sumSq = 0;
+                let count = 0;
+                for (let y = y0; y < y1; y += 4) {
+                    for (let x = x0; x < x1; x += 4) {
+                        const i = (y * img.width + x) * 4;
+                        const lum = 0.299 * img.rgba[i] + 0.587 * img.rgba[i + 1] + 0.114 * img.rgba[i + 2];
+                        sum += lum;
+                        sumSq += lum * lum;
+                        count++;
+                    }
+                }
+                if (count > 0) {
+                    const variance = sumSq / count - (sum / count) ** 2;
+                    if (variance > 25) return; // content present (text/edges)
+                }
+            }
+        } catch {
+            /* transient read of a half-written frame — retry */
+        }
+        await sleep(150);
+    }
+}
+
 type SessionMeta = {
     version: 1;
     servicePid: number;
@@ -271,7 +333,21 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
     }
 
     await waitForSocket(socketPath, () => child.exitCode != null);
-    await sleep(500);
+    // settle before the first capture. 500ms covers a pure-Metal tree, but a
+    // WKWebView underlay (the agentbus chat/timeline stage) loads + renders its
+    // HTML async AFTER the gpui tree commits — and under machine load that can
+    // take well over a second, so a fixed sleep races it (the blank-webview bug).
+    // Instead: find the webview's bounds, then poll the live capture frame until
+    // that region actually has painted content (variance above the background
+    // floor), with a budget. A genuinely-empty webview just hits the budget.
+    await sleep(Number(process.env.RNGPUI_SHOT_SETTLE_MS) || 350);
+    try {
+        const probe = await requestSocket<{ ok: boolean; tree?: DumpNode }>(socketPath, { $cmd: "dump" });
+        const wv = probe.tree ? firstWebviewBounds(probe.tree) : null;
+        if (wv) await waitForWebviewContent(capturePath, wv, w);
+    } catch {
+        /* probe is best-effort; proceed to capture */
+    }
 
     const meta: SessionMeta = {
         version: 1,

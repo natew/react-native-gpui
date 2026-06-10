@@ -1560,6 +1560,33 @@ fn load_bundle() -> Vec<u8> {
     }
 }
 
+/// Read the reanimated worklet/UI runtime bundle: RNGPUI_UI_BUNDLE, or
+/// `ui-runtime.js` next to this executable. It is app-INDEPENDENT library code
+/// (upstream reanimated core + the worklet bridge, built by the rngpui ts
+/// `build:bundle` as dist/ui-runtime.js and staged beside the binary by
+/// build-native), so it versions with the binary, not with the app bundle. Not
+/// optional — off-thread reanimated is the one animation path
+/// (plans/off-thread-reanimated.md).
+fn load_ui_bundle() -> Vec<u8> {
+    let path = match std::env::var("RNGPUI_UI_BUNDLE") {
+        Ok(p) => std::path::PathBuf::from(p),
+        Err(_) => std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|d| d.join("ui-runtime.js")))
+            .unwrap_or_else(|| std::path::PathBuf::from("ui-runtime.js")),
+    };
+    match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!(
+                "[hermes-ui] cannot read ui-runtime bundle {}: {e} — set RNGPUI_UI_BUNDLE or stage ui-runtime.js next to the binary (rngpui ts: `bun scripts/build-ui-runtime.mjs`)",
+                path.display()
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn pick_paths_native(
     files: bool,
@@ -1698,6 +1725,12 @@ fn main() {
     // native events + fetch/ws results flow back to the JS thread via hermes::post.
     let bundle = load_bundle();
     startup_mark("bundle loaded");
+    // the reanimated worklet/UI runtime boots first (its call queue must exist
+    // before the React bundle's eval can dispatch worklets to it), then both
+    // runtimes overlap each other and the GPUI platform init below. JsCalls
+    // queued while a bundle is still evaluating drain once its run_loop starts,
+    // so the startup interleaving is loss-free in both directions.
+    hermes::start_ui(load_ui_bundle(), tree_tx.clone());
     hermes::start(bundle, tree_tx);
     // NOTE: we deliberately do NOT block for the first tree here. The GPUI platform init
     // below (Application::new + app.run + gpui_component::init) is tree-independent and is

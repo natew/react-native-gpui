@@ -89,3 +89,31 @@ export function PlatformColor(...names: string[]): unknown {
 export function DynamicColorIOS(tuple: { light: unknown; dark: unknown }): unknown {
   return tuple?.light
 }
+
+// ── worklet-builtin registration ─────────────────────────────────────────────
+// Upstream's updateProps worklet CAPTURES processColorsInProps in its closure.
+// These shim fns are plain (not babel-workletized), so without a builtin brand
+// the cross-runtime serializer ships them as async jsCallback proxies — on the
+// worklet/UI runtime they then do nothing and every color key crosses as
+// undefined (the dropped-dialog-bg bug). Brand + register them so closures
+// serialize as {kind:'builtin', name} and bind to THIS module's implementation
+// on whichever runtime executes (this shim is baked into the prebuilt chunk,
+// which evaluates on both). Constants mirror worklet-runtime.ts — this file
+// cannot import it (the prebuilt chunk keeps the worklets package external).
+const RNGPUI_BUILTIN_NAME = Symbol.for('rngpui.workletBuiltinName')
+function registerColorBuiltin(name: string, fn: (...args: never[]) => unknown): void {
+  try {
+    Object.defineProperty(fn, RNGPUI_BUILTIN_NAME, {
+      value: name,
+      enumerable: false,
+      configurable: true,
+      writable: false,
+    })
+  } catch {}
+  const g = globalThis as unknown as { __rngpui_worklet_builtins?: Map<string, unknown> }
+  if (!g.__rngpui_worklet_builtins) g.__rngpui_worklet_builtins = new Map()
+  g.__rngpui_worklet_builtins.set(name, fn)
+}
+registerColorBuiltin('processColor', processColor)
+registerColorBuiltin('processColorNumber', processColorNumber)
+registerColorBuiltin('processColorsInProps', processColorsInProps)

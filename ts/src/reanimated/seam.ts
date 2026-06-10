@@ -424,6 +424,11 @@ function engineUpdateProps(operations: Array<{ shadowNodeWrapper: unknown; updat
     const prev = PENDING_OPS.get(globalId) ?? {}
     for (const [key, value] of Object.entries(op.updates)) {
       prev[key] = normalizeUpdatePropValue(key, value)
+      if (SEAM_DEBUG && prev[key] === undefined) {
+        // an undefined value silently VANISHES at the JSON host crossing — the
+        // key never reaches the overlay. always worth a loud line.
+        console.error(`[seam] _updateProps key dropped as undefined: ${key} (raw ${typeof value})`)
+      }
     }
     PENDING_OPS.set(globalId, prev)
     any = true

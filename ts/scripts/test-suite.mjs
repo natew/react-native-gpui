@@ -16,6 +16,7 @@ const tasks = [
     { name: "typecheck", command: "npm", args: ["run", "typecheck"], cwd: root, timeoutMs: 20_000 },
     { name: "animated-driver", command: "bun", args: ["run", "scripts/animated-driver-unit.mjs"], cwd: root, timeoutMs: 10_000 },
     { name: "wire-delta", command: "bun", args: ["run", "scripts/wire-delta-unit.mjs"], cwd: root, timeoutMs: 10_000 },
+    { name: "worklet-runtime", command: "bun", args: ["run", "scripts/worklet-runtime-unit.mjs"], cwd: root, timeoutMs: 10_000 },
     { name: "appearance-serialize", command: "bun", args: ["run", "scripts/appearance-serialize-unit.tsx"], cwd: root, timeoutMs: 15_000 },
     { name: "text-baseline", command: "bun", args: ["run", "scripts/text-baseline-conformance.mjs"], cwd: root, timeoutMs: 60_000 },
     { name: "cargo-test", command: "cargo", args: ["test"], cwd: `${repo}/rust`, timeoutMs: 25_000 },
@@ -46,6 +47,7 @@ const tasks = [
     { name: "text-lines", command: "bun", args: ["run", "scripts/text-lines-conformance.mjs"], cwd: root },
     { name: "rounded-overflow", command: "bun", args: ["run", "scripts/rounded-overflow-conformance.mjs"], cwd: root },
     { name: "animation-diff", command: "bun", args: ["run", "scripts/animation-frame-diff.mjs"], cwd: root },
+    { name: "offthread-stall", command: "node", args: ["scripts/offthread-stall-conformance.mjs"], cwd: root, timeoutMs: 25_000 },
     { name: "webview-render", command: "bun", args: ["run", "scripts/webview-render-conformance.mjs"], cwd: root, timeoutMs: 12_000 },
     { name: "window-mode", command: "bun", args: ["run", "scripts/window-mode-conformance.mjs"], cwd: root },
 ];

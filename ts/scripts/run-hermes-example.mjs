@@ -66,6 +66,7 @@ try {
         env: {
             ...process.env,
             RNGPUI_BUNDLE: hbc,
+            RNGPUI_UI_BUNDLE: resolve(tsRoot, "dist", "ui-runtime.js"),
             RNGPUI_NO_ACTIVATE: "1",
             // parent-exit watchdog: the service reaps itself if this runner dies unreaped
             RNGPUI_TEST_MODE: "1",

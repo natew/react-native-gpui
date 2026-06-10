@@ -61,9 +61,7 @@ unsafe extern "C" {
     fn rng_hermes_drain_microtasks(rt: *mut c_void);
     // Externally-backed shared buffers for the reanimated UI/worklet runtime: one shared
     // memory region exposed as a zero-copy JS ArrayBuffer in multiple runtimes.
-    #[allow(dead_code)]
     fn rng_hermes_shared_buffer_create(len: usize) -> *mut c_void;
-    #[allow(dead_code)]
     fn rng_hermes_install_shared_buffer(
         rt: *mut c_void,
         name: *const c_char,
@@ -85,6 +83,55 @@ pub fn post(func: &'static str, arg: String) {
     if let Some(tx) = JS_CALLS.get() {
         let _ = tx.send(JsCall { func, arg });
     }
+}
+
+// ── reanimated worklet/UI runtime (see plans/off-thread-reanimated.md) ──────
+// A SECOND Hermes runtime on its own thread acts as reanimated's real UI
+// runtime: dispatched worklets, useAnimatedStyle mappers, and animation driving
+// run there, isolated from React-thread stalls. Its own JsCall queue mirrors the
+// React runtime's.
+static UI_CALLS: OnceLock<Sender<JsCall>> = OnceLock::new();
+
+pub fn post_ui(func: &'static str, arg: String) {
+    if let Some(tx) = UI_CALLS.get() {
+        let _ = tx.send(JsCall { func, arg });
+    }
+}
+
+/// One process-wide `performance.now()` epoch shared by both runtimes so event
+/// and animation timestamps are comparable across the worklet boundary.
+static EPOCH: OnceLock<Instant> = OnceLock::new();
+fn epoch() -> Instant {
+    *EPOCH.get_or_init(Instant::now)
+}
+
+// Shared-value slot region, installed in BOTH runtimes as the zero-copy
+// ArrayBuffer global `__rngpui_svSlots`. Float64 layout (must match
+// worklet-runtime.ts): [0]=magic, [1]=capacity in floats, [2..3] reserved,
+// slots from index 4. React runtime allocates even slot ids, UI runtime odd.
+const SV_SLOTS_MAGIC: f64 = 0x504e_9a01_u32 as f64;
+const SV_SLOTS_FLOATS: usize = 262_144;
+
+struct SharedPtr(*mut c_void);
+unsafe impl Send for SharedPtr {}
+unsafe impl Sync for SharedPtr {}
+static SV_SLOTS: OnceLock<SharedPtr> = OnceLock::new();
+
+fn sv_slots() -> *mut c_void {
+    SV_SLOTS
+        .get_or_init(|| unsafe {
+            let ptr = rng_hermes_shared_buffer_create(SV_SLOTS_FLOATS * 8);
+            let floats = ptr as *mut f64;
+            *floats = SV_SLOTS_MAGIC;
+            *floats.add(1) = SV_SLOTS_FLOATS as f64;
+            SharedPtr(ptr)
+        })
+        .0
+}
+
+fn install_sv_slots(rt: *mut c_void) {
+    let name = CString::new("__rngpui_svSlots").unwrap();
+    unsafe { rng_hermes_install_shared_buffer(rt, name.as_ptr(), sv_slots(), SV_SLOTS_FLOATS * 8) };
 }
 
 // ── timers (driven by the JS thread loop) ───────────────────────────────────
@@ -156,9 +203,17 @@ fn arg_str(arg: *const c_char) -> String {
 // RNGPUI_ANIM_TRACE=1 logs every applyTree / setNodeStyle crossing so the reanimated
 // conformance harness can prove the fast path: during a spring, only `setNodeStyle`
 // fires (no `applyTree`), i.e. React doesn't re-commit per frame.
-static ANIM_TRACE: OnceLock<bool> = OnceLock::new();
+static ANIM_TRACE: OnceLock<u8> = OnceLock::new();
+fn anim_trace_level() -> u8 {
+    *ANIM_TRACE.get_or_init(|| {
+        std::env::var("RNGPUI_ANIM_TRACE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    })
+}
 fn anim_trace() -> bool {
-    *ANIM_TRACE.get_or_init(|| std::env::var_os("RNGPUI_ANIM_TRACE").is_some())
+    anim_trace_level() >= 1
 }
 
 extern "C" fn host_apply_tree(ud: *mut c_void, arg: *const c_char) {
@@ -215,6 +270,21 @@ extern "C" fn host_set_node_style(ud: *mut c_void, arg: *const c_char) {
     if !ops.is_empty() {
         if anim_trace() {
             eprintln!("[anim-trace] setNodeStyle ops={}", ops.len());
+            // level 2: per-op target id + style keys (which node gets which keys —
+            // the question every dropped-style/split-identity bug comes down to).
+            if anim_trace_level() >= 2 {
+                let thread = std::thread::current();
+                let from = thread.name().unwrap_or("?");
+                for (id, style) in &ops {
+                    let keys: Vec<&str> = style.keys().map(|k| k.as_str()).collect();
+                    eprintln!(
+                        "[anim-trace]   op id={} from={} keys={}",
+                        id,
+                        from,
+                        keys.join(",")
+                    );
+                }
+            }
         }
         let _ = ctx.tree_tx.send(crate::Incoming::SetNodeStyle { ops });
     }
@@ -238,6 +308,21 @@ extern "C" fn host_set_timer(ud: *mut c_void, arg: *const c_char) {
 
 extern "C" fn host_request_frame(_ud: *mut c_void, _arg: *const c_char) {
     crate::frame_clock::request(crate::frame_clock::REACT);
+}
+
+extern "C" fn host_request_frame_ui(_ud: *mut c_void, _arg: *const c_char) {
+    crate::frame_clock::request(crate::frame_clock::UI);
+}
+
+// React→UI bridge: the worklets stub posts a WorkletMessage JSON; it lands on
+// the UI runtime as `__rngpui_peerRecv(json)`.
+extern "C" fn host_ui_post(_ud: *mut c_void, arg: *const c_char) {
+    post_ui("__rngpui_peerRecv", arg_str(arg));
+}
+
+// UI→React bridge: runOnJS callbacks + shared-value listener wakeups.
+extern "C" fn host_js_post(_ud: *mut c_void, arg: *const c_char) {
+    post("__rngpui_peerRecv", arg_str(arg));
 }
 
 extern "C" fn host_clear_timer(ud: *mut c_void, arg: *const c_char) {
@@ -650,7 +735,7 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
             mark("runtime created");
             let ctx = Box::new(JsContext {
                 tree_tx,
-                start: Instant::now(),
+                start: epoch(),
                 timers: RefCell::new(TimerState::default()),
             });
             let ud = (&*ctx as *const JsContext) as *mut c_void;
@@ -669,7 +754,9 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
             install_void(rt, "__rngpui_wsSend", host_ws_send, ud);
             install_void(rt, "__rngpui_wsClose", host_ws_close, ud);
             install_void(rt, "__rngpui_pickPaths", host_pick_paths, ud);
+            install_void(rt, "__rngpui_uiPost", host_ui_post, ud);
             install_num(rt, "__rngpui_now", host_now, ud);
+            install_sv_slots(rt);
             mark("host fns installed");
 
             let env = std::env::vars().collect::<HashMap<String, String>>();
@@ -701,6 +788,73 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
             unsafe { rng_hermes_destroy(rt) };
         })
         .expect("spawn hermes-js thread");
+}
+
+/// Spawn the reanimated worklet/UI runtime thread (plans/off-thread-reanimated.md):
+/// a second Hermes runtime where dispatched worklets, `useAnimatedStyle` mappers,
+/// and animation driving run, isolated from React-thread stalls. Its
+/// `_updateProps` crosses straight to the render thread as
+/// `Incoming::SetNodeStyle` — never touching the React runtime. The ui bundle is
+/// app-independent library code (upstream reanimated core + the worklet bridge).
+pub fn start_ui(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
+    let (calls_tx, calls_rx) = flume::unbounded::<JsCall>();
+    let _ = UI_CALLS.set(calls_tx);
+    crate::frame_clock::register(
+        crate::frame_clock::UI,
+        Box::new(|| post_ui("__rngpui_fireFrame", String::new())),
+    );
+
+    std::thread::Builder::new()
+        .name("hermes-ui".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let rt = unsafe { rng_hermes_create() };
+            if rt.is_null() {
+                eprintln!("[hermes-ui] failed to create runtime");
+                std::process::exit(1);
+            }
+            let ctx = Box::new(JsContext {
+                tree_tx,
+                start: epoch(),
+                timers: RefCell::new(TimerState::default()),
+            });
+            let ud = (&*ctx as *const JsContext) as *mut c_void;
+
+            // Deliberately a SUBSET of the React runtime's host fns: no applyTree
+            // (no React here), no fetch/ws/pickPaths/exit/reload (app concerns).
+            install_void(rt, "__rngpui_setNodeStyle", host_set_node_style, ud);
+            install_void(rt, "__rngpui_log", host_log, ud);
+            install_void(rt, "__rngpui_setTimer", host_set_timer, ud);
+            install_void(rt, "__rngpui_clearTimer", host_clear_timer, ud);
+            install_void(rt, "__rngpui_requestFrame", host_request_frame_ui, ud);
+            install_void(rt, "__rngpui_jsPost", host_js_post, ud);
+            install_num(rt, "__rngpui_now", host_now, ud);
+            install_sv_slots(rt);
+
+            let env = std::env::vars().collect::<HashMap<String, String>>();
+            let env_script = format!(
+                "globalThis.process={{env:{},pid:{}}};",
+                serde_json::to_string(&env).unwrap_or_else(|_| "{}".to_string()),
+                std::process::id(),
+            );
+            if let Err(e) = eval(rt, env_script.as_bytes(), "host-env.js") {
+                eprintln!("[hermes-ui] env eval failed: {e}");
+                std::process::exit(1);
+            }
+            if let Err(e) = eval(rt, PREAMBLE.as_bytes(), "hermes-preamble.js") {
+                eprintln!("[hermes-ui] preamble eval failed: {e}");
+                std::process::exit(1);
+            }
+            if let Err(e) = eval(rt, &bundle, "ui-runtime.bundle") {
+                eprintln!("[hermes-ui] ui bundle eval failed: {e}");
+                std::process::exit(1);
+            }
+            unsafe { rng_hermes_drain_microtasks(rt) };
+
+            run_loop(rt, &ctx, &calls_rx);
+            unsafe { rng_hermes_destroy(rt) };
+        })
+        .expect("spawn hermes-ui thread");
 }
 
 // High-frequency events that are safe to coalesce to "latest wins" — a window resize (or

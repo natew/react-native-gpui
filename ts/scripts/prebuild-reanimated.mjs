@@ -244,7 +244,12 @@ async function prebuild(label, entry, outFile, external) {
 // aliases it to the single-runtime stub, which force-imports the seam).
 await prebuild(
   'reanimated',
-  `export * from 'react-native-reanimated';\nexport { default } from 'react-native-reanimated';`,
+  // also surface upstream's INTERNAL valueSetter: the worklet/UI runtime's
+  // shared-value proxies route animation writes through it (the off-thread
+  // `sv.value = withSpring(...)` driver — see ui-entry.ts + worklet-runtime's
+  // setSharedValueThroughReanimated). it isn't part of the public API, so the
+  // chunk exports it under an rngpui-prefixed name.
+  `export * from 'react-native-reanimated';\nexport { default } from 'react-native-reanimated';\nexport { valueSetter as __rngpuiValueSetter } from 'react-native-reanimated/src/valueSetter';`,
   resolve(outDir, 'react-native-reanimated.mjs'),
   ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'react-native', 'react-native-worklets', 'react-native-gpui'],
 )

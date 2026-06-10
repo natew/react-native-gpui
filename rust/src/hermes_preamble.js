@@ -79,16 +79,39 @@
     }
   };
 
-  // requestAnimationFrame is sugar over a ~16ms timer (on-demand frame clock: only ticks
-  // while something has a frame pending). Tamagui's Animated driver rides this.
+  // requestAnimationFrame rides the host's real vsync (rust frame_clock.rs /
+  // CVDisplayLink): arming __rngpui_requestFrame gets ONE __rngpui_fireFrame back
+  // on the next display refresh. At most one fire is in flight — the host only
+  // fires while armed, and we only re-arm after running callbacks. Both runtimes
+  // (React + reanimated worklet/UI) get this same implementation here, before any
+  // bundle evaluates.
   var __rafDebug = g.process && g.process.env && g.process.env.RNGPUI_RAF_DEBUG;
   var __rafSeq = 0;
+  var __rafCallbacks = new Map();
+  var __rafNextId = 1;
   g.requestAnimationFrame = function (cb) {
-    if (__rafDebug) { var n = ++__rafSeq; g.__rngpui_log('debug: rAF schedule #' + n);
-      return schedule(function () { g.__rngpui_log('debug: rAF fire #' + n); cb(g.__rngpui_now('')); }, 16, false); }
-    return schedule(function () { cb(g.__rngpui_now('')); }, 16, false);
+    var id = __rafNextId++;
+    __rafCallbacks.set(id, cb);
+    if (__rafDebug) { g.__rngpui_log('debug: rAF schedule #' + (++__rafSeq)); }
+    if (__rafCallbacks.size === 1) g.__rngpui_requestFrame('');
+    return id;
   };
-  g.cancelAnimationFrame = function (id) { g.clearTimeout(id); };
+  g.cancelAnimationFrame = function (id) { __rafCallbacks.delete(id); };
+  g.__rngpui_fireFrame = function () {
+    if (__rafCallbacks.size === 0) return;
+    // snapshot ids: callbacks registered DURING this frame run next frame, and a
+    // callback cancelling a same-frame sibling must win (browser semantics).
+    var ids = Array.from(__rafCallbacks.keys());
+    var ts = g.__rngpui_now('');
+    for (var i = 0; i < ids.length; i++) {
+      var cb = __rafCallbacks.get(ids[i]);
+      if (!cb) continue;
+      __rafCallbacks.delete(ids[i]);
+      try { cb(ts); } catch (e) { g.__rngpui_log('error: rAF callback threw ' + ((e && e.stack) || e)); }
+    }
+    // registrations made while firing may not have crossed size 0→1; re-arm.
+    if (__rafCallbacks.size > 0) g.__rngpui_requestFrame('');
+  };
 
   // queueMicrotask via Promise (Hermes drains microtasks after each Rust loop tick).
   if (typeof g.queueMicrotask !== 'function') {

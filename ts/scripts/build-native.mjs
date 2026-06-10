@@ -1,5 +1,5 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -34,6 +34,13 @@ for (const dylib of ghosttyDylibs) {
 
 if (readdirSync(nativeDir).some((entry) => entry.endsWith(".dylib")) && !hasRpath(serviceTarget, "@executable_path")) {
     execFileSync("install_name_tool", ["-add_rpath", "@executable_path", serviceTarget]);
+}
+
+// the worklet/UI runtime bundle ships next to the binary — the service resolves
+// ui-runtime.js beside its executable (plans/off-thread-reanimated.md).
+const uiRuntime = spawnSync("bun", ["scripts/build-ui-runtime.mjs"], { cwd: root, stdio: "inherit" });
+if (uiRuntime.status !== 0) {
+    throw new Error("build-ui-runtime.mjs failed — the shipped package needs native/ui-runtime.js");
 }
 
 function findNativeDylibs(dir) {

@@ -29,7 +29,6 @@ use std::time::Duration;
 
 /// Runtime ids (bits in `PENDING`).
 pub const REACT: u8 = 0;
-#[allow(dead_code)] // armed by the reanimated worklet runtime (task: off-thread reanimated)
 pub const UI: u8 = 1;
 
 /// Consecutive idle display ticks before the link stops itself.

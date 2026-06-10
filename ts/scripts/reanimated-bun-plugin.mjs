@@ -44,6 +44,7 @@ export function reanimatedBunPlugin(opts = {}) {
   const resolveRoot = opts.resolveRoot || rngTsRoot
   const workletsPath = resolve(rngTsRoot, 'src/reanimated/worklets.ts')
   const seamPath = resolve(rngTsRoot, 'src/reanimated/seam.ts')
+  const reanimatedHostPath = resolve(rngTsRoot, 'src/reanimated/reanimated-host.ts')
   const prebuiltDir = opts.prebuiltDir || resolve(rngTsRoot, '.reanimated-prebuilt')
   const reanimatedChunk = resolve(prebuiltDir, 'react-native-reanimated.mjs')
   const tamaguiReanimatedChunk = resolve(prebuiltDir, 'tamagui-animations-reanimated.mjs')
@@ -87,7 +88,9 @@ export function reanimatedBunPlugin(opts = {}) {
       // before the reanimated chunk evaluates.
       build.onResolve({ filter: /^react-native-worklets(\/.*)?$/ }, () => ({ path: workletsPath }))
 
-      // react-native-reanimated → the esbuild-prebuilt chunk.
+      // react-native-reanimated → the rngpui host wrapper (stamps the animation
+      // factories for the off-thread worklet runtime — see reanimated-host.ts),
+      // which itself imports the esbuild-prebuilt chunk via the virtual id below.
       build.onResolve({ filter: /^react-native-reanimated$/ }, () => {
         if (!existsSync(reanimatedChunk)) {
           throw new Error(
@@ -95,8 +98,9 @@ export function reanimatedBunPlugin(opts = {}) {
               `  run: bun scripts/prebuild-reanimated.mjs`,
           )
         }
-        return { path: reanimatedChunk }
+        return { path: reanimatedHostPath }
       })
+      build.onResolve({ filter: /^rngpui-reanimated-prebuilt$/ }, () => ({ path: reanimatedChunk }))
 
       // @tamagui/animations-reanimated → the esbuild-prebuilt chunk (when present).
       build.onResolve({ filter: /^@tamagui\/animations-reanimated$/ }, () => {

@@ -53,3 +53,14 @@ if (wantBytecode) {
   }
   console.log(`[bundle-hermes] wrote ${outHbc} (Hermes bytecode)`)
 }
+
+// every app bundle needs the worklet/UI runtime bundle staged next to the service
+// binary (plans/off-thread-reanimated.md). mtime-cached, so usually a no-op.
+// guard: build-ui-runtime.mjs itself bundles ui-entry.ts through this script.
+if (!entry.endsWith('/reanimated/ui-entry.ts')) {
+  const ui = spawnSync('bun', ['scripts/build-ui-runtime.mjs'], { cwd: root, stdio: 'inherit' })
+  if (ui.status !== 0) {
+    console.error('[bundle-hermes] build-ui-runtime failed')
+    process.exit(ui.status || 1)
+  }
+}

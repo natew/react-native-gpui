@@ -164,3 +164,22 @@ Diagnostics added along the way (all env-gated, keep): RNGPUI_BRIDGE_TRACE
 (per-op id + source thread + style keys at the host), the seam's
 undefined-value drop warning under RNGPUI_SEAM_DEBUG, and
 examples/worklet-dispatch-probe.tsx (minimal generic-dispatch probe).
+
+## Follow-ups
+
+- **Closure-cache eviction (inherited sootsim issue):** `materializedClosureCache`
+  / `remoteWorkletCache` / `shareableCache` never evict, and closureIds mint
+  fresh whenever a worklet's `__closure` identity changes (every render of a
+  closure-capturing animated component). A long-lived desktop process leaks one
+  materialization per ship. Do NOT key by hash alone (two live instances of one
+  worklet hash have distinct closures — sharing cross-contaminates mapper
+  state); the eviction signal must be lifecycle-driven (mapper stop / svFree /
+  an explicit closure-release message). See ~/soot/plans/sootsim-engine-review.md #1.
+- **Draw-probe gate:** frame_trace excludes compute_layout; promote a
+  RNGPUI_DRAW_PROBE wall-clock + reuse-rate assertion into the conformance
+  suite so a retained-layout regression can't hide (the gap that hid the
+  ~6.4ms taffy solve for months).
+- **registerEventHandler → UI runtime:** reanimated's worklet event handlers
+  (scroll/gesture) are still no-ops in the seam; the channel + runtime now make
+  host-event→UI-runtime dispatch straightforward (sootsim's
+  dispatchWorkletEvent pattern). Needed before gesture-driven worklets.

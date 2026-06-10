@@ -71,3 +71,20 @@ objc = "0.2"
 #    `RNGPUI_DRAW_PROBE` prints the per-draw wall-clock + reuse flag.
 [patch.crates-io]
 gpui = { path = "vendor/gpui-0.2.2-patched" }
+# Patched gpui-component 0.5.1 (vendored alongside gpui, same precedent). Divergences
+# from crates.io gpui-component-0.5.1, all to make <TextInput>/<TextArea> render at
+# native-macOS fidelity (the upstream defaults look non-native):
+#
+# 1. Caret width (src/input/blink_cursor.rs `CURSOR_WIDTH`): 1.5px → 1.0px. NSTextView's
+#    insertion point is a 1px-logical bar (2 device px @2x); 1.5px reads as a fat slab.
+# 2. Blink cadence (src/input/blink_cursor.rs `INTERVAL`/`PAUSE_DELAY`): 500ms toggle /
+#    300ms pause → 567ms toggle / 500ms pause, matching NSTextView's
+#    NSTextInsertionPointBlinkPeriodOn/Off (~560ms) and its type-pause-then-resume.
+# 3. Single-line vertical centering (src/input/input.rs render): the wrapper combined
+#    `.size_full()` + a fixed `.input_h()` + `.items_center()`, which fought our outer
+#    field box's height — text/placeholder sat top-aligned when the field was taller than
+#    h_8. Dropped the conflicting fixed height for single-line so `items_center` centers
+#    the editor within the real field box. See that file's comments.
+# The patch also applies to nothing else (gpui-component is only used for Input here).
+gpui-component = { path = "vendor/gpui-component-0.5.1-patched" }
+gpui-component-macros = { path = "vendor/gpui-component-macros-0.5.1-patched" }

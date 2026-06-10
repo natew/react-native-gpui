@@ -97,6 +97,18 @@ fn dispatch_real_input(window: &mut Window, input: gpui::PlatformInput, cx: &mut
     let _ = window.dispatch_event(input, cx);
 }
 
+/// The `key_char` a real keystroke would carry for a probe key. Single printable keys
+/// type themselves; named keys (enter/tab/escape/…) carry no char. Enter's char is "\n"
+/// so the focused element's `js_key` resolves it to "Enter" the same way an OS Return does.
+fn real_key_char(key: &str) -> Option<String> {
+    match key {
+        "enter" | "return" => Some("\n".to_string()),
+        "tab" => Some("\t".to_string()),
+        k if k.chars().count() == 1 => Some(k.to_string()),
+        _ => None,
+    }
+}
+
 // Injected into every <WebView> before its content loads: the React Native bridge
 // global, so existing RN web content (and our own pages) can post to the host with
 // `window.ReactNativeWebView.postMessage(data)`. It tunnels through wry's IPC, which
@@ -549,6 +561,49 @@ fn fill_root(root: Arc<ReactElement>) -> Arc<ReactElement> {
     Arc::new(r)
 }
 
+/// Offscreen harnesses (parity capture, the input pixel gate) can't change the host's
+/// real system appearance, but they need the input theme to render in a known mode.
+/// `RNGPUI_FORCE_APPEARANCE=dark|light` overrides the window appearance for the input
+/// theme decision. None = follow the real window appearance.
+fn forced_appearance() -> Option<ThemeMode> {
+    match std::env::var("RNGPUI_FORCE_APPEARANCE").ok()?.as_str() {
+        "dark" => Some(ThemeMode::Dark),
+        "light" => Some(ThemeMode::Light),
+        _ => None,
+    }
+}
+
+/// Match the theme's input-relevant colors to native macOS so gpui-component's Input
+/// renders like a real NSTextField/NSTextView:
+///   - caret  = controlAccentColor (default system blue), NOT the text color
+///   - foreground (typed text) = labelColor (white@85% dark / black@85% light), not pure white
+///   - muted_foreground (placeholder) = secondaryLabelColor-ish
+/// Applied every render (cheap field writes); the values only change with the mode.
+fn apply_native_input_theme(cx: &mut App, mode: ThemeMode) {
+    use gpui::Hsla;
+    // macOS default controlAccentColor: #007AFF (light), #0A84FF (dark).
+    let accent = match mode {
+        ThemeMode::Dark => crate::style::u32_to_hsla(0x0a84ff),
+        ThemeMode::Light => crate::style::u32_to_hsla(0x007aff),
+    };
+    // labelColor is white/black at 85% alpha; matches NSTextView's rendered text.
+    let (base_label, base_secondary): (Hsla, Hsla) = match mode {
+        ThemeMode::Dark => (
+            crate::style::u32_to_hsla(0xffffff),
+            crate::style::u32_to_hsla(0xffffff),
+        ),
+        ThemeMode::Light => (
+            crate::style::u32_to_hsla(0x000000),
+            crate::style::u32_to_hsla(0x000000),
+        ),
+    };
+    let theme = Theme::global_mut(cx);
+    theme.caret = accent;
+    theme.foreground = base_label.opacity(0.85);
+    // secondaryLabelColor ≈ 50% (placeholder); a touch dimmer than label.
+    theme.muted_foreground = base_secondary.opacity(0.5);
+}
+
 fn root_theme_mode(root: &ReactElement) -> ThemeMode {
     let default_background = crate::style::u32_to_hsla(0xe9e9ec);
     let background = root.style.background_color.unwrap_or(default_background);
@@ -784,6 +839,19 @@ fn appearance_scheme(appearance: gpui::WindowAppearance) -> &'static str {
     }
 }
 
+/// The scheme JS/tamagui themes off of. `RNGPUI_FORCE_APPEARANCE=dark|light`
+/// overrides the real window appearance so offscreen captures (the `rngpui shot`
+/// loop, parity, conformance) can pin light/dark without touching the host's
+/// system setting — the bridge must report the *forced* value, not the window's,
+/// or the app paints in the host theme regardless of the flag.
+fn effective_appearance_scheme(appearance: gpui::WindowAppearance) -> &'static str {
+    match forced_appearance() {
+        Some(ThemeMode::Dark) => "dark",
+        Some(ThemeMode::Light) => "light",
+        None => appearance_scheme(appearance),
+    }
+}
+
 fn emit_definite_cached_layouts(el: &Arc<ReactElement>) {
     if el.listens("layout") {
         if let Some((x, y, cached_w, cached_h)) = bridge::cached_layout(el.global_id) {
@@ -845,6 +913,24 @@ impl Render for ServiceApp {
             Theme::change(theme_mode, Some(window), cx);
         }
         Theme::global_mut(cx).background = gpui::Hsla::transparent_black();
+        // Native-macOS input fidelity. gpui-component's shadcn default theme ships a
+        // caret that is the foreground color (white in dark) and a foreground that is
+        // pure-ish #fafafa — neither matches NSTextView. Override at the theme layer so
+        // EVERY <TextInput>/<TextArea> inherits it (the elements read these via
+        // `cx.theme().caret` / `.foreground` / `.muted_foreground`), no per-app fixes.
+        //
+        // Drive the INPUT mode from the real window appearance, not the root-bg heuristic
+        // above: agentbus follows the system light/dark via the JS color layer and never
+        // sets a bg on the synthetic root, so `root_theme_mode` is stuck on Light — which
+        // would render dark-mode inputs with black text. `window.appearance()` is the
+        // ground truth the app itself follows.
+        let input_mode = forced_appearance().unwrap_or_else(|| match window.appearance() {
+            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark => ThemeMode::Dark,
+            gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight => {
+                ThemeMode::Light
+            }
+        });
+        apply_native_input_theme(cx, input_mode);
 
         // Emit a `resize` event whenever the content size changes, so the JS side
         // can update Dimensions and re-render. Bridges RN's Dimensions API.
@@ -1461,6 +1547,16 @@ pub(crate) enum Incoming {
         key: String,
         reply: flume::Sender<serde_json::Value>,
     },
+    /// dispatch a REAL gpui KeyDown through the window's actual key dispatch — the same
+    /// path an OS keystroke takes (keymap bindings resolved FIRST, then the focused
+    /// element's on_key_down). Unlike DebugKeyPress (which pokes a focused TextInput's
+    /// model directly), this exercises the real dispatch, so it catches a global keybinding
+    /// that swallows a key before it reaches the focused element (e.g. a bare `enter`
+    /// binding eating the terminal's submit). Reports how many host events fired.
+    DebugRealKey {
+        key: String,
+        reply: flume::Sender<serde_json::Value>,
+    },
 }
 
 /// Parse one JS-host payload into an `Incoming`. A `$cmd` object is a native host
@@ -2028,10 +2124,10 @@ fn main() {
                 // change whenever macOS toggles theme. push it to JS so tamagui
                 // re-themes live, and emit the current value once so JS matches the
                 // real window appearance from the first frame.
-                bridge::appearance(appearance_scheme(window.appearance()));
+                bridge::appearance(effective_appearance_scheme(window.appearance()));
                 window
                     .observe_window_appearance(|window, _cx| {
-                        bridge::appearance(appearance_scheme(window.appearance()));
+                        bridge::appearance(effective_appearance_scheme(window.appearance()));
                     })
                     .detach();
                 cx.new(|cx| gpui_component::Root::new(content.clone(), window, cx))
@@ -2308,7 +2404,10 @@ fn main() {
                                 {
                                     focused_id = Some(id);
                                     state.update(cx, |input, cx| {
-                                        input.insert(text.clone(), window, cx)
+                                        input.insert(text.clone(), window, cx);
+                                        // mirror real typing: keep the caret solid for the
+                                        // pause window after a keystroke.
+                                        input.pause_blink(cx);
                                     });
                                 }
                                 cx.notify();
@@ -2362,6 +2461,44 @@ fn main() {
                         }));
                         if applied.is_err() {
                             break;
+                        }
+                    }
+                    Incoming::DebugRealKey { key, reply } => {
+                        // dispatch a REAL KeyDown through gpui's actual key dispatch
+                        // (keymap bindings first, then the focused element). This is the
+                        // only probe that surfaces a global binding swallowing a key
+                        // before it reaches the focused element.
+                        let result = window_handle.update(cx, |_root, window, cx| {
+                            let before = crate::bridge::events_emitted_count();
+                            let keystroke = gpui::Keystroke {
+                                modifiers: gpui::Modifiers::default(),
+                                key: key.clone(),
+                                key_char: real_key_char(&key),
+                            };
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                                    keystroke,
+                                    is_held: false,
+                                }),
+                                cx,
+                            );
+                            crate::bridge::events_emitted_count().saturating_sub(before)
+                        });
+                        match result {
+                            Ok(emitted) => {
+                                let _ = reply.send(serde_json::json!({
+                                    "ok": true,
+                                    "type": "realKey",
+                                    "key": key,
+                                    // a key reaching a focused element that forwards it
+                                    // emits >=1 host event; 0 = the key was swallowed
+                                    // (e.g. by a global binding) before any element saw it.
+                                    "handlerFired": emitted > 0,
+                                    "eventsEmitted": emitted,
+                                }));
+                            }
+                            Err(_) => break,
                         }
                     }
                     Incoming::DebugNativeScrollAt { x, y, dy, reply } => {
@@ -2643,6 +2780,7 @@ fn main() {
                             | Incoming::Quit
                             | Incoming::DebugTypeText { .. }
                             | Incoming::DebugKeyPress { .. }
+                            | Incoming::DebugRealKey { .. }
                             | Incoming::DebugRealTap { .. }
                             | Incoming::DebugRealMove { .. }
                             | Incoming::DebugResize { .. }

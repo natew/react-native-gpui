@@ -331,9 +331,40 @@ unsafe fn configure_transparent_view(view: id, clear_color: id) {
         return;
     }
 
-    let clear_cg_color: id = msg_send![clear_color, CGColor];
     let _: () = msg_send![layer, setOpaque: NO];
-    let _: () = msg_send![layer, setBackgroundColor: clear_cg_color];
+    // One controllable app background tint: RNGPUI_APP_TINT="r,g,b,a" (r/g/b 0-255,
+    // a 0-1) paints the content view's backing layer, which sits at the very BOTTOM
+    // — below the glass blur, the Metal chrome, the WebView underlay, and every
+    // drop shadow. So it shows through the transparent chrome gutters as a uniform
+    // tint, is hidden behind the opaque stage WebView, and can never clip the
+    // stage's drop shadow (unlike a per-element Metal fill, which does). Unset =
+    // clearColor (raw glass), preserving the previous look.
+    let tint_cg_color: id =
+        unsafe { app_tint_cg_color() }.unwrap_or_else(|| msg_send![clear_color, CGColor]);
+    let _: () = msg_send![layer, setBackgroundColor: tint_cg_color];
+}
+
+// Parse RNGPUI_APP_TINT into a CGColor, or None when unset/invalid.
+unsafe fn app_tint_cg_color() -> Option<id> {
+    let raw = std::env::var("RNGPUI_APP_TINT").ok()?;
+    let parts: Vec<f64> = raw
+        .split(',')
+        .map(|p| p.trim().parse::<f64>())
+        .collect::<Result<_, _>>()
+        .ok()?;
+    if parts.len() != 4 {
+        return None;
+    }
+    let color: id = msg_send![class!(NSColor),
+        colorWithSRGBRed: parts[0] / 255.0
+        green: parts[1] / 255.0
+        blue: parts[2] / 255.0
+        alpha: parts[3]];
+    if color == nil {
+        return None;
+    }
+    let cg: id = msg_send![color, CGColor];
+    Some(cg)
 }
 
 fn raw_ns_view(window: &mut Window) -> Option<id> {

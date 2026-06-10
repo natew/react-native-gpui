@@ -1,5 +1,5 @@
 use crate::{
-    ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
+    ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, Font, GlobalElementId,
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
     TextRun, TextStyle, TooltipId, WhiteSpace, Window, WrappedLine, WrappedLineLayout,
@@ -46,10 +46,10 @@ impl Element for &'static str {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         text_layout: &mut Self::RequestLayoutState,
-        _window: &mut Window,
-        _cx: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) {
-        text_layout.prepaint(bounds, self)
+        text_layout.prepaint(bounds, self, window, cx)
     }
 
     fn paint(
@@ -112,10 +112,10 @@ impl Element for SharedString {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         text_layout: &mut Self::RequestLayoutState,
-        _window: &mut Window,
-        _cx: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) {
-        text_layout.prepaint(bounds, self.as_ref())
+        text_layout.prepaint(bounds, self.as_ref(), window, cx)
     }
 
     fn paint(
@@ -279,10 +279,10 @@ impl Element for StyledText {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
-        _window: &mut Window,
-        _cx: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) {
-        self.layout.prepaint(bounds, &self.text)
+        self.layout.prepaint(bounds, &self.text, window, cx)
     }
 
     fn paint(
@@ -316,8 +316,33 @@ struct TextLayoutInner {
     lines: SmallVec<[WrappedLine; 1]>,
     line_height: Pixels,
     wrap_width: Option<Pixels>,
+    // react-native-gpui patch: the width the currently-cached `lines` were TRUNCATED to.
+    // Set by the measure pass (to whatever taffy probe won) and overwritten by the prepaint
+    // re-truncation (to the final box width). prepaint reads it to decide whether the cached
+    // glyphs already match the box width or must be re-shaped.
+    truncate_width: Option<Pixels>,
     size: Option<Size<Pixels>>,
     bounds: Option<Bounds<Pixels>>,
+    // react-native-gpui patch: everything needed to RE-TRUNCATE + RE-SHAPE the text at
+    // prepaint against the FINAL laid-out box width. The measure pass truncates to whatever
+    // taffy probe happened to win (MinContent on a full solve, the retained box width on a
+    // reuse frame) — those disagree, so the painted glyphs flickered between e.g. "[gui" and
+    // the full title. CSS truncates to the CONTENT BOX width, which is only known at
+    // prepaint. `reshape` is set only for single-line truncating text (text_overflow +
+    // nowrap, no line_clamp wrapping); prepaint uses it to re-shape to `bounds.size.width`
+    // when that differs from `truncate_width`, making every frame paint the identical,
+    // correct, box-width truncation.
+    reshape: Option<TextReshape>,
+}
+
+/// Inputs captured at measure time so a single-line truncating text node can be re-shaped
+/// to its FINAL box width at prepaint (see `TextLayoutInner::reshape`).
+struct TextReshape {
+    text: SharedString,
+    runs: Vec<TextRun>,
+    font: Font,
+    font_size: Pixels,
+    truncation_suffix: SharedString,
 }
 
 impl TextLayout {
@@ -377,6 +402,25 @@ impl TextLayout {
                     return text_layout.size.unwrap();
                 }
 
+                // react-native-gpui patch: a single-line truncating node (text_overflow +
+                // nowrap, no wrapping clamp) is re-truncated to its FINAL box width at
+                // prepaint, so capture the UNtruncated runs + font here before truncate_line
+                // mutates `runs`. Wrapping clamps still truncate in measure as before.
+                let reshape = if text_style.text_overflow.is_some()
+                    && text_style.white_space != WhiteSpace::Normal
+                    && text_style.line_clamp.is_none()
+                {
+                    Some(TextReshape {
+                        text: text.clone(),
+                        runs: runs.clone(),
+                        font: text_style.font(),
+                        font_size,
+                        truncation_suffix: truncation_suffix.clone(),
+                    })
+                } else {
+                    None
+                };
+
                 let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
                 let text = if let Some(truncate_width) = truncate_width {
                     line_wrapper.truncate_line(
@@ -406,8 +450,10 @@ impl TextLayout {
                         len: 0,
                         line_height,
                         wrap_width,
+                        truncate_width,
                         size: Some(Size::default()),
                         bounds: None,
+                        reshape: None,
                     });
                     return Size::default();
                 };
@@ -424,8 +470,10 @@ impl TextLayout {
                     len,
                     line_height,
                     wrap_width,
+                    truncate_width,
                     size: Some(size),
                     bounds: None,
+                    reshape,
                 });
 
                 size
@@ -433,13 +481,46 @@ impl TextLayout {
         })
     }
 
-    fn prepaint(&self, bounds: Bounds<Pixels>, text: &str) {
+    fn prepaint(&self, bounds: Bounds<Pixels>, text: &str, window: &mut Window, cx: &mut App) {
         let mut element_state = self.0.borrow_mut();
         let element_state = element_state
             .as_mut()
             .with_context(|| format!("measurement has not been performed on {text}"))
             .unwrap();
         element_state.bounds = Some(bounds);
+
+        // react-native-gpui patch: authoritative single-line truncation. The measure pass
+        // truncated the glyphs to whatever taffy probe won (which differs between a
+        // full-solve frame and a retained-layout reuse frame → the painted title flickered
+        // between e.g. "[gui" and the full text). CSS truncates to the CONTENT BOX, whose
+        // width is only known now. Re-shape to the final box width whenever it differs from
+        // what the cached glyphs were truncated to, so every frame paints the identical,
+        // correct, box-width truncation. Only single-line truncating text carries `reshape`.
+        if let Some(reshape) = element_state.reshape.as_ref() {
+            let box_width = bounds.size.width;
+            if element_state.truncate_width != Some(box_width) {
+                let mut runs = reshape.runs.clone();
+                let truncated = cx
+                    .text_system()
+                    .line_wrapper(reshape.font.clone(), reshape.font_size)
+                    .truncate_line(
+                        reshape.text.clone(),
+                        box_width,
+                        &reshape.truncation_suffix,
+                        &mut runs,
+                    );
+                let len = truncated.len();
+                if let Some(lines) = window
+                    .text_system()
+                    .shape_text(truncated, reshape.font_size, &runs, None, None)
+                    .log_err()
+                {
+                    element_state.lines = lines;
+                    element_state.len = len;
+                    element_state.truncate_width = Some(box_width);
+                }
+            }
+        }
     }
 
     fn paint(&self, text: &str, window: &mut Window, cx: &mut App) {
@@ -452,6 +533,24 @@ impl TextLayout {
             .bounds
             .with_context(|| format!("prepaint has not been performed on {text}"))
             .unwrap();
+        // RNGPUI_PAINT_LEN_TRACE: emit the ACTUAL painted glyph-run byte length per text node
+        // (keyed by box position + full text), so a conformance gate can assert that a given
+        // truncating node paints ONE deterministic length across full-solve and reuse frames.
+        // This is the ground-truth signal for the ellipsis-flicker class — independent of any
+        // offscreen capture timing.
+        if std::env::var_os("RNGPUI_PAINT_LEN_TRACE").is_some()
+            && element_state.reshape.is_some()
+            && f32::from(bounds.origin.x) < 340.0
+        {
+            eprintln!(
+                "[paintlen] x={:.0} y={:.0} w={:.0} painted_len={} text={:?}",
+                f32::from(bounds.origin.x),
+                f32::from(bounds.origin.y),
+                f32::from(bounds.size.width),
+                element_state.len,
+                &text[..text.len().min(24)]
+            );
+        }
 
         let line_height = element_state.line_height;
         let mut line_origin = bounds.origin;

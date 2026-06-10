@@ -54,6 +54,30 @@ use util::ResultExt;
 
 const WINDOW_STATE_IVAR: &str = "windowState";
 
+// env-gated activation-latency tracing (RNGPUI_ACTIVATION_TRACE=1). temporary
+// diagnostics for the cmd+tab stall investigation — prints monotonic-ms-tagged
+// lines so we can see exactly where activation servicing blocks.
+fn activation_trace_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RNGPUI_ACTIVATION_TRACE").is_some())
+}
+
+fn trace_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+macro_rules! act_trace {
+    ($($arg:tt)*) => {
+        if activation_trace_enabled() {
+            eprintln!("[act-trace {}] {}", trace_ms(), format_args!($($arg)*));
+        }
+    };
+}
+
 static mut WINDOW_CLASS: *const Class = ptr::null();
 static mut PANEL_CLASS: *const Class = ptr::null();
 static mut VIEW_CLASS: *const Class = ptr::null();
@@ -1913,9 +1937,11 @@ extern "C" fn window_did_change_occlusion_state(this: &Object, _: Sel, _: id) {
             .occlusionState()
             .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
         {
+            act_trace!("occlusion -> VISIBLE, start_display_link");
             lock.move_traffic_light();
             lock.start_display_link();
         } else {
+            act_trace!("occlusion -> OCCLUDED, stop_display_link");
             lock.stop_display_link();
         }
     }
@@ -2003,25 +2029,30 @@ extern "C" fn window_did_change_key_status(this: &Object, selector: Sel, _: id) 
     // This is only done on subsequent activations (not the first) to ensure the initial focus
     // path is properly established. Without this guard, the focus state would remain unset until
     // the first mouse click, causing keybindings to be non-functional.
+    act_trace!(
+        "key_status change sel={:?} is_active={}",
+        if selector == sel!(windowDidBecomeKey:) { "becomeKey" } else { "resignKey" },
+        is_active
+    );
     if selector == sel!(windowDidBecomeKey:) && is_active {
         let window_state = unsafe { get_window_state(this) };
         let mut lock = window_state.lock();
 
         if lock.activated_least_once {
-            if let Some(mut callback) = lock.request_frame_callback.take() {
-                #[cfg(not(feature = "macos-blade"))]
-                lock.renderer.set_presents_with_transaction(true);
-                lock.stop_display_link();
-                drop(lock);
-                callback(Default::default());
-
-                let mut lock = window_state.lock();
-                lock.request_frame_callback = Some(callback);
-                #[cfg(not(feature = "macos-blade"))]
-                lock.renderer.set_presents_with_transaction(false);
-                lock.start_display_link();
-            }
+            // upstream renders a SYNCHRONOUS frame here with presents_with_transaction
+            // so the refocused window shows fresh key-state visuals in the same
+            // CATransaction as activation. that transactional present wedges
+            // WindowServer's app-switcher transaction when cmd+tab switches arrive in
+            // rapid succession (away/back/away): the window's reorder ops defer for
+            // 0.7-4s while the front process bookkeeping completes instantly — the
+            // window visibly sticks above the newly-fronted app (measured via
+            // CGWindowList; the app's own thread is idle the whole time). an async
+            // frame one display-link tick later is visually equivalent for us and
+            // never entangles the switcher transaction.
+            act_trace!("becomeKey: async refresh (sync transactional frame skipped)");
+            lock.start_display_link();
         } else {
+            act_trace!("becomeKey: first activation, skipping sync frame");
             lock.activated_least_once = true;
         }
     }
@@ -2137,11 +2168,13 @@ extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.lock();
     if let Some(mut callback) = lock.request_frame_callback.take() {
+        act_trace!("display_layer: sync frame BEGIN (presents_with_transaction)");
         #[cfg(not(feature = "macos-blade"))]
         lock.renderer.set_presents_with_transaction(true);
         lock.stop_display_link();
         drop(lock);
         callback(Default::default());
+        act_trace!("display_layer: sync frame END");
 
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);

@@ -357,7 +357,21 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
+        let _nd_t0 = std::time::Instant::now();
         let drawable = if let Some(drawable) = layer.next_drawable() {
+            if std::env::var_os("RNGPUI_ACTIVATION_TRACE").is_some() {
+                let us = _nd_t0.elapsed().as_micros();
+                if us > 1000 {
+                    eprintln!(
+                        "[act-trace {}] metal next_drawable took {}us",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0),
+                        us
+                    );
+                }
+            }
             drawable
         } else {
             log::error!(
@@ -386,8 +400,22 @@ impl MetalRenderer {
                     command_buffer.add_completed_handler(&block);
 
                     if self.presents_with_transaction {
+                        let _ws_t0 = std::time::Instant::now();
                         command_buffer.commit();
                         command_buffer.wait_until_scheduled();
+                        if std::env::var_os("RNGPUI_ACTIVATION_TRACE").is_some() {
+                            let us = _ws_t0.elapsed().as_micros();
+                            if us > 1000 {
+                                eprintln!(
+                                    "[act-trace {}] metal wait_until_scheduled took {}us",
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis())
+                                        .unwrap_or(0),
+                                    us
+                                );
+                            }
+                        }
                         drawable.present();
                     } else {
                         command_buffer.present_drawable(drawable);

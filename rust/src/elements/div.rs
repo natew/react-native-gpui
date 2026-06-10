@@ -755,6 +755,53 @@ pub fn synth_drag_move(
         false
     };
     let active_target = *ACTIVE_MOUSE_TARGET.lock().unwrap();
+    // a real captured drag keeps delivering move events to the element that grabbed
+    // the press, even as the pointer wanders over OTHER elements (the
+    // target_receives_captured_pointer_event branch in the live MouseMoveEvent
+    // handler). The hit-test-driven synth path above only targets the element under
+    // the cursor, so a trigger-anchored gesture (press a trigger, drag into a
+    // separate popover the trigger spawned — e.g. the project picker menu) never saw
+    // its captured moves. Mirror the live handler: when the captured target isn't the
+    // hit-tested one, also emit its move at the current position using its own stored
+    // bounds, so its locationY is correct for the popover hit-test it drives in JS.
+    if let Some(captured_id) = active_target
+        && captured_id != id
+        && let Some(start) = SYNTH_DRAG_START_TARGET.lock().unwrap().clone()
+        && start.id == captured_id
+    {
+        emit_mouse_if(
+            captured_id,
+            start.events.iter().any(|event| event == "mouseMove"),
+            "mouseMove",
+            position,
+            start.bounds,
+            Modifiers::default(),
+        );
+        emit_mouse_if(
+            captured_id,
+            start.events.iter().any(|event| event == "pointerMove"),
+            "pointerMove",
+            position,
+            start.bounds,
+            Modifiers::default(),
+        );
+        emit_mouse_if(
+            captured_id,
+            start.events.iter().any(|event| event == "touchMove"),
+            "touchMove",
+            position,
+            start.bounds,
+            Modifiers::default(),
+        );
+        emit_mouse_if(
+            captured_id,
+            start.events.iter().any(|event| event == "responderMove"),
+            "responderMove",
+            position,
+            start.bounds,
+            Modifiers::default(),
+        );
+    }
     if target_receives_captured_pointer_event(active_target, id, true) {
         emit_mouse_if(
             id,

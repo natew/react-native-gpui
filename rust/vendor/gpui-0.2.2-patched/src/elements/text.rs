@@ -328,10 +328,10 @@ struct TextLayoutInner {
     // taffy probe happened to win (MinContent on a full solve, the retained box width on a
     // reuse frame) — those disagree, so the painted glyphs flickered between e.g. "[gui" and
     // the full title. CSS truncates to the CONTENT BOX width, which is only known at
-    // prepaint. `reshape` is set only for single-line truncating text (text_overflow +
-    // nowrap, no line_clamp wrapping); prepaint uses it to re-shape to `bounds.size.width`
-    // when that differs from `truncate_width`, making every frame paint the identical,
-    // correct, box-width truncation.
+    // prepaint. `reshape` is set for single-line truncating text (text_overflow + nowrap)
+    // AND for wrapped line-clamps (numberOfLines={n>1}); prepaint uses it to re-shape to
+    // `bounds.size.width` when that differs from `truncate_width`, making every frame
+    // paint the identical, correct, box-width truncation.
     reshape: Option<TextReshape>,
 }
 
@@ -343,6 +343,9 @@ struct TextReshape {
     font: Font,
     font_size: Pixels,
     truncation_suffix: SharedString,
+    // Some(n) = a WRAPPED line-clamp (numberOfLines={n>1}): prepaint re-wraps to the
+    // final box width and re-clamps, instead of the single-line truncate.
+    line_clamp: Option<usize>,
 }
 
 impl TextLayout {
@@ -416,6 +419,23 @@ impl TextLayout {
                         font: text_style.font(),
                         font_size,
                         truncation_suffix: truncation_suffix.clone(),
+                        line_clamp: None,
+                    })
+                } else if text_style.text_overflow.is_some()
+                    && text_style.white_space == WhiteSpace::Normal
+                    && text_style.line_clamp.is_some()
+                {
+                    // wrapped line-clamp (numberOfLines={n>1}): the measure pass wraps +
+                    // truncates to the taffy probe width, which flickers between probes
+                    // (a tiny min-content probe shaped "Mac…" while the real box fits
+                    // "Mac.lan · ~/agentbus"). reshape at prepaint, same as single-line.
+                    Some(TextReshape {
+                        text: text.clone(),
+                        runs: runs.clone(),
+                        font: text_style.font(),
+                        font_size,
+                        truncation_suffix: truncation_suffix.clone(),
+                        line_clamp: text_style.line_clamp,
                     })
                 } else {
                     None
@@ -498,26 +518,36 @@ impl TextLayout {
         // correct, box-width truncation. Only single-line truncating text carries `reshape`.
         if let Some(reshape) = element_state.reshape.as_ref() {
             let box_width = bounds.size.width;
-            if element_state.truncate_width != Some(box_width) {
+            // single-line truncates to the box width; a wrapped clamp truncates the raw
+            // string at width*n (mirroring the measure pass) and re-wraps to the box.
+            let truncate_to = match reshape.line_clamp {
+                Some(max_lines) => box_width * max_lines,
+                None => box_width,
+            };
+            if element_state.truncate_width != Some(truncate_to) {
                 let mut runs = reshape.runs.clone();
                 let truncated = cx
                     .text_system()
                     .line_wrapper(reshape.font.clone(), reshape.font_size)
                     .truncate_line(
                         reshape.text.clone(),
-                        box_width,
+                        truncate_to,
                         &reshape.truncation_suffix,
                         &mut runs,
                     );
                 let len = truncated.len();
+                let (wrap_width, line_clamp) = match reshape.line_clamp {
+                    Some(max_lines) => (Some(box_width), Some(max_lines)),
+                    None => (None, None),
+                };
                 if let Some(lines) = window
                     .text_system()
-                    .shape_text(truncated, reshape.font_size, &runs, None, None)
+                    .shape_text(truncated, reshape.font_size, &runs, wrap_width, line_clamp)
                     .log_err()
                 {
                     element_state.lines = lines;
                     element_state.len = len;
-                    element_state.truncate_width = Some(box_width);
+                    element_state.truncate_width = Some(truncate_to);
                 }
             }
         }

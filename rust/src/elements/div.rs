@@ -2071,6 +2071,12 @@ impl Element for ReactDivElement {
                             }
                         }
                         let active_target = *ACTIVE_MOUSE_TARGET.lock().unwrap();
+                        if drag_trace() && ev.dragging() && active_target == Some(id) {
+                            eprintln!(
+                                "[drag-trace] CAPMOVE id={id} inside={inside} responder_move={responder_move} touch_move={touch_move} pos={:?}",
+                                ev.position
+                            );
+                        }
                         if target_receives_captured_pointer_event(active_target, id, inside) {
                             emit_mouse_if(
                                 id,

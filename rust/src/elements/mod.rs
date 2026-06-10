@@ -165,7 +165,48 @@ pub struct ReactElement {
     /// always carry a style).
     pub style_json: Option<serde_json::Value>,
     pub cached_gpui_style: Option<gpui::Style>,
+    /// precomputed at parse: this node listens for any pointer/press event (the
+    /// `POINTER_EVENTS` scan) — prepaint reads this once per frame per node, so the
+    /// 28-name string scan must not run there.
+    pub interactive: bool,
+    /// precomputed at parse: `pseudo_style` holds a native hover/press style for this
+    /// node (avoids a global-map lock per node per frame in prepaint).
+    pub has_pseudo_style: bool,
 }
+
+/// Event names that make a node claim a hitbox (pointer/press input of any kind).
+pub const POINTER_EVENTS: &[&str] = &[
+    "click",
+    "mouseDown",
+    "mouseUp",
+    "mouseEnter",
+    "mouseLeave",
+    "mouseOver",
+    "mouseOut",
+    "mouseMove",
+    "pointerDown",
+    "pointerUp",
+    "pointerEnter",
+    "pointerLeave",
+    "pointerMove",
+    "touchStart",
+    "touchMove",
+    "touchEnd",
+    "touchCancel",
+    "startShouldSetResponder",
+    "startShouldSetResponderCapture",
+    "responderGrant",
+    "responderMove",
+    "responderRelease",
+    "responderStart",
+    "responderEnd",
+    "responderTerminate",
+    "responderTerminationRequest",
+    "press",
+    "longPress",
+    "pressIn",
+    "pressOut",
+];
 
 impl ReactElement {
     /// True if this node listens for the given event name.
@@ -174,17 +215,17 @@ impl ReactElement {
     }
 
     pub fn build_gpui_style(&self, default_bg: Option<u32>) -> gpui::Style {
+        let _t = crate::frame_trace::named(0);
         // animated fast path: when reanimated has a live per-frame override for this
-        // node, merge it over the committed style and rebuild (bypassing the cache,
-        // which holds only the committed style). This is the SINGLE style path that
-        // feeds both yoga layout (request_layout) and paint, so a width/height spring
-        // reflows and an opacity/color spring repaints — see `crate::anim_overlay`.
+        // node, merge it over the committed style and rebuild. This is the SINGLE style
+        // path that feeds both yoga layout (request_layout) and paint, so a width/height
+        // spring reflows and an opacity/color spring repaints — see `crate::anim_overlay`
+        // (which caches the merged build, so a steady overlay costs a clone per frame).
         if let Some(ref base_json) = self.style_json
-            && crate::anim_overlay::has_overlay(self.global_id)
             && let Some(merged) =
-                crate::anim_overlay::merged_style(self.global_id, &self.style, base_json)
+                crate::anim_overlay::merged_gpui_style(self.global_id, base_json, default_bg)
         {
-            return merged.build_gpui_style(default_bg);
+            return merged;
         }
         // cache holds the default_bg=None variant (the only one live callers use);
         // recompute for the rare explicit-default case so the cache can't go stale.

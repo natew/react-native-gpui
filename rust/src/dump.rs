@@ -107,10 +107,7 @@ fn dump_node(el: &Arc<ReactElement>) -> Value {
     let effective_style = el
         .style_json
         .as_ref()
-        .filter(|_| crate::anim_overlay::has_overlay(el.global_id))
-        .and_then(|base_json| {
-            crate::anim_overlay::merged_style(el.global_id, &el.style, base_json)
-        });
+        .and_then(|base_json| crate::anim_overlay::merged_element_style(el.global_id, base_json));
     let style = resolved_style(effective_style.as_ref().unwrap_or(&el.style));
     if !style.is_empty() {
         obj.insert("style".into(), Value::Object(style));

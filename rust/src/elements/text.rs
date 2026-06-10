@@ -189,6 +189,7 @@ impl Element for ReactTextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
+        let _t = crate::frame_trace::named(6);
         let style = self.element.build_gpui_style(None);
         if style.display == Display::None {
             self.child = None;

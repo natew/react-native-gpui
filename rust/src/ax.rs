@@ -18,7 +18,7 @@ use crate::elements::ReactElement;
 
 const NODE_ID_IVAR: &str = "rngpuiNodeId";
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 struct Frame {
     x: f64,
     y: f64,
@@ -60,6 +60,10 @@ struct AxNode {
     is_element: bool,
     events: Vec<String>,
     frame: Option<Frame>,
+    /// the (own frame, parent frame) pair last pushed to AppKit — `update_frame` runs for
+    /// every div on every draw, so it must skip the NSView setFrame/attach calls when
+    /// nothing moved (an unconditional setFrame on ~100 views was a fixed per-frame tax).
+    applied: Option<(Frame, Frame)>,
 }
 
 #[derive(Default)]
@@ -107,7 +111,11 @@ pub fn sync_tree(window: &mut Window, root: &Arc<ReactElement>) {
         }
 
         for descriptor in descriptors {
-            let frame = state.nodes.get(&descriptor.id).and_then(|node| node.frame);
+            let (frame, applied) = state
+                .nodes
+                .get(&descriptor.id)
+                .map(|node| (node.frame, node.applied))
+                .unwrap_or((None, None));
             let view = match state.nodes.get(&descriptor.id) {
                 Some(node) => node.view,
                 None => create_view(descriptor.id) as usize,
@@ -131,6 +139,7 @@ pub fn sync_tree(window: &mut Window, root: &Arc<ReactElement>) {
                     is_element: descriptor.is_element,
                     events: descriptor.events,
                     frame,
+                    applied,
                 },
             );
         }
@@ -159,41 +168,36 @@ pub fn sync_tree(window: &mut Window, root: &Arc<ReactElement>) {
     }
 }
 
-pub fn update_frame(window: &mut Window, element: &ReactElement, bounds: Bounds<Pixels>) {
-    let Some(content_view) = content_view(window) else {
-        return;
+pub fn update_frame(_window: &mut Window, element: &ReactElement, bounds: Bounds<Pixels>) {
+    let frame = Frame {
+        x: bounds.origin.x.into(),
+        y: bounds.origin.y.into(),
+        width: bounds.size.width.into(),
+        height: bounds.size.height.into(),
     };
 
     unsafe {
-        let content_frame: NSRect = msg_send![content_view, frame];
-        let frame = Frame {
-            x: bounds.origin.x.into(),
-            y: bounds.origin.y.into(),
-            width: bounds.size.width.into(),
-            height: bounds.size.height.into(),
-        };
-
         let mut state = state().lock().unwrap();
+        // fast reject before ANY objc work: this runs for every div on every draw, and
+        // the overwhelming majority of nodes are not AX-registered.
         let Some(node) = state.nodes.get(&element.global_id) else {
             return;
         };
         let node_parent_id = node.parent_id;
         let node_view = node.view as id;
-        let (parent_frame, parent_view) = match node_parent_id {
-            Some(parent_id) => {
-                let parent = state.nodes.get(&parent_id);
-                let frame = parent.and_then(|parent| parent.frame).unwrap_or(Frame {
-                    x: 0.0,
-                    y: 0.0,
-                    width: content_frame.size.width,
-                    height: content_frame.size.height,
-                });
-                let view = parent
-                    .map(|parent| parent.view as id)
-                    .unwrap_or(content_view);
-                (frame, view)
-            }
-            None => (
+        let prev_applied = node.applied;
+
+        // resolve the parent's frame/view; only fall back to the (objc-fetched) content
+        // view geometry for root-level AX nodes or a missing parent — the common child
+        // path stays free of AppKit calls entirely.
+        let content_view_frame = |state: &AxState| -> Option<(Frame, id)> {
+            let content_view = if state.content_view != 0 {
+                state.content_view as id
+            } else {
+                return None;
+            };
+            let content_frame: NSRect = msg_send![content_view, frame];
+            Some((
                 Frame {
                     x: 0.0,
                     y: 0.0,
@@ -201,10 +205,44 @@ pub fn update_frame(window: &mut Window, element: &ReactElement, bounds: Bounds<
                     height: content_frame.size.height,
                 },
                 content_view,
-            ),
+            ))
         };
+        let (parent_frame, parent_view) = match node_parent_id {
+            Some(parent_id) => match state.nodes.get(&parent_id) {
+                Some(parent) if parent.frame.is_some() => {
+                    (parent.frame.unwrap(), parent.view as id)
+                }
+                Some(parent) => {
+                    let Some((frame, _)) = content_view_frame(&state) else {
+                        return;
+                    };
+                    (frame, parent.view as id)
+                }
+                None => {
+                    let Some((frame, view)) = content_view_frame(&state) else {
+                        return;
+                    };
+                    (frame, view)
+                }
+            },
+            None => {
+                let Some((frame, view)) = content_view_frame(&state) else {
+                    return;
+                };
+                (frame, view)
+            }
+        };
+
         if let Some(node) = state.nodes.get_mut(&element.global_id) {
             node.frame = Some(frame);
+        }
+        // skip the AppKit attach/setFrame when neither this node nor its parent moved —
+        // an unconditional NSView setFrame on every AX node was a fixed per-frame tax.
+        if prev_applied == Some((frame, parent_frame)) {
+            return;
+        }
+        if let Some(node) = state.nodes.get_mut(&element.global_id) {
+            node.applied = Some((frame, parent_frame));
         }
 
         let local_x = frame.x - parent_frame.x;
@@ -789,6 +827,8 @@ mod tests {
             style: ElementStyle::default(),
             style_json: None,
             cached_gpui_style: None,
+            interactive: false,
+            has_pseudo_style: false,
         }
     }
 

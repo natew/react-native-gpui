@@ -45,9 +45,11 @@ pub fn set(id: u64, hover: Option<gpui::Style>, press: Option<gpui::Style>) {
     }
 }
 
-/// True when this node carries a native hover/press pseudo style. The host must claim a hitbox for
-/// such a node (even with zero JS listeners) so paint can read its hover/press state.
-pub fn has(id: u64) -> bool {
+/// True when this node carries a native hover/press pseudo style. Production code reads
+/// the precomputed `ReactElement::has_pseudo_style` flag instead (no lock per node per
+/// frame); this stays for the tests below.
+#[cfg(test)]
+fn has(id: u64) -> bool {
     STYLES.lock().unwrap().contains_key(&id)
 }
 

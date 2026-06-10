@@ -986,6 +986,9 @@ pub struct ReactDivElement {
     element: Arc<ReactElement>,
     window_id: u64,
     children: Vec<StackedChild>,
+    /// the style built in request_layout, reused by paint — building (cloning) the
+    /// gpui::Style twice per node per frame was a measurable slice of every frame.
+    computed_style: Option<gpui::Style>,
 }
 
 struct StackedChild {
@@ -999,6 +1002,7 @@ impl ReactDivElement {
             element,
             window_id,
             children: Vec::new(),
+            computed_style: None,
         }
     }
 
@@ -1311,15 +1315,18 @@ impl Element for ReactDivElement {
         }
 
         // Build children
-        self.children = self
-            .element
-            .children
-            .iter()
-            .map(|child| StackedChild {
-                element: create_element(child.clone(), self.window_id),
-                z_index: child.style.z_index.unwrap_or(0),
-            })
-            .collect();
+        {
+            let _t = crate::frame_trace::named(1);
+            self.children = self
+                .element
+                .children
+                .iter()
+                .map(|child| StackedChild {
+                    element: create_element(child.clone(), self.window_id),
+                    z_index: child.style.z_index.unwrap_or(0),
+                })
+                .collect();
+        }
 
         // If element has text content, add it
         if let Some(ref text) = self.element.text {
@@ -1354,6 +1361,10 @@ impl Element for ReactDivElement {
             .map(|c| c.element.request_layout(window, cx))
             .collect();
 
+        let _t = crate::frame_trace::named(2);
+        // stash the built style for paint — the same element instance carries through
+        // this frame's stages, so paint must not rebuild (clone) it a second time.
+        self.computed_style = Some(style.clone());
         let layout_id = window.request_layout(style, child_ids.iter().copied(), cx);
         (layout_id, child_ids)
     }
@@ -1373,7 +1384,10 @@ impl Element for ReactDivElement {
         }
 
         #[cfg(target_os = "macos")]
-        crate::ax::update_frame(window, &self.element, bounds);
+        {
+            let _t = crate::frame_trace::named(3);
+            crate::ax::update_frame(window, &self.element, bounds);
+        }
 
         let (_, scroll) = overflow_mode(&self.element.style);
 
@@ -1383,43 +1397,12 @@ impl Element for ReactDivElement {
         let interactive = self.element.native_resize.is_some()
             // a node with a native hover/press style needs a hitbox even with no JS listeners,
             // so the paint pass can read its hover/press state and apply the pseudo style.
-            || crate::pseudo_style::has(self.element.global_id)
-            || [
-                "click",
-                "mouseDown",
-                "mouseUp",
-                "mouseEnter",
-                "mouseLeave",
-                "mouseOver",
-                "mouseOut",
-                "mouseMove",
-                "pointerDown",
-                "pointerUp",
-                "pointerEnter",
-                "pointerLeave",
-                "pointerMove",
-                "touchStart",
-                "touchMove",
-                "touchEnd",
-                "touchCancel",
-                "startShouldSetResponder",
-                "startShouldSetResponderCapture",
-                "responderGrant",
-                "responderMove",
-                "responderRelease",
-                "responderStart",
-                "responderEnd",
-                "responderTerminate",
-                "responderTerminationRequest",
-                "press",
-                "longPress",
-                "pressIn",
-                "pressOut",
-            ]
-            .iter()
-            .any(|name| self.element.listens(name));
+            // both facts are precomputed at parse (this runs per node per frame).
+            || self.element.has_pseudo_style
+            || self.element.interactive;
         let cursor = self.element.style.cursor.is_some();
         let hitbox = if interactive || scroll || cursor {
+            let _t = crate::frame_trace::named(4);
             Some(window.insert_hitbox(bounds, HitboxBehavior::Normal))
         } else {
             None
@@ -1436,6 +1419,7 @@ impl Element for ReactDivElement {
                 .background_color
                 .is_some_and(|c| c.a > 0.0);
         if interactive || has_visible_bg {
+            let _t = crate::frame_trace::named(5);
             crate::hit_passthrough::record_occluder(
                 bounds.origin.x.into(),
                 bounds.origin.y.into(),
@@ -1512,7 +1496,13 @@ impl Element for ReactDivElement {
             return;
         }
 
-        let mut style = self.element.build_gpui_style(None);
+        // reuse the style request_layout built this frame (it differs only by the
+        // native-layout size/inset overrides, which paint never reads — geometry comes
+        // from taffy bounds). rebuilding here doubled the per-node style cost.
+        let mut style = self
+            .computed_style
+            .take()
+            .unwrap_or_else(|| self.element.build_gpui_style(None));
         // native hover/press: when this node carries a pseudo style (see `crate::pseudo_style`) and
         // its own hitbox reports hover (and, for press, a held left button), paint the precomputed
         // pseudo variant. This is the whole point — a hover bg change repaints here on the host
@@ -2016,22 +2006,29 @@ impl Element for ReactDivElement {
                                 layout_bounds,
                                 ev.modifiers,
                             );
-                            emit_mouse_if(
-                                id,
-                                touch_move,
-                                "touchMove",
-                                ev.position,
-                                layout_bounds,
-                                ev.modifiers,
-                            );
-                            emit_mouse_if(
-                                id,
-                                responder_move,
-                                "responderMove",
-                                ev.position,
-                                layout_bounds,
-                                ev.modifiers,
-                            );
+                            // responder/touch moves are RN press-gesture events: they only
+                            // exist while a press is active. Without the dragging gate every
+                            // wandering HOVER move crossed the bridge as a responderMove to
+                            // any Pressable under the cursor (Tamagui subscribes it on every
+                            // pressable) — a per-move JS round-trip for nothing.
+                            if ev.dragging() {
+                                emit_mouse_if(
+                                    id,
+                                    touch_move,
+                                    "touchMove",
+                                    ev.position,
+                                    layout_bounds,
+                                    ev.modifiers,
+                                );
+                                emit_mouse_if(
+                                    id,
+                                    responder_move,
+                                    "responderMove",
+                                    ev.position,
+                                    layout_bounds,
+                                    ev.modifiers,
+                                );
+                            }
                         }
                     });
                     window.on_mouse_event(move |_ev: &MouseExitEvent, phase, _w, _cx| {

@@ -45,6 +45,50 @@ thread_local! {
     static REBUILT: Cell<u32> = const { Cell::new(0) };
     // whether root was dirty (real commit) or this was an idle repaint (hover/scroll).
     static ROOT_DIRTY: Cell<bool> = const { Cell::new(false) };
+    // named sub-stage accumulators (RNGPUI_FRAME_TRACE=2): attribute the stage totals to
+    // specific per-node work without a sampling profiler.
+    static NAMED: [Cell<Duration>; NAMED_COUNT] = const { [const { Cell::new(Duration::ZERO) }; NAMED_COUNT] };
+}
+
+pub const NAMED_COUNT: usize = 8;
+pub const NAMED_LABELS: [&str; NAMED_COUNT] = [
+    "style_build",
+    "child_create",
+    "taffy_request",
+    "ax",
+    "hitbox",
+    "occluder",
+    "text_layout",
+    "paint_quad",
+];
+
+static DETAIL: Lazy<bool> =
+    Lazy::new(|| std::env::var("RNGPUI_FRAME_TRACE").is_ok_and(|v| v == "2"));
+
+#[inline]
+pub fn detail() -> bool {
+    *DETAIL
+}
+
+/// Time a named sub-stage (detail mode only). Usage: `let _t = named(IDX);`
+pub struct NamedGuard(Option<(usize, Instant)>);
+
+pub fn named(idx: usize) -> NamedGuard {
+    if !detail() {
+        return NamedGuard(None);
+    }
+    NamedGuard(Some((idx, Instant::now())))
+}
+
+impl Drop for NamedGuard {
+    fn drop(&mut self) {
+        if let Some((idx, start)) = self.0 {
+            NAMED.with(|cells| {
+                let c = &cells[idx];
+                c.set(c.get() + start.elapsed());
+            });
+        }
+    }
 }
 
 /// Called at the very top of `ServiceApp::render`. Flushes the *previous* frame's
@@ -62,6 +106,11 @@ pub fn begin_render(root_dirty: bool) {
     PAINT.with(|c| c.set(Duration::ZERO));
     REBUILT.with(|c| c.set(0));
     ROOT_DIRTY.with(|c| c.set(root_dirty));
+    NAMED.with(|cells| {
+        for c in cells {
+            c.set(Duration::ZERO);
+        }
+    });
 }
 
 fn flush_previous() {
@@ -86,6 +135,17 @@ fn flush_previous() {
         ms(paint),
         rebuilt,
     );
+    if detail() {
+        let parts = NAMED.with(|cells| {
+            NAMED_LABELS
+                .iter()
+                .zip(cells.iter())
+                .map(|(label, c)| format!("{label} {:.2}", ms(c.get())))
+                .collect::<Vec<_>>()
+                .join(" + ")
+        });
+        eprintln!("[frame-detail] {parts}");
+    }
 }
 
 pub fn add_create(d: Duration) {

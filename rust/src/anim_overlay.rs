@@ -35,8 +35,28 @@ use crate::style::ElementStyle;
 /// fills unset fields with `None`, and merging a full struct would clobber the
 /// committed style's other fields. Keeping the raw object lets us layer only the
 /// animated keys on top of the committed JSON-equivalent style.
-static OVERLAY: Lazy<Mutex<HashMap<u64, serde_json::Map<String, Value>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+struct OverlayEntry {
+    style: serde_json::Map<String, Value>,
+    /// bumped whenever a key actually changes — the merged-style cache key.
+    rev: u64,
+}
+
+static OVERLAY: Lazy<Mutex<HashMap<u64, OverlayEntry>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// globalId → (overlay rev, committed-style identity, built style) for the last merge.
+/// A STEADY overlay (e.g. Tamagui's avoidReRenders hover path leaves a permanent entry
+/// per row) must not cost a JSON clone + re-parse + style build per node per frame —
+/// that tax made every frame ~40% slower with ~90 animated rows. The base identity is
+/// the committed `style_json`'s address: stable while the element's `Arc` is alive, and
+/// the whole cache is dropped on every real Tree commit (see `retain`), so a recycled
+/// allocation can never alias a stale entry.
+struct MergedCache {
+    rev: u64,
+    base_ptr: usize,
+    style: gpui::Style,
+}
+
+static MERGED: Lazy<Mutex<HashMap<u64, MergedCache>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 // Set when an overlay op CHANGES a layout-box key (width/height/flex/inset/…), i.e. the
 // animated value actually moves the yoga box — a worklet-driven pane RESIZE. The render
@@ -105,6 +125,7 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
         }
         if style.is_empty() {
             if overlay.remove(&id).is_some() {
+                MERGED.lock().unwrap().remove(&id);
                 changed = true;
             }
             continue;
@@ -117,9 +138,13 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
         // wholesale replace dropped backgroundColor (and the borders/padding/radius)
         // after frame 1, so the dialog/overlay painted with no background. Merging keeps
         // every key the node ever animated until a real Tree commit prunes it.
-        let entry = overlay.entry(id).or_default();
+        let entry = overlay.entry(id).or_insert_with(|| OverlayEntry {
+            style: serde_json::Map::new(),
+            rev: 0,
+        });
+        let mut entry_changed = false;
         for (k, v) in style {
-            match entry.get(&k) {
+            match entry.style.get(&k) {
                 Some(existing) if existing == &v => {}
                 _ => {
                     if is_layout_key(&k) {
@@ -127,26 +152,42 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
                         // render gate run the lifecycle so native WebViews follow.
                         LAYOUT_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
-                    entry.insert(k, v);
-                    changed = true;
+                    entry.style.insert(k, v);
+                    entry_changed = true;
                 }
             }
+        }
+        if entry_changed {
+            entry.rev += 1;
+            changed = true;
         }
     }
     changed
 }
 
-/// The committed `ElementStyle` for `global_id`, with any live animated overrides
-/// merged on top. Returns `None` when there is no overlay for this node, so the hot
-/// path stays a single map lookup + clone-free fast exit for the overwhelmingly
-/// common (un-animated) node.
-pub fn merged_style(
+/// The committed style for `global_id` with any live animated overrides merged on top,
+/// built into a ready `gpui::Style`. Returns `None` when there is no overlay for this
+/// node, so the hot path stays a single map lookup for the overwhelmingly common
+/// (un-animated) node. The merge (JSON clone + `from_json` re-parse + style build) runs
+/// only when the overlay rev or the committed style changed — a steady overlay costs a
+/// hashmap hit + `gpui::Style` clone per frame, same as the un-animated cache path.
+pub fn merged_gpui_style(
     global_id: u64,
-    base: &ElementStyle,
     base_json: &Value,
-) -> Option<ElementStyle> {
+    default_bg: Option<u32>,
+) -> Option<gpui::Style> {
     let overlay = OVERLAY.lock().unwrap();
     let over = overlay.get(&global_id)?;
+    let base_ptr = base_json as *const Value as usize;
+    // only the default_bg=None variant is cached (the only one live callers use) —
+    // mirrors `ReactElement::cached_gpui_style`.
+    if default_bg.is_none()
+        && let Some(cached) = MERGED.lock().unwrap().get(&global_id)
+        && cached.rev == over.rev
+        && cached.base_ptr == base_ptr
+    {
+        return Some(cached.style.clone());
+    }
     // start from the committed style's own JSON-equivalent, layer the animated keys
     // on top, and re-parse — so the merge runs through exactly the same `from_json`
     // the tree parser uses (border-box subtraction, color parsing, shorthands).
@@ -154,28 +195,51 @@ pub fn merged_style(
         .as_object()
         .cloned()
         .unwrap_or_else(serde_json::Map::new);
-    for (k, v) in over {
+    for (k, v) in &over.style {
         merged.insert(k.clone(), v.clone());
     }
-    let style = ElementStyle::from_json(&Value::Object(merged));
-    // from_json starts from default, dropping fields the tree parser doesn't read but
-    // the committed ElementStyle does carry implicitly (none today — from_json reads
-    // every styled field). Keep `base` as the source of truth for anything from_json
-    // wouldn't reconstruct by carrying it forward where the overlay is silent.
-    let _ = base;
+    let style = ElementStyle::from_json(&Value::Object(merged)).build_gpui_style(default_bg);
+    if default_bg.is_none() {
+        MERGED.lock().unwrap().insert(
+            global_id,
+            MergedCache {
+                rev: over.rev,
+                base_ptr,
+                style: style.clone(),
+            },
+        );
+    }
     Some(style)
 }
 
 /// True when `global_id` currently has an animated overlay (cheap presence check used
-/// to gate the more expensive merge in the element builders).
+/// to gate the pseudo-style swap in paint).
 pub fn has_overlay(global_id: u64) -> bool {
     OVERLAY.lock().unwrap().contains_key(&global_id)
 }
 
+/// Uncached merge returning the `ElementStyle` — debug dump and tests only; the hot
+/// per-frame path is `merged_gpui_style`.
+pub fn merged_element_style(global_id: u64, base_json: &Value) -> Option<ElementStyle> {
+    let overlay = OVERLAY.lock().unwrap();
+    let over = overlay.get(&global_id)?;
+    let mut merged = base_json
+        .as_object()
+        .cloned()
+        .unwrap_or_else(serde_json::Map::new);
+    for (k, v) in &over.style {
+        merged.insert(k.clone(), v.clone());
+    }
+    Some(ElementStyle::from_json(&Value::Object(merged)))
+}
+
 /// Drop overlay entries for ids no longer present in the live tree (mirrors
-/// `bridge::retain_layout`). Called on every real `Incoming::Tree` commit.
+/// `bridge::retain_layout`). Called on every real `Incoming::Tree` commit. The merged
+/// cache is dropped wholesale: a commit may swap any node's committed style (and frees
+/// the old `Arc`s, so cached base addresses must never be compared across commits).
 pub fn retain(present: &HashSet<u64>) {
     OVERLAY.lock().unwrap().retain(|id, _| present.contains(id));
+    MERGED.lock().unwrap().clear();
 }
 
 #[cfg(test)]
@@ -195,29 +259,43 @@ mod tests {
     fn apply_and_merge_width_overlay() {
         let _serial = TEST_LOCK.lock().unwrap();
         OVERLAY.lock().unwrap().clear();
+        MERGED.lock().unwrap().clear();
 
         let base_json = json!({ "width": 100.0, "height": 40.0 });
-        let base = ElementStyle::from_json(&base_json);
 
         // no overlay yet → None
-        assert!(merged_style(42, &base, &base_json).is_none());
+        assert!(merged_element_style(42, &base_json).is_none());
+        assert!(merged_gpui_style(42, &base_json, None).is_none());
 
         let changed = apply_ops(vec![(42, obj(json!({ "width": 180.0 })))]);
         assert!(changed);
 
-        let merged = merged_style(42, &base, &base_json).expect("overlay present");
+        let merged = merged_element_style(42, &base_json).expect("overlay present");
         assert_eq!(merged.width.and_then(crate::style::Dim::as_px), Some(180.0));
         // untouched committed key survives
         assert_eq!(merged.height.and_then(crate::style::Dim::as_px), Some(40.0));
 
+        // the cached gpui build agrees and is stable across repeat calls (cache hit)
+        let built = merged_gpui_style(42, &base_json, None).expect("overlay present");
+        assert_eq!(built.size.width, gpui::px(180.0).into());
+        let built_again = merged_gpui_style(42, &base_json, None).expect("cache hit");
+        assert_eq!(built_again.size.width, gpui::px(180.0).into());
+
         // identical re-apply is a no-op
         assert!(!apply_ops(vec![(42, obj(json!({ "width": 180.0 })))]));
 
+        // a changed value invalidates the cached merge
+        assert!(apply_ops(vec![(42, obj(json!({ "width": 220.0 })))]));
+        let rebuilt = merged_gpui_style(42, &base_json, None).expect("overlay present");
+        assert_eq!(rebuilt.size.width, gpui::px(220.0).into());
+
         // empty style clears
         assert!(apply_ops(vec![(42, serde_json::Map::new())]));
-        assert!(merged_style(42, &base, &base_json).is_none());
+        assert!(merged_element_style(42, &base_json).is_none());
+        assert!(merged_gpui_style(42, &base_json, None).is_none());
 
         OVERLAY.lock().unwrap().clear();
+        MERGED.lock().unwrap().clear();
     }
 
     #[test]
@@ -244,20 +322,25 @@ mod tests {
         // dropped backgroundColor after frame 1 → dialogs painted with no background.
         let _serial = TEST_LOCK.lock().unwrap();
         OVERLAY.lock().unwrap().clear();
+        MERGED.lock().unwrap().clear();
 
         let base_json = json!({ "width": 300.0, "height": 160.0 });
-        let base = ElementStyle::from_json(&base_json);
 
         // frame 1: full animated style, including the background.
         apply_ops(vec![(
             7,
             obj(json!({ "backgroundColor": "rgba(15,18,24,0.24)", "opacity": 0.0 })),
         )]);
-        // frames 2..n: only the spring-driven keys.
+        // frames 2..n: only the spring-driven keys — each must invalidate the cached
+        // merge (read between ops, like real frames do).
+        let f1 = merged_gpui_style(7, &base_json, None).expect("overlay present");
+        assert_eq!(f1.opacity, Some(0.0));
         apply_ops(vec![(7, obj(json!({ "opacity": 0.5 })))]);
+        let f2 = merged_gpui_style(7, &base_json, None).expect("overlay present");
+        assert_eq!(f2.opacity, Some(0.5));
         apply_ops(vec![(7, obj(json!({ "opacity": 1.0 })))]);
 
-        let merged = merged_style(7, &base, &base_json).expect("overlay present");
+        let merged = merged_element_style(7, &base_json).expect("overlay present");
         // background MUST survive the later opacity-only ops.
         assert!(
             merged.background_color.is_some(),
@@ -266,5 +349,6 @@ mod tests {
         assert_eq!(merged.opacity, Some(1.0));
 
         OVERLAY.lock().unwrap().clear();
+        MERGED.lock().unwrap().clear();
     }
 }

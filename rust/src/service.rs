@@ -1807,23 +1807,36 @@ fn pick_paths_native(
 /// (orphaned processes reparent to launchd). The real app (`agentbus gui`)
 /// never sets RNGPUI_TEST_MODE, so its lifecycle is untouched.
 fn spawn_parent_exit_watchdog() {
-    if std::env::var_os("RNGPUI_TEST_MODE").is_none() {
+    // Reap-on-orphan is the DEFAULT, not opt-in: any process that spawns this
+    // service as a normal child (a CLI shot, a conformance gate, a one-off tool —
+    // whether or not it remembered to set RNGPUI_TEST_MODE) gets the service
+    // cleaned up when it dies. Previously this was gated on RNGPUI_TEST_MODE, so
+    // every tool path that forgot the flag leaked an orphaned service (the
+    // "hanging rngpui-service" reports). Two exemptions keep long-lived launches
+    // alive:
+    //   - the real `agentbus gui` app is launched via LaunchServices with parent
+    //     launchd, so the `parent <= 1` check below already exempts it (the
+    //     USER_OWNED_DO_NOT_KILL label is an extra belt in case it's ever a child);
+    //   - `rngpui ... --keep` / `rngpui dev` sessions are CONTRACTUALLY long-lived
+    //     (driven later via --session, reaped by `rngpui close`).
+    if std::env::var_os("RNGPUI_KEEP_ALIVE").is_some() {
         return;
     }
-    // `rngpui ... --keep` sessions are CONTRACTUALLY long-lived (driven later via
-    // --session, reaped by `rngpui close`); they opt out of the parent watchdog.
-    if std::env::var_os("RNGPUI_KEEP_ALIVE").is_some() {
+    if std::env::var("RNGPUI_OWNER_LABEL")
+        .map(|v| v == "USER_OWNED_DO_NOT_KILL")
+        .unwrap_or(false)
+    {
         return;
     }
     let parent = std::os::unix::process::parent_id();
     if parent <= 1 {
-        return; // already detached; nothing meaningful to watch
+        return; // launched detached (LaunchServices / already orphaned); nothing to watch
     }
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
             if std::os::unix::process::parent_id() != parent {
-                eprintln!("[rngpui] test-mode parent {parent} exited — shutting down");
+                eprintln!("[rngpui] launcher (pid {parent}) exited — reaping orphaned service");
                 std::process::exit(0);
             }
         }

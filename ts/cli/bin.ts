@@ -15,13 +15,34 @@ import { attachHost, attachSession, closeSession, launchHost, type AttachedHost,
 import { runGet } from "./commands/get";
 import { runDo } from "./commands/do";
 import { runFlow } from "./commands/flow";
+import { runDiff, runShot, type ShotFlags } from "./commands/shot";
 
 const HELP = `rngpui — react-native-gpui developer CLI
 
 usage:
+  rngpui shot <--bundle app.hbc | --launch entry.tsx | --session dir> [--size WxH] [--appearance light|dark] [--select id ...] [--out png] [--fixture] [--keep]
+  rngpui reshot --session <dir> [--select id ...] [--out png]      sub-second re-capture of a kept session
+  rngpui dev <--bundle app.hbc | --launch entry.tsx> [--size --appearance --fixture]   keep one offscreen instance alive; prints its session dir
+  rngpui diff <before.png> <after.png> [--out highlight.png] [--threshold n]
   rngpui <get|do> <subcommand> [selector] [--launch <entry.tsx> | --bundle <app.hbc> | --session <dir> | --attach] [--json]
   rngpui flow [--profile] tap <selector> [tap <selector> ...] [--out <dir>] [target]
   rngpui close --session <dir>
+
+the fast loop (offscreen, no screenshots, one command):
+  shot                   launch → wait for a stable frame → write png + tree → print
+                         the png path + bounds/color of every --select'd node. ONE call.
+  dev                    launch once and keep it alive; print the session dir. Pair with
+                         reshot for sub-second re-captures (no relaunch, no re-bundle).
+  reshot                 re-capture a kept --session instantly (state/data changed → look again).
+  diff                   compare two pngs: changed-pixel ratio + changed-region box (+ --out highlight).
+
+shot/dev flags:
+  --appearance light|dark  force the app theme (RNGPUI_FORCE_APPEARANCE) — no system toggle
+  --select <selector>      measure this node (repeatable): prints bounds + sampled color
+  --crop <x,y,w,h>         (reserved) region of interest
+  --fixture                load deterministic demo data (AGENTBUS_FIXTURE_ONLY=1) — the
+                           agentbus app paints an empty shell without a daemon or fixture
+  --out <png>              where to write the capture (default /tmp/rngpui-shot.png)
 
 target (pick one; defaults to --attach):
   --launch <entry.tsx>   compile the entry to Hermes bytecode, then spawn rngpui-service
@@ -67,19 +88,21 @@ selectors:
   200,300        literal window-coordinate point
 
 examples:
+  rngpui shot --bundle native-shell/.gpui-hermes/app.hbc --size 1360x880 --fixture --appearance dark --select stage --select trees-rail
+  rngpui dev --bundle native-shell/.gpui-hermes/app.hbc --fixture        # → prints session dir
+  rngpui reshot --session /var/.../rngpui-cli-XXXX --select composer
+  rngpui diff /tmp/before.png /tmp/rngpui-shot.png --out /tmp/diff.png
   rngpui get describe stage --launch examples/superconductor.tsx
   rngpui get tree --launch examples/kitchen-sink.tsx --keep
   rngpui do tap count-button --session /tmp/rngpui-cli-abc123
-  rngpui get describe count-label --session /tmp/rngpui-cli-abc123
   rngpui get describe --attach
-  rngpui flow --profile tap "Session A" tap "Session B" --attach
   rngpui close --session /tmp/rngpui-cli-abc123
-  rngpui get color 640,400 --attach --json
 `;
 
 function parseArgs(argv: string[]) {
     const args = argv.slice(2);
     const flags: Record<string, string | boolean> = {};
+    const select: string[] = [];
     const positional: string[] = [];
     for (let i = 0; i < args.length; i++) {
         const a = args[i];
@@ -90,6 +113,11 @@ function parseArgs(argv: string[]) {
         else if (a === "--session") flags.session = args[++i] ?? "";
         else if (a === "--keep") flags.keep = true;
         else if (a === "--size") flags.size = args[++i] ?? "";
+        else if (a === "--appearance") flags.appearance = args[++i] ?? "";
+        else if (a === "--select") select.push(args[++i] ?? "");
+        else if (a === "--crop") flags.crop = args[++i] ?? "";
+        else if (a === "--fixture") flags.fixture = true;
+        else if (a === "--threshold") flags.threshold = args[++i] ?? "";
         else if (a === "--profile") flags.profile = true;
         else if (a === "--screenshots") flags.screenshots = true;
         else if (a === "--no-screenshots") flags.screenshots = false;
@@ -99,11 +127,27 @@ function parseArgs(argv: string[]) {
         else if (a === "-h" || a === "--help") flags.help = true;
         else positional.push(a);
     }
-    return { flags, positional };
+    return { flags, positional, select };
+}
+
+function shotFlags(flags: Record<string, string | boolean>, select: string[]): ShotFlags {
+    return {
+        json: flags.json === true,
+        size: flags.size ? String(flags.size) : undefined,
+        appearance: flags.appearance ? String(flags.appearance) : undefined,
+        out: flags.out ? String(flags.out) : undefined,
+        select: select.filter(Boolean),
+        crop: flags.crop ? String(flags.crop) : undefined,
+        fixture: flags.fixture === true,
+        session: flags.session ? String(flags.session) : process.env.RNGPUI_SESSION || undefined,
+        bundle: flags.bundle !== undefined ? String(flags.bundle) : undefined,
+        launch: flags.launch !== undefined ? String(flags.launch) : undefined,
+        keep: flags.keep === true,
+    };
 }
 
 async function main(): Promise<number> {
-    const { flags, positional } = parseArgs(process.argv);
+    const { flags, positional, select } = parseArgs(process.argv);
     if (flags.help || positional.length === 0) {
         console.log(HELP);
         return positional.length === 0 ? 1 : 0;
@@ -111,6 +155,32 @@ async function main(): Promise<number> {
 
     const [group, sub, ...rest] = positional;
     const json = flags.json === true;
+
+    // The fast iteration commands own their whole host lifecycle (launch/attach +
+    // capture + close), so they short-circuit the generic get/do/flow plumbing.
+    if (group === "shot") {
+        return runShot(shotFlags(flags, select));
+    }
+    if (group === "reshot") {
+        const sf = shotFlags(flags, select);
+        if (!sf.session) {
+            console.error("  reshot needs --session <dir> (the dir `rngpui dev` printed) or RNGPUI_SESSION");
+            return 1;
+        }
+        return runShot(sf);
+    }
+    if (group === "dev") {
+        // keep one offscreen instance alive; capture a first frame, then leave it for reshot.
+        const code = await runShot({ ...shotFlags(flags, select), keep: true });
+        return code;
+    }
+    if (group === "diff") {
+        return runDiff(positional.slice(1), {
+            json,
+            out: flags.out ? String(flags.out) : undefined,
+            threshold: flags.threshold ? Number(flags.threshold) : undefined,
+        });
+    }
 
     if (group === "close") {
         const session = flags.session || process.env.RNGPUI_SESSION;

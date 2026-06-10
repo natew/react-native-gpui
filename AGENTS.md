@@ -59,6 +59,40 @@ where is it" — questions the static React tree dump alone can't answer. Every 
 is **measured at runtime**: computed window-coordinate bounds (from the paint pass)
 and the **actual sampled pixel color** within those bounds.
 
+**The fast loop — `shot` / `dev` / `reshot` / `diff`:**
+
+`shot` is the one-command iteration primitive: launch a bundle/entry offscreen, wait
+for a stable frame, write a PNG + tree dump, and print the PNG path plus the bounds +
+sampled color of every `--select`'d node — no second command, no flag archaeology.
+
+```sh
+# one shot: realistic size, forced theme, measured nodes (cold ≈ 2s on the agentbus app)
+rngpui shot --bundle native-shell/.gpui-hermes/app.hbc --size 1360x880 --fixture \
+  --appearance dark --select stage --select trees-pane
+#   png: /tmp/rngpui-shot.png (2720x1760) appearance=dark
+#   measurements:
+#     "stage" → div stage-mode-bar #454 [259,43 792x34]  dominant=#282828 (48%) avg=#1b1b21
+
+# persistent instance: keep one alive, re-capture in ~1s after a state/data change
+rngpui dev --bundle native-shell/.gpui-hermes/app.hbc --fixture     # → prints the session dir
+rngpui reshot --session <dir> --select composer                     # sub-second, no relaunch
+rngpui close --session <dir>
+
+# pixel diff two captures: changed ratio + changed-region bounding box (+ highlight png)
+rngpui diff /tmp/before.png /tmp/rngpui-shot.png --out /tmp/diff.png
+```
+
+- `--appearance light|dark` forces the app theme via `RNGPUI_FORCE_APPEARANCE` (flows
+  through the native bridge so tamagui re-themes; no system toggle, no system mutation).
+- `--size WxH` is honored end-to-end — the capture PNG comes back at that logical size ×
+  the backing scale (1360x880 → 2720x1760). (The old LaunchServices `.app` capture path
+  produced a wrongly-clamped ~784x507; the CLI direct-spawn path used by `shot` is correct.)
+- `--fixture` loads deterministic demo data (`AGENTBUS_FIXTURE_ONLY=1`); without it the
+  agentbus app paints an empty "connecting…" shell when no daemon is reachable.
+- `--select <selector>` is repeatable; `--json` for machine output; `--out` to place the PNG.
+- `reshot` only re-reads the **current** frame of a kept session — it does not re-bundle
+  or change the theme. After editing JS, re-`shot` (re-launches against the rebuilt `.hbc`).
+
 **`get` (read-only introspection):**
 
 - `get tree` — full annotated node tree (type, ids, computed bounds).

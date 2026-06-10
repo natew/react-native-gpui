@@ -24,6 +24,12 @@ const result = await Bun.build({
   define: {
     'process.env.NODE_ENV': JSON.stringify(mode),
     __DEV__: mode === 'development' ? 'true' : 'false',
+    // the Hermes host provides an empty process.env at runtime, so conformance
+    // fixtures can't read host env vars live. Inline the appearance the gate wants
+    // (light|dark) at bundle time so a single fixture can render either theme.
+    'process.env.RNGPUI_INPUT_FIXTURE_APPEARANCE': JSON.stringify(
+      process.env.RNGPUI_INPUT_FIXTURE_APPEARANCE || '',
+    ),
   },
   // wire real react-native-reanimated@4 + worklets for the embedded Hermes target:
   // worklet babel transform (content-gated) + native-seam redirect to ts/src/reanimated.

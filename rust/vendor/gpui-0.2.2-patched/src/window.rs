@@ -1915,6 +1915,13 @@ impl Window {
     /// the contents of the new [`Scene`], use [`Self::present`].
     #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
+        // react-native-gpui patch: optional whole-draw wall-clock probe. The host's
+        // frame_trace times create+layout+prepaint+paint but NOT `compute_layout` (the
+        // taffy flexbox solve, the dominant ~7ms term at scale), so this is the only
+        // accurate per-frame cost signal — it's how the retained-layout fast path's win is
+        // measured (full ~10ms vs reuse ~3ms). Env-gated; zero cost when unset.
+        let _draw_probe =
+            std::env::var_os("RNGPUI_DRAW_PROBE").map(|_| std::time::Instant::now());
         self.invalidate_entities();
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
@@ -1935,7 +1942,22 @@ impl Window {
                 .set_input_handler(input_handler.unwrap());
         }
 
-        self.layout_engine.as_mut().unwrap().clear();
+        // react-native-gpui retained-layout patch: the taffy tree is deliberately NOT
+        // cleared here at end-of-draw (this `clear()` is gpui's stock behavior, now moved).
+        // Instead `prepare_layout_frame` — called from the host's `render()`, which runs
+        // before any `request_layout` this draw — clears it at the start of each FULL-layout
+        // frame and carries it over (with its `prev_bounds`) for a REUSE frame to replay.
+        // Keeping the solved tree alive between draws is what makes the fast path possible.
+        // The one exception handled here: a reuse frame that DESYNCED (the host gate let a
+        // structural change slip through, so the positional replay over/under-ran) has
+        // untrustworthy geometry — clear now to force the next draw into a full layout,
+        // self-healing in a single frame.
+        {
+            let engine = self.layout_engine.as_mut().unwrap();
+            if engine.is_reusing() && engine.reuse_desynced() {
+                engine.clear();
+            }
+        }
         self.text_system().finish_frame();
         self.next_frame.finish(&mut self.rendered_frame);
 
@@ -1980,6 +2002,13 @@ impl Window {
         self.invalidator.set_phase(DrawPhase::None);
         self.needs_present.set(true);
 
+        if let Some(t0) = _draw_probe {
+            let reused = self.layout_engine.as_ref().is_some_and(|e| e.is_reusing());
+            eprintln!(
+                "[draw] {:.3}ms reuse={reused}",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         ArenaClearNeeded
     }
 
@@ -3213,6 +3242,32 @@ impl Window {
 
     /// Add a node to the layout tree for the current frame. Takes the `Style` of the element for which
     /// layout is being requested, along with the layout ids of any children. This method is called during
+    /// react-native-gpui retained-layout patch. Called by the host at the very top of its
+    /// `Render::render` (which runs before any `request_layout` this draw). When
+    /// `reuse_paint_only` is true and there IS a retained layout from a prior full-layout
+    /// frame, this draw skips the taffy rebuild + flexbox solve and replays the retained
+    /// LayoutIds in document order (the ~7ms-at-1300-nodes win on hover/pulse frames).
+    /// Otherwise it clears the carried-over taffy tree so this draw runs a normal full
+    /// layout (and captures a fresh retained frame for the next reuse). Returns whether the
+    /// reuse fast path actually engaged, so the host can trace it.
+    ///
+    /// SAFETY of the replay: it is positional — the Nth layout request this frame gets the
+    /// LayoutId the Nth request got last full-layout frame. That is only correct when the
+    /// element tree is structurally identical (same nodes, same document order). The host
+    /// must therefore only pass `reuse_paint_only=true` when it KNOWS nothing layout-
+    /// affecting changed (see the host's paint-only-frame gate). A desync (replay over/under
+    /// -runs) is detected and self-heals to a full layout next draw, so a gate bug is a
+    /// one-frame glitch, never a crash or a permanently-wrong layout.
+    pub fn prepare_layout_frame(&mut self, reuse_paint_only: bool) -> bool {
+        let engine = self.layout_engine.as_mut().unwrap();
+        if reuse_paint_only && engine.begin_reuse_frame() {
+            true
+        } else {
+            engine.clear();
+            false
+        }
+    }
+
     /// calls to the [`Element::request_layout`] trait method and enables any element to participate in layout.
     ///
     /// This method should only be called as part of the request_layout or prepaint phase of element drawing.

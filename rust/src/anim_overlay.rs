@@ -68,6 +68,73 @@ static MERGED: Lazy<Mutex<HashMap<u64, MergedCache>>> = Lazy::new(|| Mutex::new(
 // so only that first frame flips it — one lifecycle frame, not a per-frame pin.
 static LAYOUT_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+// Set true when the most recent host action that scheduled a draw was a paint-only
+// `SetNodeStyle` batch (every changed key is paint-only — backgroundColor/color/opacity/
+// borderColor/shadow/tint/transform — so no taffy box moved). The render gate reads this
+// (via `take_paint_only_frame`) to enable the retained-layout fast path: skip the taffy
+// rebuild + flexbox solve and replay the prior full-layout frame's geometry. ANY other
+// path that schedules a draw and might move a box — a React tree commit, a text-input
+// edit, a scrollTo, a native-layout/resize override, an inspector toggle — clears it via
+// `clear_paint_only_frame()` so that frame falls back to a full layout. It is also
+// consumed (reset to false) every render, so a stale true can never carry into a later
+// non-paint-only frame.
+static PAINT_ONLY_FRAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Keys whose animated change repaints WITHOUT moving any layout box — the retained-layout
+/// fast path is sound only when every key in a `SetNodeStyle` batch is one of these. The
+/// inverse of `is_layout_key`, but spelled out as an allowlist (not `!is_layout_key`) so a
+/// brand-new key name we don't recognize defaults to "treat as layout-affecting" — the
+/// safe direction (force a full layout) rather than silently reusing stale geometry.
+/// `transform` is here because gpui applies element transforms at PAINT time (an element
+/// offset/scale in the paint pass), never through taffy — a translate/scale spring does
+/// not change a node's taffy box. `fontSize`/`lineHeight`/`letterSpacing` are NOT here:
+/// they resize the text box.
+pub fn is_paint_only_key(k: &str) -> bool {
+    matches!(
+        k,
+        "backgroundColor"
+            | "background"
+            | "color"
+            | "opacity"
+            | "borderColor"
+            | "borderTopColor"
+            | "borderRightColor"
+            | "borderBottomColor"
+            | "borderLeftColor"
+            | "shadowColor"
+            | "shadowOpacity"
+            | "shadowRadius"
+            | "tintColor"
+            | "transform"
+            | "borderRadius"
+    )
+}
+
+/// The render gate calls this once per frame: returns whether this frame is paint-only
+/// (so the retained-layout fast path may engage) AND resets the flag, so it can never
+/// leak into a later non-paint-only frame.
+pub fn take_paint_only_frame() -> bool {
+    PAINT_ONLY_FRAME.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Any host action that schedules a draw and might move a layout box calls this to veto
+/// the retained-layout fast path for the resulting frame (tree commit, input edit,
+/// scrollTo, native layout/resize, inspector toggle, …).
+pub fn clear_paint_only_frame() {
+    PAINT_ONLY_FRAME.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Arm the retained-layout fast path for the frame a non-`SetNodeStyle` repaint is about
+/// to schedule, when that repaint is geometry-stable. The native hover/press pseudo-style
+/// swap is the case: it replaces a precomputed variant in PAINT (after layout), never re-
+/// laying-out, so the frame's geometry is identical to the last full-layout frame. The
+/// render gate still re-confirms `!root_dirty && !layout_dirty && !resize && …` before
+/// trusting it, so a stray mark can at worst cost one needless full layout, never a wrong
+/// one.
+pub fn mark_paint_only_frame() {
+    PAINT_ONLY_FRAME.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn is_layout_key(k: &str) -> bool {
     matches!(
         k,
@@ -116,6 +183,10 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
     let trace = std::env::var_os("RNGPUI_OVERLAY_TRACE").is_some();
     let mut overlay = OVERLAY.lock().unwrap();
     let mut changed = false;
+    // does every key that actually changed in this batch repaint without moving a box?
+    // Starts true; any changed layout key flips it false. A pure overlay-clear (revert to
+    // committed style) keeps it true — the committed layout was already solved.
+    let mut all_paint_only = true;
     for (id, style) in ops {
         if trace {
             eprintln!(
@@ -152,6 +223,11 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
                         // render gate run the lifecycle so native WebViews follow.
                         LAYOUT_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
+                    // a CHANGED key that isn't on the paint-only allowlist vetoes the
+                    // retained-layout reuse for this frame (force a full taffy solve).
+                    if !is_paint_only_key(&k) {
+                        all_paint_only = false;
+                    }
                     entry.style.insert(k, v);
                     entry_changed = true;
                 }
@@ -161,6 +237,14 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
             entry.rev += 1;
             changed = true;
         }
+    }
+    // arm the retained-layout fast path only when SOMETHING changed and every changed key
+    // repainted in place. A no-op batch (`changed==false`) leaves the flag untouched — it
+    // wouldn't have scheduled a draw anyway.
+    if changed && all_paint_only {
+        PAINT_ONLY_FRAME.store(true, std::sync::atomic::Ordering::Relaxed);
+    } else if changed {
+        PAINT_ONLY_FRAME.store(false, std::sync::atomic::Ordering::Relaxed);
     }
     changed
 }
@@ -253,6 +337,97 @@ mod tests {
 
     fn obj(v: Value) -> serde_json::Map<String, Value> {
         v.as_object().cloned().unwrap()
+    }
+
+    #[test]
+    fn paint_only_key_classifier_allowlists_repaint_keys_only() {
+        // every key that repaints in place without moving a taffy box.
+        for k in [
+            "backgroundColor",
+            "color",
+            "opacity",
+            "borderColor",
+            "shadowColor",
+            "tintColor",
+            "transform",
+            "borderRadius",
+        ] {
+            assert!(is_paint_only_key(k), "{k} should be paint-only");
+        }
+        // every layout-box key must be REJECTED (force a full solve).
+        for k in [
+            "width",
+            "height",
+            "flex",
+            "flexGrow",
+            "marginTop",
+            "paddingLeft",
+            "gap",
+            "top",
+            "left",
+        ] {
+            assert!(!is_paint_only_key(k), "{k} must NOT be paint-only");
+        }
+        // a key we don't recognize defaults to layout-affecting (the safe direction):
+        // never silently reuse stale geometry for an unknown key.
+        assert!(!is_paint_only_key("fontSize"));
+        assert!(!is_paint_only_key("lineHeight"));
+        assert!(!is_paint_only_key("someBrandNewKey"));
+        // the two classifiers must never both claim a key.
+        for k in ["width", "backgroundColor", "opacity", "marginTop", "flex"] {
+            assert!(
+                !(is_paint_only_key(k) && is_layout_key(k)),
+                "{k} cannot be both paint-only and layout"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_ops_arms_paint_only_only_for_paint_keys() {
+        let _serial = TEST_LOCK.lock().unwrap();
+        OVERLAY.lock().unwrap().clear();
+        MERGED.lock().unwrap().clear();
+        // a pure background change → paint-only frame armed.
+        take_paint_only_frame(); // clear any residue
+        assert!(apply_ops(vec![(
+            1,
+            obj(json!({ "backgroundColor": "#fff" }))
+        )]));
+        assert!(
+            take_paint_only_frame(),
+            "a backgroundColor-only batch must arm the retained-layout fast path"
+        );
+        // consume-once: a second read with no new ops is false.
+        assert!(!take_paint_only_frame());
+
+        // a batch that touches a layout key → NOT paint-only (force a full solve).
+        assert!(apply_ops(vec![(1, obj(json!({ "width": 50.0 })))]));
+        assert!(
+            !take_paint_only_frame(),
+            "a width change must veto the retained-layout fast path"
+        );
+
+        // a MIXED batch (one paint key + one layout key) → vetoed.
+        assert!(apply_ops(vec![(
+            2,
+            obj(json!({ "opacity": 0.5, "height": 30.0 }))
+        )]));
+        assert!(
+            !take_paint_only_frame(),
+            "a mixed paint+layout batch must veto reuse"
+        );
+
+        // an explicit veto wins even after a paint-only arm in the same frame
+        // (the input-edit / native-resize coalescing case).
+        assert!(apply_ops(vec![(3, obj(json!({ "color": "#abc" })))]));
+        clear_paint_only_frame();
+        assert!(
+            !take_paint_only_frame(),
+            "clear_paint_only_frame must veto a coalesced paint-only arm"
+        );
+
+        OVERLAY.lock().unwrap().clear();
+        MERGED.lock().unwrap().clear();
     }
 
     #[test]

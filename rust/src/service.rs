@@ -842,7 +842,8 @@ impl Render for ServiceApp {
         let vs = window.viewport_size();
         let w: f64 = vs.width.into();
         let h: f64 = vs.height.into();
-        if (w - self.last_w).abs() > 0.5 || (h - self.last_h).abs() > 0.5 {
+        let viewport_changed = (w - self.last_w).abs() > 0.5 || (h - self.last_h).abs() > 0.5;
+        if viewport_changed {
             self.last_w = w;
             self.last_h = h;
             bridge::resize(w as f32, h as f32);
@@ -860,6 +861,51 @@ impl Render for ServiceApp {
         // the lifecycle so native WebViews reposition. take() it unconditionally so the
         // flag is consumed even when root_dirty already forces the lifecycle.
         let layout_dirty = crate::anim_overlay::take_layout_dirty();
+
+        // ── retained-layout fast path decision ───────────────────────────────────────
+        // Consume the paint-only-frame flag EVERY render (so a stale `true` can never leak
+        // into a later frame), then engage the retained-layout reuse only when this frame
+        // is provably geometry-stable: the trigger was a paint-only `SetNodeStyle`
+        // (`paint_only`), AND no new React tree (`root_dirty`), AND no animated layout key
+        // moved (`layout_dirty`), AND the window didn't resize, AND no pane-resize drag /
+        // native-layout animation is mid-flight, AND the inspector overlay (which adds a
+        // structural child) is off. Any of those forces a full taffy solve — the safe
+        // direction. When it engages, `window.prepare_layout_frame(true)` replays the prior
+        // full-layout frame's geometry and skips the ~7ms flexbox solve; otherwise it
+        // clears the carried-over taffy tree and runs a normal full layout (capturing a
+        // fresh retained frame for the next reuse). The disable env is the A/B escape hatch.
+        let paint_only = crate::anim_overlay::take_paint_only_frame();
+        let retained_layout_disabled = std::env::var_os("RNGPUI_DISABLE_RETAINED_LAYOUT").is_some();
+        // test escape hatch: force the reuse path on EVERY geometry-stable idle frame
+        // (ignoring the paint-only trigger), so conformance can drive the retained path on
+        // every repaint and assert pixel/bounds parity. Never set in production.
+        let force_reuse = std::env::var_os("RNGPUI_FORCE_RETAINED_LAYOUT").is_some();
+        let want_reuse = (paint_only || force_reuse)
+            && !self.root_dirty
+            && !layout_dirty
+            && !viewport_changed
+            && !elements::native_resize_active()
+            && !elements::native_layout_has_animations()
+            // Veto only while the inspector is ACTIVELY inspecting (overlay/menu shown) —
+            // that adds a structural overlay child. An enabled-but-idle inspector (the
+            // common case behind `~/.agentbus/gui-debug`) renders no overlay, so the tree
+            // is structurally stable and reuse is sound.
+            && !self.inspector.wants_input_grab()
+            && !render_gate_disabled()
+            && !retained_layout_disabled;
+        let reusing = window.prepare_layout_frame(want_reuse);
+        if std::env::var_os("RNGPUI_RETAINED_TRACE").is_some() {
+            eprintln!(
+                "[retained] paint_only={paint_only} want_reuse={want_reuse} reusing={reusing} \
+                 | root_dirty={} layout_dirty={layout_dirty} viewport_changed={viewport_changed} \
+                 native_resize={} native_anim={} inspector={}",
+                self.root_dirty,
+                elements::native_resize_active(),
+                elements::native_layout_has_animations(),
+                self.inspector.enabled(),
+            );
+        }
+
         if std::env::var_os("RNGPUI_RENDER_TRACE").is_some() {
             eprintln!(
                 "[render] root_dirty={} layout_dirty={} (lifecycle {})",
@@ -963,8 +1009,15 @@ impl Render for ServiceApp {
                         },
                     )
                     .detach();
-                    // re-render this view when the input's contents/cursor change
-                    cx.observe(&state, |_this, _input, cx| cx.notify()).detach();
+                    // re-render this view when the input's contents/cursor change. An edit
+                    // can resize the text box (and moves the caret), so veto the retained-
+                    // layout fast path for the resulting frame even if it coalesces with a
+                    // paint-only overlay write — force a full taffy solve.
+                    cx.observe(&state, |_this, _input, cx| {
+                        crate::anim_overlay::clear_paint_only_frame();
+                        cx.notify();
+                    })
+                    .detach();
                     self.inputs.insert(id, state);
                     self.input_values.insert(id, value);
                     self.input_secure.insert(id, secure);

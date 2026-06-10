@@ -617,6 +617,13 @@ fn root_theme_mode(root: &ReactElement) -> ThemeMode {
 
 struct ServiceApp {
     root: Arc<ReactElement>,
+    // the app-level focus anchor. tracked by the root frame div so the key-dispatch
+    // path always includes the frame's "App" key context: gpui matches context-gated
+    // bindings against the focused node's dispatch path, and with NO focus the path is
+    // a synthetic root with an empty context stack — where predicate eval is false even
+    // for pure negations like "!Input". render() re-focuses this whenever the window
+    // has no focus (startup, input blur), so negation-gated app bindings always work.
+    app_focus: gpui::FocusHandle,
     // true when `root` changed since the last full render. The per-frame `render` only
     // re-walks the tree for the input/webview/system/ax/layout lifecycle when this is set
     // — an overlay-only animation frame (`SetNodeStyle`) leaves `root` untouched, so it
@@ -906,6 +913,14 @@ fn collect_native_layout_keys(el: &Arc<ReactElement>, out: &mut HashSet<String>)
 
 impl Render for ServiceApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        // keystrokes dispatch along the FOCUSED node's path; with no focus they land on
+        // a synthetic root whose context stack is empty, where context-gated key
+        // bindings can never match (see app_focus). whenever nothing holds focus
+        // (startup, an input blurring via window.blur()), anchor focus on the app
+        // frame so its "App" key context is always on the dispatch path.
+        if window.focused(cx).is_none() {
+            window.focus(&self.app_focus);
+        }
         // reset the per-frame hit-test passthrough registry before this frame's prepaint
         // pass repopulates it (webview rects + occluder rects, for native webview events).
         hit_passthrough::begin_frame();
@@ -1287,6 +1302,17 @@ impl Render for ServiceApp {
             .size_full()
             .flex()
             .flex_col()
+            // the root frame must contribute a key context: gpui's predicate eval
+            // returns false on an EMPTY context stack even for pure negations
+            // (`contexts.last() else return false`), so app key bindings gated on
+            // e.g. "!Input && !Terminal" could never fire unless an Input/Terminal
+            // was focused — which then fails the negation anyway. with "App" always
+            // on the stack, negation-gated bindings work at rest and focused
+            // Input/Terminal contexts still suppress them. track_focus puts this
+            // node on the key-dispatch path whenever app_focus is focused (see the
+            // no-focus guard at the top of render).
+            .key_context("App")
+            .track_focus(&self.app_focus)
             .on_action(|action: &InvokeCommand, _window, _cx| {
                 bridge::command(&action.id);
             })
@@ -2057,7 +2083,8 @@ fn main() {
 
         // The view that renders the tree. Created up front so the applier task below
         // can update it directly.
-        let content = cx.new(|_| ServiceApp {
+        let content = cx.new(|cx| ServiceApp {
+            app_focus: cx.focus_handle(),
             root: app_root,
             root_dirty: true,
             dump_tree_path: std::env::var("RNGPUI_DUMP_TREE").ok(),
@@ -2597,10 +2624,18 @@ fn main() {
                                 }),
                                 cx,
                             );
-                            crate::bridge::events_emitted_count().saturating_sub(before)
+                            let contexts: Vec<String> = window
+                                .context_stack()
+                                .iter()
+                                .map(|c| format!("{c:?}"))
+                                .collect();
+                            (
+                                crate::bridge::events_emitted_count().saturating_sub(before),
+                                contexts,
+                            )
                         });
                         match result {
-                            Ok(emitted) => {
+                            Ok((emitted, contexts)) => {
                                 let _ = reply.send(serde_json::json!({
                                     "ok": true,
                                     "type": "realKey",
@@ -2610,6 +2645,10 @@ fn main() {
                                     // (e.g. by a global binding) before any element saw it.
                                     "handlerFired": emitted > 0,
                                     "eventsEmitted": emitted,
+                                    // the key-dispatch context stack (root → focused node)
+                                    // the keystroke was matched against — empty means
+                                    // context-gated bindings can never fire.
+                                    "contextStack": contexts,
                                 }));
                             }
                             Err(_) => break,

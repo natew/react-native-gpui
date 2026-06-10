@@ -32,6 +32,13 @@ const tasks = [
         cwd: root,
         env: conformanceEnv(),
     },
+    {
+        name: "raf-pacing",
+        command: "node",
+        args: ["scripts/run-hermes-example.mjs", "examples/raf-pacing-conformance.tsx", "--timeout-ms", "15000"],
+        cwd: root,
+        env: conformanceEnv(),
+    },
     { name: "input", command: "node", args: ["scripts/input-conformance-driver.mjs"], cwd: root, timeoutMs: 12_000 },
     { name: "list-group", command: "node", args: ["scripts/list-group-conformance-driver.mjs"], cwd: root, timeoutMs: 20_000 },
     { name: "inspector", command: "node", args: ["scripts/inspector-conformance.mjs"], cwd: root, timeoutMs: 12_000 },

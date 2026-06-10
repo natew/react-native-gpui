@@ -39,6 +39,7 @@ mod capture_png;
 mod debug_control;
 mod dump;
 mod elements;
+mod frame_clock;
 mod frame_trace;
 mod hermes;
 mod hit_passthrough;
@@ -1732,6 +1733,33 @@ fn main() {
     startup_mark("Application::new");
     app.run(move |cx: &mut App| {
         startup_mark("app.run entered");
+        // env-gated main-runloop gap detector (RNGPUI_ACTIVATION_TRACE=1): a 100ms
+        // foreground timer that logs whenever the main loop went unserviced for
+        // >300ms — catches stalls no specific-path probe instruments (cmd+tab
+        // visual-switch investigation; temporary diagnostics).
+        if std::env::var_os("RNGPUI_ACTIVATION_TRACE").is_some() {
+            cx.spawn(async move |cx| {
+                let mut last = std::time::Instant::now();
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(100))
+                        .await;
+                    let gap = last.elapsed();
+                    if gap > std::time::Duration::from_millis(300) {
+                        eprintln!(
+                            "[act-trace {}] MAIN RUNLOOP GAP {}ms",
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis())
+                                .unwrap_or(0),
+                            gap.as_millis()
+                        );
+                    }
+                    last = std::time::Instant::now();
+                }
+            })
+            .detach();
+        }
         // sets up gpui-component's theme + the input key bindings (backspace,
         // arrows, select-all, copy/paste, word-motion, …) used by InputState.
         gpui_component::init(cx);

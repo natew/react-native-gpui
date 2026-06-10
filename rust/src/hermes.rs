@@ -59,6 +59,17 @@ unsafe extern "C" {
         errcap: usize,
     ) -> i32;
     fn rng_hermes_drain_microtasks(rt: *mut c_void);
+    // Externally-backed shared buffers for the reanimated UI/worklet runtime: one shared
+    // memory region exposed as a zero-copy JS ArrayBuffer in multiple runtimes.
+    #[allow(dead_code)]
+    fn rng_hermes_shared_buffer_create(len: usize) -> *mut c_void;
+    #[allow(dead_code)]
+    fn rng_hermes_install_shared_buffer(
+        rt: *mut c_void,
+        name: *const c_char,
+        buffer: *mut c_void,
+        len: usize,
+    );
 }
 
 // ── host → JS call queue ────────────────────────────────────────────────────
@@ -223,6 +234,10 @@ extern "C" fn host_set_timer(ud: *mut c_void, arg: *const c_char) {
         };
         ctx.timers.borrow_mut().add(id, ms, repeat != 0);
     }
+}
+
+extern "C" fn host_request_frame(_ud: *mut c_void, _arg: *const c_char) {
+    crate::frame_clock::request(crate::frame_clock::REACT);
 }
 
 extern "C" fn host_clear_timer(ud: *mut c_void, arg: *const c_char) {
@@ -607,6 +622,12 @@ fn system_color_scheme() -> &'static str {
 pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
     let (calls_tx, calls_rx) = flume::unbounded::<JsCall>();
     let _ = JS_CALLS.set(calls_tx);
+    // rAF rides the display's real vsync: raf.ts arms the clock per frame via
+    // __rngpui_requestFrame, the display link posts one fireFrame back per tick.
+    crate::frame_clock::register(
+        crate::frame_clock::REACT,
+        Box::new(|| post("__rngpui_fireFrame", String::new())),
+    );
 
     std::thread::Builder::new()
         .name("hermes-js".into())
@@ -641,6 +662,7 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
             install_void(rt, "__rngpui_reloadApp", host_reload_app, ud);
             install_void(rt, "__rngpui_setTimer", host_set_timer, ud);
             install_void(rt, "__rngpui_clearTimer", host_clear_timer, ud);
+            install_void(rt, "__rngpui_requestFrame", host_request_frame, ud);
             install_void(rt, "__rngpui_close", host_close, ud);
             install_void(rt, "__rngpui_fetch", host_fetch, ud);
             install_void(rt, "__rngpui_wsOpen", host_ws_open, ud);
@@ -862,7 +884,8 @@ fn run_loop(rt: *mut c_void, ctx: &JsContext, calls_rx: &Receiver<JsCall>) {
         // microtasks even when there are no native calls or timers. Drain before
         // blocking; otherwise startup waits for max_wait before the first tree.
         unsafe { rng_hermes_drain_microtasks(rt) };
-        // block until the next call or the next timer deadline (rAF rides a ~16ms timer).
+        // block until the next call or the next timer deadline (rAF arrives as a
+        // fireFrame JsCall posted by the vsync frame_clock, not a timer).
         let wait = ctx
             .timers
             .borrow()

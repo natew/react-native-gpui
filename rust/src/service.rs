@@ -31,6 +31,7 @@ static APP_COMMAND_BINDING_SLOTS: Lazy<Mutex<HashSet<AppCommandBindingSlot>>> =
     Lazy::new(|| Mutex::new(HashSet::new()));
 
 mod anim_overlay;
+mod audio;
 #[cfg(target_os = "macos")]
 mod ax;
 mod bridge;

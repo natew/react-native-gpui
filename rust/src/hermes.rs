@@ -395,6 +395,10 @@ struct FetchReq {
     headers: Option<HashMap<String, String>>,
     #[serde(default)]
     body: Option<String>,
+    // binary request body (base64); takes precedence over `body` when present. the JS
+    // bridge sets this for byte payloads like the voice POST that a string can't carry.
+    #[serde(default, rename = "bodyBase64")]
+    body_base64: Option<String>,
 }
 
 fn do_fetch(req: FetchReq) -> String {
@@ -405,9 +409,18 @@ fn do_fetch(req: FetchReq) -> String {
             r = r.set(k, v);
         }
     }
-    let resp = match req.body {
-        Some(b) => r.send_string(&b),
-        None => r.call(),
+    let resp = if let Some(b64) = &req.body_base64 {
+        match base64::engine::general_purpose::STANDARD.decode(b64) {
+            Ok(bytes) => r.send_bytes(&bytes),
+            Err(e) => {
+                return json!({"id": req.id, "ok": false, "status": 0, "error": format!("bad body_base64: {e}")}).to_string();
+            }
+        }
+    } else {
+        match req.body {
+            Some(b) => r.send_string(&b),
+            None => r.call(),
+        }
     };
     match resp {
         Ok(resp) => {
@@ -436,6 +449,11 @@ extern "C" fn host_fetch(_ud: *mut c_void, arg: *const c_char) {
         };
         post("__rngpui_fetchDone", result);
     });
+}
+
+// ── microphone capture (cpal; see audio.rs) ─────────────────────────────────
+extern "C" fn host_audio(_ud: *mut c_void, arg: *const c_char) {
+    crate::audio::handle(&arg_str(arg));
 }
 
 // ── WebSocket (tungstenite; one worker thread per connection) ────────────────
@@ -750,6 +768,7 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
             install_void(rt, "__rngpui_requestFrame", host_request_frame, ud);
             install_void(rt, "__rngpui_close", host_close, ud);
             install_void(rt, "__rngpui_fetch", host_fetch, ud);
+            install_void(rt, "__rngpui_audio", host_audio, ud);
             install_void(rt, "__rngpui_wsOpen", host_ws_open, ud);
             install_void(rt, "__rngpui_wsSend", host_ws_send, ud);
             install_void(rt, "__rngpui_wsClose", host_ws_close, ud);
@@ -884,7 +903,11 @@ enum QueueClass {
 fn queue_class(func: &'static str, arg: &str) -> QueueClass {
     if func == "__rngpui_onHostEvent" && is_discrete_input_event(arg) {
         QueueClass::DiscreteInput
-    } else if func == "__rngpui_wsEvent" || func == "__rngpui_fetchDone" {
+    } else if func == "__rngpui_wsEvent"
+        || func == "__rngpui_fetchDone"
+        || func == "__rngpui_audioDone"
+        || func == "__rngpui_audioLevel"
+    {
         QueueClass::AsyncCompletion
     } else {
         QueueClass::Other

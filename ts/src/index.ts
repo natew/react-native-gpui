@@ -115,9 +115,11 @@ export {
     NativeEventEmitter,
     AccessibilityInfo,
     FilePicker,
+    VoiceRecorder,
     type ColorSchemeName,
     type DynamicColorIOSTuple,
     type FilePickerOptions,
+    type VoiceRecording,
 } from "./apis";
 export { Animated, AnimatedValue, Easing } from "./Animated";
 export {

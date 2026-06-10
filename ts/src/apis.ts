@@ -194,6 +194,12 @@ type FilePickerResponse = { id: number; ok?: boolean; paths?: unknown; error?: s
 declare global {
     var __rngpui_pickPaths: ((json: string) => void) | undefined;
     var __rngpui_filePickerDone: ((json: string) => void) | undefined;
+    var __rngpui_audioStart: (() => Promise<{ ok?: boolean }>) | undefined;
+    var __rngpui_audioStop:
+        | (() => Promise<{ base64?: string; mimeType?: string; durationMs?: number }>)
+        | undefined;
+    var __rngpui_audioCancel: (() => void) | undefined;
+    var __rngpui_audioOnLevel: ((cb: (level: number) => void) => () => void) | undefined;
 }
 
 let filePickerSeq = 1;
@@ -240,6 +246,35 @@ export const FilePicker = {
         });
     },
     _parse: parseFilePickerPaths,
+};
+
+export type VoiceRecording = { base64: string; mimeType: "audio/wav"; durationMs: number };
+
+// native microphone capture (rust/src/audio.rs). minimal RN-shaped surface the app drives
+// to record dictation: start() opens the default input, stop() returns an in-memory wav as
+// base64, cancel() drops the take. onLevel() streams a ~10Hz RMS meter while recording.
+export const VoiceRecorder = {
+    isAvailable(): boolean {
+        return typeof globalThis.__rngpui_audioStart === "function";
+    },
+    async start(): Promise<void> {
+        const start = globalThis.__rngpui_audioStart;
+        if (typeof start !== "function") throw new Error("native mic host is not available");
+        await start();
+    },
+    async stop(): Promise<VoiceRecording> {
+        const stop = globalThis.__rngpui_audioStop;
+        if (typeof stop !== "function") throw new Error("native mic host is not available");
+        const r = await stop();
+        if (!r || typeof r.base64 !== "string") throw new Error("mic capture returned no audio");
+        return { base64: r.base64, mimeType: "audio/wav", durationMs: r.durationMs ?? 0 };
+    },
+    cancel(): void {
+        globalThis.__rngpui_audioCancel?.();
+    },
+    onLevel(cb: (level: number) => void): () => void {
+        return globalThis.__rngpui_audioOnLevel?.(cb) ?? (() => {});
+    },
 };
 
 export function findNodeHandle(ref: unknown): number | null {

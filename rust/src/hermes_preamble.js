@@ -180,14 +180,34 @@
       };
       fetchPending[id] = { resolve: resolve, reject: reject, signal: signal, onAbort: onAbort };
       if (signal && typeof signal.addEventListener === 'function') signal.addEventListener('abort', onAbort, { once: true });
+      // binary bodies (Uint8Array/ArrayBuffer) ride bodyBase64 so bytes survive the
+      // string bridge; everything else stringifies as before.
+      var body = null;
+      var bodyBase64 = null;
+      if (init.body != null) {
+        if (init.body instanceof Uint8Array || init.body instanceof ArrayBuffer) {
+          bodyBase64 = g.__rngpui_bytesToBase64(init.body);
+        } else {
+          body = String(init.body);
+        }
+      }
       g.__rngpui_fetch(JSON.stringify({
         id: id,
         url: String(url),
         method: init.method || 'GET',
         headers: headers,
-        body: init.body != null ? String(init.body) : null,
+        body: body,
+        bodyBase64: bodyBase64,
       }));
     });
+  };
+
+  // shared bytes→base64 (used by fetch binary bodies). reuses the btoa table below.
+  g.__rngpui_bytesToBase64 = function (input) {
+    var bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+    var bin = '';
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return g.btoa(bin);
   };
   g.__rngpui_fetchDone = function (jsonStr) {
     var r = JSON.parse(jsonStr);
@@ -203,6 +223,55 @@
       json: function () { try { return Promise.resolve(JSON.parse(body)); } catch (e) { return Promise.reject(e); } },
       headers: { get: function () { return null; }, has: function () { return false; } },
     });
+  };
+
+  // mic capture — bridged to the Rust cpal recorder (audio.rs). start/stop/cancel are
+  // posted with an id; __rngpui_audioDone resolves the matching promise. a ~10Hz RMS
+  // meter arrives via __rngpui_audioLevel and fans out to registered listeners.
+  var audioSeq = 1;
+  var audioPending = Object.create(null);
+  var audioLevelListeners = [];
+  g.__rngpui_audioStart = function () {
+    if (typeof g.__rngpui_audio !== 'function') return Promise.reject(new Error('native mic host is not available'));
+    var id = audioSeq++;
+    return new Promise(function (resolve, reject) {
+      audioPending[id] = { resolve: resolve, reject: reject };
+      g.__rngpui_audio(JSON.stringify({ op: 'start', id: id }));
+    });
+  };
+  g.__rngpui_audioStop = function () {
+    if (typeof g.__rngpui_audio !== 'function') return Promise.reject(new Error('native mic host is not available'));
+    var id = audioSeq++;
+    return new Promise(function (resolve, reject) {
+      audioPending[id] = { resolve: resolve, reject: reject };
+      g.__rngpui_audio(JSON.stringify({ op: 'stop', id: id }));
+    });
+  };
+  g.__rngpui_audioCancel = function () {
+    if (typeof g.__rngpui_audio === 'function') g.__rngpui_audio(JSON.stringify({ op: 'cancel' }));
+  };
+  g.__rngpui_audioOnLevel = function (cb) {
+    audioLevelListeners.push(cb);
+    return function () {
+      var i = audioLevelListeners.indexOf(cb);
+      if (i >= 0) audioLevelListeners.splice(i, 1);
+    };
+  };
+  g.__rngpui_audioDone = function (jsonStr) {
+    var r = JSON.parse(jsonStr);
+    var p = audioPending[r.id];
+    if (!p) return;
+    delete audioPending[r.id];
+    if (r.error != null) { p.reject(new Error(r.error)); return; }
+    p.resolve(r);
+  };
+  g.__rngpui_audioLevel = function (jsonStr) {
+    var r;
+    try { r = JSON.parse(jsonStr); } catch (e) { return; }
+    var list = audioLevelListeners.slice();
+    for (var i = 0; i < list.length; i++) {
+      try { list[i](r.level); } catch (e) { g.__rngpui_log('error: audio level listener threw ' + ((e && e.stack) || e)); }
+    }
   };
 
   // WebSocket — one Rust worker per connection; events arrive via __rngpui_wsEvent.

@@ -38,6 +38,7 @@ mod bridge;
 #[cfg(target_os = "macos")]
 mod capture_png;
 mod debug_control;
+mod dock;
 mod dump;
 mod elements;
 mod frame_clock;
@@ -1531,6 +1532,14 @@ pub(crate) enum Incoming {
     },
     BlurInput,
     AppCommands(AppCommandConfig),
+    /// set (or clear, with an empty label) the macOS dock tile badge.
+    DockBadge {
+        label: String,
+    },
+    /// request user attention (dock bounce). critical = keep bouncing.
+    RequestAttention {
+        critical: bool,
+    },
     DebugDump {
         reply: flume::Sender<serde_json::Value>,
     },
@@ -1657,6 +1666,16 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
             "appCommands" => serde_json::from_value(v.clone())
                 .ok()
                 .map(Incoming::AppCommands),
+            "dockBadge" => Some(Incoming::DockBadge {
+                label: v
+                    .get("label")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            }),
+            "requestAttention" => Some(Incoming::RequestAttention {
+                critical: v.get("critical").and_then(|x| x.as_bool()).unwrap_or(false),
+            }),
             _ => None,
         };
     }
@@ -2708,6 +2727,12 @@ fn main() {
                             break;
                         }
                     }
+                    Incoming::DockBadge { label } => {
+                        dock::set_badge(&label);
+                    }
+                    Incoming::RequestAttention { critical } => {
+                        dock::request_attention(critical);
+                    }
                     msg => {
                         let mut drive_native_layout_animation = false;
                         let applied = pump.update(cx, |this, cx| match msg {
@@ -2786,10 +2811,14 @@ fn main() {
                             }
                             Incoming::DebugDump { reply } => {
                                 let tree = dump::dump_tree(&this.root);
+                                let dock = dock::snapshot();
                                 let _ = reply.send(serde_json::json!({
                                     "ok": true,
                                     "type": "dump",
                                     "tree": tree,
+                                    "dockBadge": dock.badge,
+                                    "dockAttentionInformational": dock.attention_informational,
+                                    "dockAttentionCritical": dock.attention_critical,
                                 }));
                             }
                             Incoming::DebugTap { x, y, reply } => {
@@ -2940,7 +2969,9 @@ fn main() {
                             | Incoming::DebugRealDrag { .. }
                             | Incoming::DebugResize { .. }
                             | Incoming::DebugNativeScrollAt { .. }
-                            | Incoming::AppCommands(_) => unreachable!(),
+                            | Incoming::AppCommands(_)
+                            | Incoming::DockBadge { .. }
+                            | Incoming::RequestAttention { .. } => unreachable!(),
                         });
                         if applied.is_err() {
                             break; // view dropped
@@ -3110,6 +3141,56 @@ mod tests {
         } else {
             panic!("expected scrollTo command");
         }
+    }
+
+    #[test]
+    fn parses_dock_badge_command() {
+        match parse_incoming(&json!({ "$cmd": "dockBadge", "label": "3" })) {
+            Some(Incoming::DockBadge { label }) => assert_eq!(label, "3"),
+            _ => panic!("expected dockBadge command"),
+        }
+        // missing label clears (empty string).
+        match parse_incoming(&json!({ "$cmd": "dockBadge" })) {
+            Some(Incoming::DockBadge { label }) => assert_eq!(label, ""),
+            _ => panic!("expected dockBadge command"),
+        }
+    }
+
+    #[test]
+    fn parses_request_attention_command() {
+        match parse_incoming(&json!({ "$cmd": "requestAttention", "critical": true })) {
+            Some(Incoming::RequestAttention { critical }) => assert!(critical),
+            _ => panic!("expected requestAttention command"),
+        }
+        // default is non-critical (informational).
+        match parse_incoming(&json!({ "$cmd": "requestAttention" })) {
+            Some(Incoming::RequestAttention { critical }) => assert!(!critical),
+            _ => panic!("expected requestAttention command"),
+        }
+    }
+
+    #[test]
+    fn dock_state_records_badge_and_attention_in_test_mode() {
+        // in TEST_MODE set_badge/request_attention skip the real AppKit call and
+        // only record the value — assert the recorded snapshot tracks the inputs.
+        // SAFETY: tests in this module run single-threaded for this env var.
+        unsafe { std::env::set_var("RNGPUI_TEST_MODE", "1") };
+
+        super::dock::set_badge("4");
+        assert_eq!(super::dock::snapshot().badge.as_deref(), Some("4"));
+
+        super::dock::set_badge("");
+        assert_eq!(super::dock::snapshot().badge, None);
+
+        let before = super::dock::snapshot();
+        super::dock::request_attention(false);
+        super::dock::request_attention(true);
+        let after = super::dock::snapshot();
+        assert_eq!(
+            after.attention_informational,
+            before.attention_informational + 1
+        );
+        assert_eq!(after.attention_critical, before.attention_critical + 1);
     }
 
     #[test]

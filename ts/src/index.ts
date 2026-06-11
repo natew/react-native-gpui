@@ -124,6 +124,7 @@ export {
 export { Animated, AnimatedValue, Easing } from "./Animated";
 export {
     AppCommands,
+    Dock,
     NativeLayout,
     type AppCommandBinding,
     type AppCommandConfig,

@@ -39,6 +39,8 @@ export type Command =
       }
     | { $cmd: "focusInput"; id: number }
     | { $cmd: "blurInput"; id: number }
+    | { $cmd: "dockBadge"; label: string }
+    | { $cmd: "requestAttention"; critical?: boolean }
     | ({ $cmd: "appCommands" } & AppCommandConfig);
 
 let sink: ((cmd: Command) => void) | null = null;
@@ -100,6 +102,20 @@ export const NativeLayout = {
 
     clear(key: string) {
         sendCommand({ $cmd: "nativeLayout", key, clear: true });
+    },
+};
+
+// macOS dock affordances over the host-command channel (no async reply). The
+// native service sets NSApp.dockTile.badgeLabel and fires NSApp requestUserAttention.
+export const Dock = {
+    // pass null/"" to clear the badge.
+    setBadge(label: string | null) {
+        sendCommand({ $cmd: "dockBadge", label: label ?? "" });
+    },
+
+    // dock bounce. macOS only fires it when the app is not the active app.
+    requestAttention(critical = false) {
+        sendCommand({ $cmd: "requestAttention", critical });
     },
 };
 

@@ -62,6 +62,11 @@ use style::{Dim, ElementStyle};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+// debug-control pointer state: `realdown` holds the left button until `realup`, and
+// `realmove` mirrors the OS by reporting the held button on every move — so the split
+// commands compose into a real drag (ev.dragging() == true mid-scrub).
+static DEBUG_LEFT_HELD: AtomicBool = AtomicBool::new(false);
+
 // startup timing: process-start instant + a one-shot first-render marker. gated on
 // RNGPUI_STARTUP_TIMING so it's silent in normal runs. used to drive cold start < 200ms.
 static STARTUP: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -2501,6 +2506,7 @@ fn main() {
                         }
                     }
                     Incoming::DebugRealDown { x, y, reply } => {
+                        DEBUG_LEFT_HELD.store(true, Ordering::Relaxed);
                         let result = window_handle.update(cx, |_root, window, cx| {
                             let position = gpui::point(px(x), px(y));
                             let before = crate::bridge::events_emitted_count();
@@ -2540,6 +2546,7 @@ fn main() {
                         }
                     }
                     Incoming::DebugRealUp { x, y, reply } => {
+                        DEBUG_LEFT_HELD.store(false, Ordering::Relaxed);
                         let result = window_handle.update(cx, |_root, window, cx| {
                             let position = gpui::point(px(x), px(y));
                             let before = crate::bridge::events_emitted_count();
@@ -2569,11 +2576,18 @@ fn main() {
                         }
                     }
                     Incoming::DebugRealMove { x, y, reply } => {
-                        // dispatch a REAL mouse MOVE (no button) through gpui's hitbox hit-test,
-                        // the same path an OS hover takes. Tests use this to drive native hover
-                        // and pseudoEvents plumbing without activating a window. Snapshot the
-                        // host->JS event counter so callers can distinguish a pure hover from a
-                        // node that intentionally emitted coalesced pseudo/listener events.
+                        // dispatch a REAL mouse MOVE through gpui's hitbox hit-test, the same
+                        // path an OS hover takes. Tests use this to drive native hover and
+                        // pseudoEvents plumbing without activating a window. Like the OS, the
+                        // move reports the held button (set by `realdown`), so moves between
+                        // realdown/realup are dragging moves — a holdable mid-scrub probe.
+                        // Snapshot the host->JS event counter so callers can distinguish a pure
+                        // hover from a node that intentionally emitted coalesced pseudo events.
+                        let pressed_button = if DEBUG_LEFT_HELD.load(Ordering::Relaxed) {
+                            Some(MouseButton::Left)
+                        } else {
+                            None
+                        };
                         let result = window_handle.update(cx, |_root, window, cx| {
                             let position = gpui::point(px(x), px(y));
                             let before = crate::bridge::events_emitted_count();
@@ -2581,7 +2595,7 @@ fn main() {
                                 window,
                                 gpui::PlatformInput::MouseMove(MouseMoveEvent {
                                     position,
-                                    pressed_button: None,
+                                    pressed_button,
                                     modifiers: gpui::Modifiers::default(),
                                 }),
                                 cx,

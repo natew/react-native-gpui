@@ -23,6 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use once_cell::sync::Lazy;
 use serde_json::Value;
@@ -42,6 +43,13 @@ struct OverlayEntry {
 }
 
 static OVERLAY: Lazy<Mutex<HashMap<u64, OverlayEntry>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Live overlay-entry count, mirrored from `OVERLAY` (updated under its lock). Lets the
+/// per-node hot paths (`merged_gpui_style`, `has_overlay` — called for EVERY node during
+/// layout + paint) skip locking `OVERLAY` entirely when nothing is animated, which is the
+/// overwhelmingly common case (a static frame). All accesses are on the main thread
+/// (apply_ops runs on the pump; the reads run during paint), so a relaxed mirror is exact.
+static OVERLAY_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// globalId → (overlay rev, committed-style identity, built style) for the last merge.
 /// A STEADY overlay (e.g. Tamagui's avoidReRenders hover path leaves a permanent entry
@@ -246,6 +254,7 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
     } else if changed {
         PAINT_ONLY_FRAME.store(false, std::sync::atomic::Ordering::Relaxed);
     }
+    OVERLAY_COUNT.store(overlay.len(), Ordering::Relaxed);
     changed
 }
 
@@ -260,6 +269,10 @@ pub fn merged_gpui_style(
     base_json: &Value,
     default_bg: Option<u32>,
 ) -> Option<gpui::Style> {
+    // fast path: no overlay anywhere → skip the lock (every node, every static frame).
+    if OVERLAY_COUNT.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
     let overlay = OVERLAY.lock().unwrap();
     let over = overlay.get(&global_id)?;
     let base_ptr = base_json as *const Value as usize;
@@ -299,6 +312,9 @@ pub fn merged_gpui_style(
 /// True when `global_id` currently has an animated overlay (cheap presence check used
 /// to gate the pseudo-style swap in paint).
 pub fn has_overlay(global_id: u64) -> bool {
+    if OVERLAY_COUNT.load(Ordering::Relaxed) == 0 {
+        return false;
+    }
     OVERLAY.lock().unwrap().contains_key(&global_id)
 }
 
@@ -322,7 +338,10 @@ pub fn merged_element_style(global_id: u64, base_json: &Value) -> Option<Element
 /// cache is dropped wholesale: a commit may swap any node's committed style (and frees
 /// the old `Arc`s, so cached base addresses must never be compared across commits).
 pub fn retain(present: &HashSet<u64>) {
-    OVERLAY.lock().unwrap().retain(|id, _| present.contains(id));
+    let mut overlay = OVERLAY.lock().unwrap();
+    overlay.retain(|id, _| present.contains(id));
+    OVERLAY_COUNT.store(overlay.len(), Ordering::Relaxed);
+    drop(overlay);
     MERGED.lock().unwrap().clear();
 }
 

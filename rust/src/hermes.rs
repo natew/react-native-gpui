@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::net::TcpStream;
 use std::os::unix::process::CommandExt;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -729,7 +729,7 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
     // __rngpui_requestFrame, the display link posts one fireFrame back per tick.
     crate::frame_clock::register(
         crate::frame_clock::REACT,
-        Box::new(|| post("__rngpui_fireFrame", String::new())),
+        Arc::new(|| post("__rngpui_fireFrame", String::new())),
     );
 
     std::thread::Builder::new()
@@ -820,7 +820,7 @@ pub fn start_ui(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
     let _ = UI_CALLS.set(calls_tx);
     crate::frame_clock::register(
         crate::frame_clock::UI,
-        Box::new(|| post_ui("__rngpui_fireFrame", String::new())),
+        Arc::new(|| post_ui("__rngpui_fireFrame", String::new())),
     );
 
     std::thread::Builder::new()

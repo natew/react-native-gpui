@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// Runtime ids (bits in `PENDING`).
@@ -34,7 +34,7 @@ pub const UI: u8 = 1;
 /// Consecutive idle display ticks before the link stops itself.
 const IDLE_TICKS_BEFORE_STOP: u32 = 3;
 
-type FireSink = Box<dyn Fn() + Send>;
+type FireSink = Arc<dyn Fn() + Send + Sync>;
 
 static SINKS: OnceLock<Mutex<HashMap<u8, FireSink>>> = OnceLock::new();
 /// Bitmask of runtime ids that want the next display tick.
@@ -50,7 +50,10 @@ fn sinks() -> &'static Mutex<HashMap<u8, FireSink>> {
 /// startup). The sink must be cheap + thread-safe: it runs on the display-link
 /// thread and should only post into the runtime's call queue.
 pub fn register(runtime: u8, fire: FireSink) {
-    sinks().lock().unwrap().insert(runtime, fire);
+    sinks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(runtime, fire);
 }
 
 /// Arm the clock: the given runtime gets one `fire` on the next display tick.
@@ -71,11 +74,20 @@ fn tick() {
         return;
     }
     IDLE_TICKS.store(0, Ordering::Release);
-    let sinks = sinks().lock().unwrap();
-    for (runtime, fire) in sinks.iter() {
-        if pending & (1 << runtime) != 0 {
-            fire();
-        }
+    // Snapshot the armed sinks, then RELEASE the lock before invoking them. A sink must
+    // never run while we hold SINKS: a panicking sink would poison the mutex and abort
+    // every later register/tick/request, and a sink that re-entered `register` would
+    // deadlock. Arc-clone the few armed sinks out, drop the guard, then fire.
+    let to_fire: Vec<FireSink> = {
+        let sinks = sinks().lock().unwrap_or_else(|e| e.into_inner());
+        sinks
+            .iter()
+            .filter(|(runtime, _)| pending & (1 << **runtime) != 0)
+            .map(|(_, fire)| Arc::clone(fire))
+            .collect()
+    };
+    for fire in to_fire {
+        fire();
     }
 }
 

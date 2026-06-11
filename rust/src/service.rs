@@ -1248,8 +1248,13 @@ impl Render for ServiceApp {
                         })
                         // page finished loading -> fire the node's onLoad. Under DEBUG this is
                         // also the quickest way to distinguish load from compositing issues.
-                        .with_on_page_load_handler(move |event, _url| {
-                            if matches!(event, wry::PageLoadEvent::Finished) {
+                        .with_on_page_load_handler(move |event, _url| match event {
+                            wry::PageLoadEvent::Started => {
+                                if event_dbg {
+                                    eprintln!("[webview {id}] page-load started");
+                                }
+                            }
+                            wry::PageLoadEvent::Finished => {
                                 if event_dbg {
                                     eprintln!("[webview {id}] page-load finished");
                                 }

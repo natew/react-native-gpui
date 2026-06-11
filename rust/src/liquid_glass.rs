@@ -129,6 +129,7 @@ pub fn show_offscreen_test_window(window: &mut Window) -> bool {
 // RNGPUI_CAPTURE_ALPHA overrides it.
 pub fn show_onscreen_capture_window(window: &mut Window) {
     let Some(ns_view) = raw_ns_view(window) else {
+        debug_offscreen_test("capture reveal: raw_ns_view is None");
         return;
     };
     let alpha = std::env::var("RNGPUI_CAPTURE_ALPHA")
@@ -139,12 +140,28 @@ pub fn show_onscreen_capture_window(window: &mut Window) {
     unsafe {
         let ns_window: id = msg_send![ns_view, window];
         if ns_window == nil {
+            debug_offscreen_test("capture reveal: ns_window is nil");
             return;
         }
         let _: () = msg_send![ns_window, setAlphaValue: alpha];
         let _: () = msg_send![ns_window, setIgnoresMouseEvents: YES];
+        // a LaunchServices `open -j` launch starts the app HIDDEN: every window is
+        // ordered out, orderFrontRegardless is a no-op, occlusionState never reports
+        // Visible, and gpui never starts its display link — the app renders exactly
+        // one frame and freezes. unhide WITHOUT activation (never steals focus or
+        // key status) so the invisible capture window can actually order in.
+        let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![ns_app, unhideWithoutActivation];
         // order it in (so it composites) without making it the key/main window.
         let _: () = msg_send![ns_window, orderFrontRegardless];
+        if std::env::var("RNGPUI_TEST_DEBUG").is_ok() {
+            let visible: bool = msg_send![ns_window, isVisible];
+            let read_alpha: f64 = msg_send![ns_window, alphaValue];
+            let occlusion: u64 = msg_send![ns_window, occlusionState];
+            eprintln!(
+                "[rngpui test debug] capture reveal applied: visible={visible} alpha={read_alpha} occlusion={occlusion}"
+            );
+        }
     }
 }
 

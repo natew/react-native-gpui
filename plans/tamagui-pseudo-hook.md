@@ -1,4 +1,11 @@
-# Renderer-driven pseudo states for Tamagui (design — not yet built)
+# Renderer-driven pseudo states for Tamagui
+
+> **Superseded note (2026-06-11):** this design SHIPPED, and the old host-side
+> pseudo paint lane it describes is GONE — `pseudo_style.rs`, `has_pseudo_style`,
+> and serialized `hoverStyle`/`pressStyle` deltas were deleted. The single
+> remaining mechanism is the renderer→JS `pseudoEvents` lane (`bridge::pseudo`)
+> feeding Tamagui's platform driver. Present-tense descriptions of the native
+> pseudo-style path below are historical context, not current behavior.
 
 Goal (user direction, 2026-06-09): kill the per-site `transition="0ms"` /
 `animation` / `group` requirement in app code. The renderer should tell Tamagui

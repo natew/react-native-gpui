@@ -112,27 +112,90 @@ export function resolve(root: DumpNode, selector: string): { best: ResolvedNode 
     return { best, candidates: candidates.map((c) => ({ node: c.node, matchedField: c.matchedField, matchedValue: c.matchedValue })) };
 }
 
-// Topmost node at a window point: the deepest visible node whose bounds contain the
-// point, breaking ties by paint order (later child = on top) and z-index. Mirrors the
-// native inspector hit-test the `do tap` driver uses on the Rust side.
+// Topmost painted surface at a window point. Later or higher-z siblings paint above
+// earlier siblings; a transparent layout wrapper does not cover an underlay surface.
 export function nodeAtPoint(root: DumpNode, x: number, y: number): DumpNode | null {
-    let best: { node: DumpNode; depth: number; z: number } | null = null;
-    const visit = (node: DumpNode, depth: number) => {
-        if (!isVisible(node)) {
-            // still descend — a zero-area wrapper can hold visible children
-        } else {
-            const b = node.bounds!;
-            if (x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height) {
-                const z = Number((node.style?.zIndex as number) ?? 0);
-                if (!best || depth > best.depth || (depth === best.depth && z >= best.z)) {
-                    best = { node, depth, z };
-                }
+    let fallback: { node: DumpNode; depth: number; z: number } | null = null;
+
+    // visit() walks topmost siblings FIRST, so on a full depth/z tie the
+    // earlier-seen candidate is the topmost in paint order — never replace it.
+    const rememberFallback = (node: DumpNode, depth: number) => {
+        const z = zIndexOf(node);
+        const candidate = { node, depth, z };
+        if (
+            !fallback ||
+            candidate.depth > fallback.depth ||
+            (candidate.depth === fallback.depth && candidate.z > fallback.z)
+        ) {
+            fallback = candidate;
+        }
+    };
+
+    const visit = (node: DumpNode, depth: number): DumpNode | null => {
+        // gpui inherits group opacity — an opacity:0 ancestor hides its whole
+        // subtree, so nothing under it can be the painted surface at the point.
+        if (Number(node.style?.opacity ?? 1) === 0) return null;
+        const inside = containsPoint(node, x, y);
+        if (inside) rememberFallback(node, depth);
+
+        const clipsChildren = ["hidden", "scroll", "auto"].includes(String(node.style?.overflow ?? ""));
+        if (inside || !clipsChildren) {
+            const children = [...(node.children ?? [])]
+                .map((child, index) => ({ child, index, z: zIndexOf(child) }))
+                .sort((a, b) => a.z - b.z || a.index - b.index);
+            for (let i = children.length - 1; i >= 0; i--) {
+                const hit = visit(children[i].child, depth + 1);
+                if (hit) return hit;
             }
         }
-        for (const child of node.children ?? []) visit(child, depth + 1);
+
+        return inside && paintsSurface(node) ? node : null;
     };
-    visit(root, 0);
-    return best ? (best as { node: DumpNode }).node : null;
+
+    return visit(root, 0) ?? fallback?.node ?? null;
+}
+
+function containsPoint(node: DumpNode, x: number, y: number): boolean {
+    if (!isVisible(node)) return false;
+    const b = node.bounds!;
+    return x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height;
+}
+
+function zIndexOf(node: DumpNode): number {
+    const z = Number(node.style?.zIndex ?? 0);
+    return Number.isFinite(z) ? z : 0;
+}
+
+function borderWidthOf(style: Record<string, unknown>): number {
+    return Math.max(
+        Number(style.borderWidth ?? 0) || 0,
+        Number(style.borderTopWidth ?? 0) || 0,
+        Number(style.borderRightWidth ?? 0) || 0,
+        Number(style.borderBottomWidth ?? 0) || 0,
+        Number(style.borderLeftWidth ?? 0) || 0,
+    );
+}
+
+function paintsSurface(node: DumpNode): boolean {
+    if (!isVisible(node)) return false;
+    if (["webview", "image", "svg", "text", "textinput", "textarea"].includes(node.type)) return true;
+
+    const style = node.style ?? {};
+    if (style.backgroundImage) return true;
+    if (isVisibleColor(style.backgroundColor)) return true;
+    if (isVisibleColor(style.borderColor) && borderWidthOf(style) > 0) return true;
+    return typeof style.boxShadow === "string" && style.boxShadow !== "" && style.boxShadow !== "none";
+}
+
+function isVisibleColor(value: unknown): boolean {
+    if (typeof value !== "string") return false;
+    const color = value.trim().toLowerCase();
+    if (!color || color === "transparent") return false;
+    const hex8 = /^#([0-9a-f]{8})$/.exec(color);
+    if (hex8) return hex8[1].slice(6) !== "00";
+    const hex4 = /^#([0-9a-f]{4})$/.exec(color);
+    if (hex4) return hex4[1].slice(3) !== "0";
+    return !/rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/.test(color);
 }
 
 export function centerOf(node: DumpNode): { x: number; y: number } | null {

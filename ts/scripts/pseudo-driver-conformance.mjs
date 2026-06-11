@@ -3,10 +3,11 @@
 //
 // Runs examples/pseudo-driver-conformance.tsx offscreen. A box subscribes to its native
 // hover/press flips via platformDriver.pseudo.subscribe (the tamagui entry point). This gate
-// drives a REAL offscreen pointer move (control-socket `realmove`, NOT synth) over the box,
-// then away, and asserts:
-//   1. FLIP — the listener fired hovered=true (pointer over box) then hovered=false (away).
-//   2. NO RE-RENDER — the React render count logged at each flip equals the mount render count,
+// drives REAL offscreen pointer input (control-socket `realmove` / `realdown` / `realup`,
+// NOT synth) over the box, then away, and asserts:
+//   1. HOVER — the listener fired hovered=true (pointer over box) then hovered=false (away).
+//   2. PRESS — the listener fired pressed=true on down and hovered=true/pressed=false on up.
+//   3. NO RE-RENDER — the React render count logged at each flip equals the mount render count,
 //      i.e. a hover never triggered a React commit (the whole point of the lane).
 //
 // Offscreen only (RNGPUI_NO_ACTIVATE / RNGPUI_TEST_MODE). No foreground window (HARD RULE).
@@ -83,7 +84,16 @@ try {
   await realmove(cx, cy)
   await waitFor(() => /pseudo-driver FLIP hovered=true/.test(output), 3000, 'hover-in flip')
   await sleep(40)
-  // 2. move AWAY → expect a hovered=false flip.
+
+  // 2. press while hovered -> expect pressed=true, then release while still hovered.
+  await realdown(cx, cy)
+  await waitFor(() => readFlips().some((f) => f.hovered && f.pressed), 3000, 'press-down flip')
+  await sleep(40)
+  await realup(cx, cy)
+  await waitFor(() => sawPressUpAfterDown(readFlips()), 3000, 'press-up flip')
+  await sleep(40)
+
+  // 3. move AWAY -> expect a hovered=false flip.
   await realmove(awayX, awayY)
   await waitFor(() => /pseudo-driver FLIP hovered=false/.test(output), 3000, 'hover-out flip')
   await sleep(40)
@@ -94,11 +104,11 @@ try {
 stop()
 
 // ── analysis ──────────────────────────────────────────────────────────────
-const flips = [...output.matchAll(/pseudo-driver FLIP hovered=(true|false) pressed=(true|false) renders=(\d+)/g)].map(
-  (m) => ({ hovered: m[1] === 'true', pressed: m[2] === 'true', renders: Number(m[3]) }),
-)
+const flips = readFlips()
 const sawHoverIn = flips.some((f) => f.hovered)
 const sawHoverOut = flips.some((f) => !f.hovered)
+const sawPressDown = flips.some((f) => f.hovered && f.pressed)
+const sawPressUp = sawPressUpAfterDown(flips)
 // every flip must have been observed at the MOUNT render count — a hover that caused a
 // React commit would log a higher renderCount.
 const noReRender = flips.length > 0 && flips.every((f) => f.renders === mountRenders)
@@ -111,12 +121,16 @@ console.log(
     `flipRenders=[${flips.map((f) => f.renders).join(',')}]`,
     `hoverIn=${sawHoverIn ? 'PASS' : 'FAIL'}`,
     `hoverOut=${sawHoverOut ? 'PASS' : 'FAIL'}`,
+    `pressDown=${sawPressDown ? 'PASS' : 'FAIL'}`,
+    `pressUp=${sawPressUp ? 'PASS' : 'FAIL'}`,
     `noReRender=${noReRender ? 'PASS' : 'FAIL'}`,
   ].join(' '),
 )
 
 if (!sawHoverIn) fail('listener never fired hovered=true on hover-in')
 if (!sawHoverOut) fail('listener never fired hovered=false on hover-out')
+if (!sawPressDown) fail('listener never fired pressed=true on mouse down')
+if (!sawPressUp) fail('listener never fired hovered=true pressed=false on mouse up')
 if (!noReRender) fail(`a hover caused a React re-render: mount=${mountRenders} flips=[${flips.map((f) => f.renders).join(',')}]`)
 console.log('PSEUDO_DRIVER_CONFORMANCE PASS')
 process.exit(0)
@@ -126,6 +140,15 @@ process.exit(0)
 // control socket — the same path an OS hover takes. This is what flips the native hover
 // state that the host emits as a `pseudo` event.
 function realmove(x, y) {
+  return controlPointer('realmove', x, y)
+}
+function realdown(x, y) {
+  return controlPointer('realdown', x, y)
+}
+function realup(x, y) {
+  return controlPointer('realup', x, y)
+}
+function controlPointer(command, x, y) {
   return new Promise((resolveP) => {
     const sock = net.connect(controlSocket)
     let buf = ''
@@ -136,7 +159,7 @@ function realmove(x, y) {
       resolveP(v)
     }
     sock.on('error', () => done(null))
-    sock.on('connect', () => sock.write(JSON.stringify({ reqId: 1, $cmd: 'realmove', x, y }) + '\n'))
+    sock.on('connect', () => sock.write(JSON.stringify({ reqId: 1, $cmd: command, x, y }) + '\n'))
     sock.on('data', (d) => {
       buf += d.toString()
       if (buf.includes('\n')) {
@@ -149,6 +172,15 @@ function realmove(x, y) {
     })
     setTimeout(() => done(null), 2000)
   })
+}
+function readFlips() {
+  return [...output.matchAll(/pseudo-driver FLIP hovered=(true|false) pressed=(true|false) renders=(\d+)/g)].map(
+    (m) => ({ hovered: m[1] === 'true', pressed: m[2] === 'true', renders: Number(m[3]) }),
+  )
+}
+function sawPressUpAfterDown(flips) {
+  const downIndex = flips.findIndex((f) => f.hovered && f.pressed)
+  return downIndex >= 0 && flips.slice(downIndex + 1).some((f) => f.hovered && !f.pressed)
 }
 
 function stop() {

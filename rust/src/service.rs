@@ -50,7 +50,6 @@ mod inspector;
 #[cfg(target_os = "macos")]
 mod liquid_glass;
 mod selection;
-mod pseudo_style;
 mod style;
 
 use elements::webview::WebViewContent;
@@ -302,35 +301,6 @@ fn parse_json_tree(
         .as_ref()
         .map(ElementStyle::from_json)
         .unwrap_or_default();
-    // native pseudo styles: the reconciler emits hoverStyle/pressStyle as separate DELTAS (never
-    // merged into `style`). Merge each over this node's own committed style json and build the
-    // resulting gpui::Style through the SAME path as the base style (identical color / shorthand /
-    // border-box handling), then stash it in the `pseudo_style` side-table (mirrors anim_overlay).
-    // `div` paint swaps it in when the node's hitbox reports hover/press — zero JS round-trip, no
-    // relayout. Built once per commit; pruned by `pseudo_style::retain` when the node leaves.
-    let build_pseudo = |key: &str| -> Option<gpui::Style> {
-        let delta = obj.get(key)?.as_object()?;
-        if delta.is_empty() {
-            return None;
-        }
-        let mut merged = style_json
-            .as_ref()
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default();
-        for (k, v) in delta {
-            merged.insert(k.clone(), v.clone());
-        }
-        Some(ElementStyle::from_json(&serde_json::Value::Object(merged)).build_gpui_style(None))
-    };
-    let hover_style = build_pseudo("hoverStyle");
-    let press_style = build_pseudo("pressStyle");
-    let has_pseudo_style = hover_style.is_some() || press_style.is_some();
-    // set unconditionally: with both `None` it REMOVES the node's entry. A still-mounted
-    // node that stops carrying a hoverStyle (e.g. a sidebar row flipping to active with
-    // `hoverStyle={active ? undefined : …}`) must drop its stale cached hover, or the old
-    // hover bg keeps repainting over the new base style (hover beat active selection).
-    crate::pseudo_style::set(global_id, hover_style, press_style);
     // opt-in renderer→JS pseudo lane: a node sets `pseudoEvents: true` (the tamagui
     // platform driver does this via the rngpui pseudo registry) to ask the host to emit a
     // coalesced `pseudo` event on each native hover/press flip. Opt-in so we don't spam an
@@ -413,7 +383,6 @@ fn parse_json_tree(
         style_json,
         cached_gpui_style,
         interactive,
-        has_pseudo_style,
         pseudo_events,
     }))
 }
@@ -1272,7 +1241,7 @@ impl Render for ServiceApp {
                             }
                             bridge::webview_message(id, body);
                         })
-                        // page finished loading → fire the node's onLoad. Under DEBUG this is
+                        // page finished loading -> fire the node's onLoad. Under DEBUG this is
                         // also the quickest way to distinguish load from compositing issues.
                         .with_on_page_load_handler(move |event, _url| {
                             if matches!(event, wry::PageLoadEvent::Finished) {
@@ -1320,10 +1289,11 @@ impl Render for ServiceApp {
                 inspector::refresh_snapshot_cache(&self.root);
             }
 
-            // GC layout-dedup state for nodes that left the tree.
+            // GC layout-dedup and pointer state for nodes that left the tree.
             let mut node_ids = HashSet::new();
             collect_node_ids(&self.root, &mut node_ids);
             bridge::retain_layout(&node_ids);
+            elements::retain_pointer_state(&node_ids);
             let mut native_layout_keys = HashSet::new();
             collect_native_layout_keys(&self.root, &mut native_layout_keys);
             elements::retain_native_layout_keys(&native_layout_keys);
@@ -1494,7 +1464,6 @@ fn fallback_root() -> Arc<ReactElement> {
         style_json: None,
         cached_gpui_style: None,
         interactive: false,
-        has_pseudo_style: false,
         pseudo_events: false,
     })
 }
@@ -1614,6 +1583,20 @@ pub(crate) enum Incoming {
     /// directly), this exercises gpui's real event loop, so it catches a frozen/occluded
     /// hitbox that `tap` is structurally blind to.
     DebugRealTap {
+        x: f32,
+        y: f32,
+        reply: flume::Sender<serde_json::Value>,
+    },
+    /// dispatch a real MouseMove then MouseDown — the move establishes hover first
+    /// (press-down assertions depend on it), the down is held without a MouseUp.
+    /// debug-only harnesses use this when they need to observe transient pressed
+    /// state before MouseUp is coalesced.
+    DebugRealDown {
+        x: f32,
+        y: f32,
+        reply: flume::Sender<serde_json::Value>,
+    },
+    DebugRealUp {
         x: f32,
         y: f32,
         reply: flume::Sender<serde_json::Value>,
@@ -1760,9 +1743,8 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
     // a tree (full or delta) arrives here once per React commit. resolve any `ref` nodes
     // against the prior commit's index, then rebuild the index from the reconstructed
     // tree (incl. reused subtrees) for the next commit's refs. the source side-table is
-    // pruned by `retain_sources(present)` in the Incoming::Tree handler (mirrors
-    // pseudo_style) — NOT cleared here, or ref'd nodes would lose their source (they
-    // never re-enter parse_json_tree).
+    // pruned by `retain_sources(present)` in the Incoming::Tree handler — NOT cleared here,
+    // or ref'd nodes would lose their source (they never re-enter parse_json_tree).
     let root = PRIOR_TREE_INDEX.with(|idx| parse_json_tree(v, &idx.borrow()))?;
     let mut next_index = HashMap::new();
     index_tree(&root, &mut next_index);
@@ -2518,13 +2500,80 @@ fn main() {
                             Err(_) => break,
                         }
                     }
+                    Incoming::DebugRealDown { x, y, reply } => {
+                        let result = window_handle.update(cx, |_root, window, cx| {
+                            let position = gpui::point(px(x), px(y));
+                            let before = crate::bridge::events_emitted_count();
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::MouseMove(MouseMoveEvent {
+                                    position,
+                                    pressed_button: None,
+                                    modifiers: gpui::Modifiers::default(),
+                                }),
+                                cx,
+                            );
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::MouseDown(MouseDownEvent {
+                                    button: MouseButton::Left,
+                                    position,
+                                    modifiers: gpui::Modifiers::default(),
+                                    click_count: 1,
+                                    first_mouse: false,
+                                }),
+                                cx,
+                            );
+                            crate::bridge::events_emitted_count().saturating_sub(before)
+                        });
+                        match result {
+                            Ok(emitted) => {
+                                let _ = reply.send(serde_json::json!({
+                                    "ok": true,
+                                    "type": "realdown",
+                                    "x": x,
+                                    "y": y,
+                                    "eventsEmitted": emitted,
+                                }));
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    Incoming::DebugRealUp { x, y, reply } => {
+                        let result = window_handle.update(cx, |_root, window, cx| {
+                            let position = gpui::point(px(x), px(y));
+                            let before = crate::bridge::events_emitted_count();
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::MouseUp(MouseUpEvent {
+                                    button: MouseButton::Left,
+                                    position,
+                                    modifiers: gpui::Modifiers::default(),
+                                    click_count: 1,
+                                }),
+                                cx,
+                            );
+                            crate::bridge::events_emitted_count().saturating_sub(before)
+                        });
+                        match result {
+                            Ok(emitted) => {
+                                let _ = reply.send(serde_json::json!({
+                                    "ok": true,
+                                    "type": "realup",
+                                    "x": x,
+                                    "y": y,
+                                    "eventsEmitted": emitted,
+                                }));
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     Incoming::DebugRealMove { x, y, reply } => {
-                        // dispatch a REAL mouse MOVE (no button) through gpui's hitbox hit-test —
-                        // the same path an OS hover takes. Used to validate native hover/press
-                        // pseudo styles: a move over a row triggers the host's is_hovered + the
-                        // div's paint swap, with ZERO JS round-trip. We snapshot the host→JS event
-                        // counter so the caller can prove no JS event fired (no mouseEnter etc.),
-                        // then refresh so the hover repaints.
+                        // dispatch a REAL mouse MOVE (no button) through gpui's hitbox hit-test,
+                        // the same path an OS hover takes. Tests use this to drive native hover
+                        // and pseudoEvents plumbing without activating a window. Snapshot the
+                        // host->JS event counter so callers can distinguish a pure hover from a
+                        // node that intentionally emitted coalesced pseudo/listener events.
                         let result = window_handle.update(cx, |_root, window, cx| {
                             let position = gpui::point(px(x), px(y));
                             let before = crate::bridge::events_emitted_count();
@@ -2547,8 +2596,6 @@ fn main() {
                                     "type": "realmove",
                                     "x": x,
                                     "y": y,
-                                    // native hover emits NOTHING to JS — a non-zero delta means a
-                                    // JS listener fired (the old re-serialize-on-hover round-trip).
                                     "eventsEmitted": emitted,
                                 }));
                             }
@@ -3038,8 +3085,8 @@ fn main() {
                                 collect_node_ids(&next_root, &mut node_ids);
                                 bridge::retain_layout(&node_ids);
                                 crate::anim_overlay::retain(&node_ids);
-                                crate::pseudo_style::retain(&node_ids);
                                 crate::inspector::retain_sources(&node_ids);
+                                elements::retain_pointer_state(&node_ids);
                                 let mut native_layout_keys = HashSet::new();
                                 collect_native_layout_keys(&next_root, &mut native_layout_keys);
                                 elements::retain_native_layout_keys(&native_layout_keys);
@@ -3262,6 +3309,8 @@ fn main() {
                             | Incoming::DebugRealKey { .. }
                             | Incoming::DebugDispatchAction { .. }
                             | Incoming::DebugRealTap { .. }
+                            | Incoming::DebugRealDown { .. }
+                            | Incoming::DebugRealUp { .. }
                             | Incoming::DebugRealMove { .. }
                             | Incoming::DebugRealDrag { .. }
                             | Incoming::DebugRealDragPath { .. }
@@ -3362,45 +3411,6 @@ mod tests {
             Some(Incoming::Tree(t)) => t,
             _ => panic!("expected Incoming::Tree"),
         }
-    }
-
-    // A still-mounted node that stops carrying a hoverStyle must drop its cached
-    // pseudo entry, or the stale hover keeps repainting over the new base style
-    // (hover beat active selection in the agentbus sidebar).
-    #[test]
-    fn reparse_without_hover_style_clears_cached_pseudo_entry() {
-        let _serial = crate::pseudo_style::TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        crate::pseudo_style::test_clear();
-
-        let with_hover = json!({
-            "globalId": 7100, "type": "div", "children": [
-                { "globalId": 7101, "type": "div",
-                  "style": { "backgroundColor": "#111111" },
-                  "hoverStyle": { "backgroundColor": "#333333" } }
-            ]
-        });
-        tree_of(parse_incoming(&with_hover));
-        assert!(
-            crate::pseudo_style::get(7101).is_some(),
-            "hover entry stored on first parse"
-        );
-
-        // same node id, re-serialized without a hoverStyle (e.g. flipped to active).
-        let without_hover = json!({
-            "globalId": 7100, "type": "div", "children": [
-                { "globalId": 7101, "type": "div",
-                  "style": { "backgroundColor": "#222222" } }
-            ]
-        });
-        tree_of(parse_incoming(&without_hover));
-        assert!(
-            crate::pseudo_style::get(7101).is_none(),
-            "stale hover entry must be removed when the node stops carrying one"
-        );
-
-        crate::pseudo_style::test_clear();
     }
 
     // The delta wire: a full commit seeds the index, then a delta with a `ref` node

@@ -10,8 +10,8 @@ pub mod webview;
 pub use div::{
     ReactDivElement, animate_native_layout_override, clear_native_layout_override,
     finish_pointer_gesture, native_layout_has_animations, native_resize_active,
-    retain_native_layout_keys, scroll_by, scroll_to, scroll_to_end, set_native_layout_override,
-    synth_drag_end, synth_drag_move, synth_drag_start, synth_tap,
+    retain_native_layout_keys, retain_pointer_state, scroll_by, scroll_to, scroll_to_end,
+    set_native_layout_override, synth_drag_end, synth_drag_move, synth_drag_start, synth_tap,
 };
 pub use image::ReactImageElement;
 pub use input::ReactInputElement;
@@ -171,9 +171,6 @@ pub struct ReactElement {
     /// `POINTER_EVENTS` scan) — prepaint reads this once per frame per node, so the
     /// 28-name string scan must not run there.
     pub interactive: bool,
-    /// precomputed at parse: `pseudo_style` holds a native hover/press style for this
-    /// node (avoids a global-map lock per node per frame in prepaint).
-    pub has_pseudo_style: bool,
     /// opt-in (`pseudoEvents: true` prop): emit a coalesced `pseudo` host event to JS on
     /// every native hover/press flip of this node's hitbox, so a renderer-side driver
     /// (tamagui's platform driver) can drive pseudo state without a React-event lane.

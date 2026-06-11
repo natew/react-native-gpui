@@ -45,10 +45,10 @@ struct OverlayEntry {
 static OVERLAY: Lazy<Mutex<HashMap<u64, OverlayEntry>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Live overlay-entry count, mirrored from `OVERLAY` (updated under its lock). Lets the
-/// per-node hot paths (`merged_gpui_style`, `has_overlay` — called for EVERY node during
-/// layout + paint) skip locking `OVERLAY` entirely when nothing is animated, which is the
-/// overwhelmingly common case (a static frame). All accesses are on the main thread
-/// (apply_ops runs on the pump; the reads run during paint), so a relaxed mirror is exact.
+/// per-node hot path (`merged_gpui_style`, called for EVERY node during layout + paint)
+/// skip locking `OVERLAY` entirely when nothing is animated, which is the overwhelmingly
+/// common case (a static frame). All accesses are on the main thread (apply_ops runs on
+/// the pump; the reads run during paint), so a relaxed mirror is exact.
 static OVERLAY_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// globalId → (overlay rev, committed-style identity, built style) for the last merge.
@@ -130,17 +130,6 @@ pub fn take_paint_only_frame() -> bool {
 /// scrollTo, native layout/resize, inspector toggle, …).
 pub fn clear_paint_only_frame() {
     PAINT_ONLY_FRAME.store(false, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Arm the retained-layout fast path for the frame a non-`SetNodeStyle` repaint is about
-/// to schedule, when that repaint is geometry-stable. The native hover/press pseudo-style
-/// swap is the case: it replaces a precomputed variant in PAINT (after layout), never re-
-/// laying-out, so the frame's geometry is identical to the last full-layout frame. The
-/// render gate still re-confirms `!root_dirty && !layout_dirty && !resize && …` before
-/// trusting it, so a stray mark can at worst cost one needless full layout, never a wrong
-/// one.
-pub fn mark_paint_only_frame() {
-    PAINT_ONLY_FRAME.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn is_layout_key(k: &str) -> bool {
@@ -307,15 +296,6 @@ pub fn merged_gpui_style(
         );
     }
     Some(style)
-}
-
-/// True when `global_id` currently has an animated overlay (cheap presence check used
-/// to gate the pseudo-style swap in paint).
-pub fn has_overlay(global_id: u64) -> bool {
-    if OVERLAY_COUNT.load(Ordering::Relaxed) == 0 {
-        return false;
-    }
-    OVERLAY.lock().unwrap().contains_key(&global_id)
 }
 
 /// Uncached merge returning the `ElementStyle` — debug dump and tests only; the hot
@@ -503,8 +483,10 @@ mod tests {
         let mut present = HashSet::new();
         present.insert(1u64);
         retain(&present);
-        assert!(has_overlay(1));
-        assert!(!has_overlay(2));
+        let overlay = OVERLAY.lock().unwrap();
+        assert!(overlay.contains_key(&1));
+        assert!(!overlay.contains_key(&2));
+        drop(overlay);
         OVERLAY.lock().unwrap().clear();
     }
 

@@ -226,9 +226,9 @@ function registerHandlers(id: number, props: Record<string, unknown>) {
             map[event] = chainHandler(map[event], next);
         }
     }
-    // hoverStyle/pressStyle are resolved natively in the host (see serialize) — they wire NO
-    // JS event handlers here. Only the user's own onHoverIn/onPressIn/etc. (mapped above via
-    // PROP_TO_EVENT) produce listeners.
+    // hoverStyle/pressStyle are consumed by the styling layer (Tamagui) through the platform
+    // driver, not wired as JS mouse handlers here. Only the user's own onHoverIn/onPressIn/etc.
+    // (mapped above via PROP_TO_EVENT) produce listeners.
     if (Object.keys(map).length) handlers.set(id, map);
     else handlers.delete(id);
 }
@@ -889,17 +889,9 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
         serMissByGroup[g] = (serMissByGroup[g] ?? 0) + 1;
     }
     const style = (normalizePropsStyle(props) ?? {}) as Record<string, unknown>;
-    // hover/press are NOT merged into `style` here — they're emitted as separate deltas and
-    // resolved natively in the gpui host (the host reads its own hitbox hover/press state and
-    // merges the delta at paint). That keeps a hover off the JS thread entirely: no
-    // mouseEnter→setPseudoState→re-serialize→applyTree round-trip per row, which is what kept
-    // rapid sidebar hovering from holding 120fps.
-    const hoverStyle = props.hoverStyle
-        ? ((normalizeStyle(props.hoverStyle as never) ?? {}) as Record<string, unknown>)
-        : undefined;
-    const pressStyle = props.pressStyle
-        ? ((normalizeStyle(props.pressStyle as never) ?? {}) as Record<string, unknown>)
-        : undefined;
+    // hover/press style props stay in the styling layer. The host only receives `pseudoEvents`
+    // for nodes that Tamagui subscribed through the platform driver; the resulting native
+    // hover flips feed Tamagui's emitter/animation path instead of a serialized paint delta.
     const node: SerializedNode = { globalId: inst.id, type: "div" };
 
     switch (inst.type) {
@@ -976,8 +968,6 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
     }
 
     if (Object.keys(style).length) node.style = style;
-    if (hoverStyle && Object.keys(hoverStyle).length) node.hoverStyle = hoverStyle;
-    if (pressStyle && Object.keys(pressStyle).length) node.pressStyle = pressStyle;
     if (pseudoEventIds.has(inst.id)) node.pseudoEvents = true;
     const nativeLayoutKey = stringProp(props, "nativeLayoutKey");
     if (nativeLayoutKey) node.nativeLayoutKey = nativeLayoutKey;

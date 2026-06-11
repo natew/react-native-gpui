@@ -80,8 +80,6 @@ export interface TextInputProps extends AccessibilityProps {
     returnKeyType?: string;
     maxLength?: number;
     style?: StyleProp<TextStyle>;
-    hoverStyle?: StyleProp<TextStyle>;
-    pressStyle?: StyleProp<TextStyle>;
 }
 export interface TextInputHandle {
     focus: () => void;

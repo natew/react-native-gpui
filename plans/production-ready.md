@@ -39,8 +39,9 @@ infrastructure (P2) is as important as fixing the bugs.
 - ✅ **Pixel animation-ramp conformance** (P0.2, partial) — `check-opacity-ramp-conformance.mjs`
   samples the real composited frame over time and asserts opacity interpolates in PIXELS
   (the systemic guard). Transform variant still TODO once transform paints (P0.1).
-- ✅ **Pseudo-style global-lock gated** on `has_pseudo_style`/`pseudo_events`
-  (`div.rs:1577,2155`) — was locking a process-global mutex on every div every frame (P3.1).
+- ✅ **Pseudo-style global-lock gated** (P3.1) — superseded 2026-06-11: the host
+  pseudo-style paint lane (`pseudo_style.rs`/`has_pseudo_style`) was deleted; only the
+  opt-in `pseudo_events` renderer→JS lane remains, so the lock is gated on that alone.
 - ✅ **Overlay mutex skipped on static frames** via an `AtomicUsize` mirror (P3.2) —
   `merged_gpui_style`/`has_overlay` no longer lock when nothing is animated.
 - ✅ **Per-`SetNodeStyle` all-windows refresh removed** (P3.3) — the pump refreshed every

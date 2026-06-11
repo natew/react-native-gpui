@@ -114,6 +114,16 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
             y: number(value, "y")?,
             reply,
         }),
+        "realdown" => Ok(Incoming::DebugRealDown {
+            x: number(value, "x")?,
+            y: number(value, "y")?,
+            reply,
+        }),
+        "realup" => Ok(Incoming::DebugRealUp {
+            x: number(value, "x")?,
+            y: number(value, "y")?,
+            reply,
+        }),
         "realmove" => Ok(Incoming::DebugRealMove {
             x: number(value, "x")?,
             y: number(value, "y")?,

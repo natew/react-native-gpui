@@ -1099,7 +1099,6 @@ mod tests {
             style_json: None,
             cached_gpui_style: None,
             interactive: false,
-            has_pseudo_style: false,
             pseudo_events: false,
         }
     }

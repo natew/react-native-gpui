@@ -85,11 +85,9 @@ struct DragReleaseTarget {
 static SCROLL: Lazy<Mutex<HashMap<u64, ScrollOffset>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static SCROLL_TO_END: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
-// ids currently hovered/pressed for the sake of NATIVE pseudo styles (hoverStyle/pressStyle).
-// Separate from HOVER (which is maintained only for nodes with JS mouse listeners): a node may
-// carry a hoverStyle and have zero JS listeners. The paint pass reads the hitbox directly for
-// the style; these sets exist so the move/down/up listeners can detect a transition and ask for
-// a single on-demand repaint (we don't render continuously).
+// ids currently hovered/pressed for the renderer→JS pseudo lane. Separate from HOVER (which is
+// maintained only for nodes with JS mouse listeners): a Tamagui node may subscribe to native
+// pseudo flips without wiring mouseEnter/mouseLeave handlers.
 static PSEUDO_HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static PRESSED: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
@@ -253,6 +251,18 @@ fn set_native_layout_override_now(
 pub fn clear_native_layout_override(key: &str) {
     NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().remove(key);
     NATIVE_LAYOUT_OVERRIDES.lock().unwrap().remove(key);
+}
+
+// drop pointer state for unmounted nodes — a node that unmounts while hovered or
+// pressed would otherwise leave its id in these sets forever (ids are monotonic,
+// so it's a slow leak rather than a correctness hazard).
+pub fn retain_pointer_state(present: &HashSet<u64>) {
+    HOVER.lock().unwrap().retain(|id| present.contains(id));
+    PSEUDO_HOVER
+        .lock()
+        .unwrap()
+        .retain(|id| present.contains(id));
+    PRESSED.lock().unwrap().retain(|id| present.contains(id));
 }
 
 pub fn retain_native_layout_keys(keys: &HashSet<String>) {
@@ -1457,11 +1467,7 @@ impl Element for ReactDivElement {
         // insert_hitbox must run in prepaint (gpui asserts the phase); mouse
         // listeners are wired in paint and query the hitbox's current hover state.
         let interactive = self.element.native_resize.is_some()
-            // a node with a native hover/press style needs a hitbox even with no JS listeners,
-            // so the paint pass can read its hover/press state and apply the pseudo style.
-            // both facts are precomputed at parse (this runs per node per frame).
-            || self.element.has_pseudo_style
-            // a node that only opted into the renderer→JS pseudo lane (pseudoEvents) also
+            // a node that opted into the renderer→JS pseudo lane (pseudoEvents) also
             // needs a hitbox so the paint pass can detect hover/press flips and emit them.
             || self.element.pseudo_events
             || self.element.interactive;
@@ -1568,29 +1574,6 @@ impl Element for ReactDivElement {
             .computed_style
             .take()
             .unwrap_or_else(|| self.element.build_gpui_style(None));
-        // native hover/press: when this node carries a pseudo style (see `crate::pseudo_style`) and
-        // its own hitbox reports hover (and, for press, a held left button), paint the precomputed
-        // pseudo variant. This is the whole point — a hover bg change repaints here on the host
-        // thread with ZERO JS round-trip and no relayout, so rapidly hovering rows holds frame
-        // rate. Skipped while a reanimated overlay is live for this node (that path owns the style
-        // for the frame).
-        if self.element.has_pseudo_style
-            && !crate::anim_overlay::has_overlay(self.element.global_id)
-            && let Some(pseudo) = crate::pseudo_style::get(self.element.global_id)
-            && let Some(hitbox) = prepaint.hitbox.as_ref()
-            && hitbox.is_hovered(window)
-        {
-            let pressed =
-                pseudo.press.is_some() && PRESSED.lock().unwrap().contains(&self.element.global_id);
-            let variant = if pressed {
-                pseudo.press
-            } else {
-                pseudo.hover.or(pseudo.press)
-            };
-            if let Some(variant) = variant {
-                style = variant;
-            }
-        }
         apply_rounded_overflow_clips_to_style(&mut style, bounds, window.rem_size());
         let (clip, scroll) = overflow_mode(&self.element.style);
 
@@ -2148,47 +2131,14 @@ impl Element for ReactDivElement {
             }
         }
 
-        // native hover/press repaint + renderer→JS pseudo lane. Two opt-ins share the same
-        // minimal hitbox tracking here (a pseudo node may have NO JS listeners, so the
-        // listener block above never runs for it):
-        //   • `has_pseudo_style` → swap the precomputed pseudo variant in PAINT on a flip;
-        //     these listeners only schedule the on-demand repaint that lets that run.
-        //   • `pseudo_events` → emit a coalesced `pseudo` host event on each flip, so the
-        //     tamagui platform driver can drive pseudo state with no React-event lane.
-        // The flip is detected once here (PSEUDO_HOVER / PRESSED are the state of record);
-        // both outputs ride off the same transition so they can't diverge.
-        // Gate on the parse-time flags BEFORE touching the global pseudo-style mutex: a
-        // plain node (no pseudo style, no pseudo events — the overwhelming majority) must
-        // not pay a global-lock round-trip + map probe per frame. `has_pseudo_style` is the
-        // precondition for `pseudo_style::get` returning `Some`, so this changes nothing for
-        // pseudo nodes.
+        // renderer→JS pseudo lane. A node with `pseudoEvents` asks the host to emit a
+        // coalesced `pseudo` event on native hover/press flips, so Tamagui can drive pseudo
+        // state with no React mouse-event lane.
         let wants_events = self.element.pseudo_events;
-        if (self.element.has_pseudo_style || wants_events)
-            && let Some(hitbox) = prepaint.hitbox.clone()
-        {
-            let pseudo = if self.element.has_pseudo_style {
-                crate::pseudo_style::get(self.element.global_id)
-            } else {
-                None
-            };
+        if wants_events && let Some(hitbox) = prepaint.hitbox.clone() {
             let id = self.element.global_id;
-            let has_style = pseudo.is_some();
-            // track press whenever a press style exists OR the JS lane wants press flips.
-            let track_press = pseudo.as_ref().is_some_and(|p| p.press.is_some()) || wants_events;
-            // a flip's outputs: refresh the window when a native pseudo style needs to repaint,
-            // and emit the coalesced `pseudo` event (absolute hovered/pressed) when opted in.
-            let emit_pseudo = move |hovered: bool, pressed: bool, window: &mut Window| {
-                if has_style {
-                    // a native hover/press transition swaps the precomputed variant in PAINT
-                    // only — it never re-lays-out, even if the style carries width/padding. So
-                    // this repaint is geometry-stable: arm the retained-layout fast path so it
-                    // skips the ~7ms taffy solve.
-                    crate::anim_overlay::mark_paint_only_frame();
-                    window.refresh();
-                }
-                if wants_events {
-                    crate::bridge::pseudo(id, hovered, pressed);
-                }
+            let emit_pseudo = move |hovered: bool, pressed: bool| {
+                crate::bridge::pseudo(id, hovered, pressed);
             };
             let move_hitbox = hitbox.clone();
             window.on_mouse_event(move |_ev: &MouseMoveEvent, phase, window, _cx| {
@@ -2213,37 +2163,35 @@ impl Element for ReactDivElement {
                     PRESSED.lock().unwrap().remove(&id);
                     false
                 };
-                emit_pseudo(inside, pressed, window);
+                emit_pseudo(inside, pressed);
             });
-            if track_press {
-                let down_hitbox = hitbox.clone();
-                window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, _cx| {
-                    if phase == DispatchPhase::Bubble
-                        && ev.button == MouseButton::Left
-                        && down_hitbox.is_hovered(window)
-                        && PRESSED.lock().unwrap().insert(id)
-                    {
-                        emit_pseudo(true, true, window);
-                    }
-                });
-                window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, _cx| {
-                    if phase == DispatchPhase::Bubble
-                        && ev.button == MouseButton::Left
-                        && PRESSED.lock().unwrap().remove(&id)
-                    {
-                        let hovered = PSEUDO_HOVER.lock().unwrap().contains(&id);
-                        emit_pseudo(hovered, false, window);
-                    }
-                });
-            }
-            window.on_mouse_event(move |_ev: &MouseExitEvent, phase, window, _cx| {
+            let down_hitbox = hitbox.clone();
+            window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, _cx| {
+                if phase == DispatchPhase::Bubble
+                    && ev.button == MouseButton::Left
+                    && down_hitbox.is_hovered(window)
+                    && PRESSED.lock().unwrap().insert(id)
+                {
+                    emit_pseudo(true, true);
+                }
+            });
+            window.on_mouse_event(move |ev: &MouseUpEvent, phase, _window, _cx| {
+                if phase == DispatchPhase::Bubble
+                    && ev.button == MouseButton::Left
+                    && PRESSED.lock().unwrap().remove(&id)
+                {
+                    let hovered = PSEUDO_HOVER.lock().unwrap().contains(&id);
+                    emit_pseudo(hovered, false);
+                }
+            });
+            window.on_mouse_event(move |_ev: &MouseExitEvent, phase, _window, _cx| {
                 if phase != DispatchPhase::Bubble {
                     return;
                 }
                 let left_hover = PSEUDO_HOVER.lock().unwrap().remove(&id);
                 let left_press = PRESSED.lock().unwrap().remove(&id);
                 if left_hover || left_press {
-                    emit_pseudo(false, false, window);
+                    emit_pseudo(false, false);
                 }
             });
         }

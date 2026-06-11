@@ -9,8 +9,8 @@
  *
  * The fixture proves the contract by logging every listener firing and the React render
  * count. The driver (pseudo-driver-conformance.mjs) drives a REAL offscreen pointer move
- * over the box, then away, and asserts the listener saw hovered=true then hovered=false
- * while the React render count never changed (no re-render from a hover).
+ * over the box, presses it, then moves away, and asserts the listener saw hover and
+ * press state changes while the React render count never changed.
  */
 import { useEffect, useRef } from 'react'
 import { StyleSheet, Text, View, platformDriver, render } from '../src/index'

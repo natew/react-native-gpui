@@ -37,14 +37,7 @@ export const Platform = {
     isPad: false,
     isTV: false,
     isTesting: false,
-    // renderer capability flags, in RN's Platform.constants shape. styling systems read
-    // these to delegate work the renderer owns natively instead of polyfilling it in JS.
-    constants: {
-        // this renderer resolves `hoverStyle`/`pressStyle` view props at paint time from
-        // its own hitbox hover/press state (CSS-:hover semantics: zero JS round-trip,
-        // never lags a fast pointer sweep). `focusStyle` is NOT renderer-owned.
-        nativePseudoStyles: true,
-    },
+    constants: {},
     select<T>(spec: { [k in PlatformOSType | "native" | "default"]?: T }): T | undefined {
         if ("macos" in spec) return spec.macos;
         if ("native" in spec) return spec.native;

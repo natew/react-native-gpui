@@ -17,15 +17,6 @@ export type SerializedNode = {
     ref?: boolean;
     type?: string;
     style?: Record<string, unknown>;
-    /**
-     * pseudo-state style DELTAS applied NATIVELY in the gpui host (zero JS round-trip).
-     * The host claims a hitbox, reads its own hover/press state every frame, and paints
-     * the committed `style` merged with `hoverStyle`/`pressStyle` accordingly — so rapidly
-     * hovering many rows never re-enters React/serialize. Paint-only by contract (bg, color,
-     * border, opacity, shadow); a layout key here won't reflow.
-     */
-    hoverStyle?: Record<string, unknown>;
-    pressStyle?: Record<string, unknown>;
     /** opt-in renderer→JS pseudo lane: when true, the host emits a coalesced `pseudo`
      * event ({hovered, pressed}) on every native hover/press flip of this node's hitbox,
      * routed by the pseudo registry (platform-driver.ts) to a renderer-platform driver

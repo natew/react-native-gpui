@@ -1182,8 +1182,8 @@ pub fn remember_source(id: u64, source: &str) {
 
 /// Drop source entries for ids no longer in the live tree. Under the delta wire, ref'd
 /// nodes never re-enter `parse_json_tree`, so the source table can't be cleared and
-/// repopulated each commit — it's pruned by the present-set instead (mirrors
-/// `pseudo_style::retain`). `present` is ALL reconstructed ids, ref'd subtrees included.
+/// repopulated each commit — it's pruned by the present-set instead. `present` is ALL
+/// reconstructed ids, ref'd subtrees included.
 pub fn retain_sources(present: &std::collections::HashSet<u64>) {
     SOURCE_TABLE
         .lock()
@@ -1692,7 +1692,6 @@ mod tests {
             style_json: None,
             cached_gpui_style: None,
             interactive: false,
-            has_pseudo_style: false,
             pseudo_events: false,
         })
     }

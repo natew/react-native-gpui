@@ -264,8 +264,6 @@ export interface AccessibilityProps {
 export interface ViewProps extends AccessibilityProps, ViewStyle {
     children?: ReactNode;
     style?: StyleProp<ViewStyle>;
-    hoverStyle?: StyleProp<ViewStyle>;
-    pressStyle?: StyleProp<ViewStyle>;
     onClick?: (event: MouseResponderEvent) => void;
     onMouseDown?: (event: MouseResponderEvent) => void;
     onMouseUp?: (event: MouseResponderEvent) => void;

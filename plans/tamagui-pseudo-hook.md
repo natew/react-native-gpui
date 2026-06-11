@@ -51,6 +51,25 @@ Far future: route the pseudo signal straight to the worklet runtime (skip the
 React thread entirely). Blocked on UI-side style resolution for pseudo merges —
 not needed for parity with web.
 
+## Remaining step: retire the host paint-swap lane (2026-06-12)
+
+The driver lane is live on desktop (gui/AGENTS.md: `setupPlatformDriver` at
+startup, transition-sprinkle swept), but the pre-driver host lane
+(`pseudo_style.rs` + the reconciler's `hoverStyle`/`pressStyle` serialization +
+the swap in div paint) was never deleted, so hover styles currently have TWO
+application paths. That violates the one-path rule and the golden contract
+("components conform to react-native/tamagui, the renderer only makes it
+fast") — and it bit for real: the hover-beat-active bug (fixed in 3fa6a0c) was
+the host lane's per-node style cache going stale, something Tamagui-as-the-
+single-applier could never produce.
+
+To finish: prove the driver lane alone holds 120fps for the no-transition
+instant case (`bun native-shell/scripts/measure-frame-cost.mjs --perf-trace`,
+`[ser] commits` ~0, against the agentbus gui sidebar sweep), then delete
+`pseudo_style.rs`, the reconciler pseudo-delta emission, and div paint's
+pseudo swap. The host keeps only the trigger emit (`pseudoEvents` lane).
+Validate with conformance:gpui:hover-active + the frame-cost gate.
+
 ## Coordination
 
 The tamagui-side latch fix lives on branch `v2-fix-reaniamted-fast-path` in

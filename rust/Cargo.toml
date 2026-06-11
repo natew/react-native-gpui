@@ -71,6 +71,15 @@ objc = "0.2"
 #    to a full relayout next draw. Cuts the per-frame draw cost ~10ms→~4ms on hover/pulse
 #    frames at 400-session scale. `RNGPUI_DISABLE_RETAINED_LAYOUT` forces the stock path;
 #    `RNGPUI_DRAW_PROBE` prints the per-draw wall-clock + reuse flag.
+#
+# 3. `Window::with_element_opacity` is `pub` (upstream `pub(crate)`). The host's custom
+#    div element (src/elements/div.rs) paints via `Style::paint` directly instead of
+#    gpui's stock `Div`, which is the only thing that pushes `style.opacity` onto gpui's
+#    element-opacity stack (paint_quad/paint_shadows/paint_path multiply alpha by it).
+#    Without a public entry point the host could not render div opacity AT ALL, so every
+#    opacity spring / enterStyle / exitStyle / AnimatePresence (all dialog & sheet fades)
+#    painted at full opacity — only `transform` animated, and drop shadows never faded.
+#    `ts/scripts/check-opacity-conformance.mjs` is the pixel regression guard.
 [patch.crates-io]
 gpui = { path = "vendor/gpui-0.2.2-patched" }
 # Patched gpui-component 0.5.1 (vendored alongside gpui, same precedent). Divergences

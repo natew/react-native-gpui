@@ -2266,19 +2266,31 @@ impl Element for ReactDivElement {
         };
 
         let order = self.stacked_child_indices();
-        style.paint(bounds, window, cx, |window, cx| {
-            let _rounded_clip_guard = push_rounded_overflow_clip(rounded_clip);
-            if let Some(mask) = overflow_mask {
-                window.with_content_mask(Some(mask), |window| {
+        // Apply `opacity` to the whole subtree — shadow + background + border + children —
+        // exactly as gpui's stock Div does. Without this wrap the host never pushes
+        // `style.opacity` onto gpui's element-opacity stack, so an opacity spring /
+        // enterStyle / exitStyle (every dialog/sheet fade, AnimatePresence) renders at
+        // FULL opacity and only `transform` animates. paint_quad/paint_shadows multiply
+        // their alpha by the stack, so wrapping here also fades the drop shadow in lockstep
+        // with the card (it previously stayed at full strength while the body faded).
+        // `None`/absent opacity is an immediate pass-through (no stack push), so an
+        // un-animated node pays nothing.
+        let element_opacity = style.opacity;
+        window.with_element_opacity(element_opacity, |window| {
+            style.paint(bounds, window, cx, |window, cx| {
+                let _rounded_clip_guard = push_rounded_overflow_clip(rounded_clip);
+                if let Some(mask) = overflow_mask {
+                    window.with_content_mask(Some(mask), |window| {
+                        for index in order.iter() {
+                            self.children[index].element.paint(window, cx);
+                        }
+                    });
+                } else {
                     for index in order.iter() {
                         self.children[index].element.paint(window, cx);
                     }
-                });
-            } else {
-                for index in order.iter() {
-                    self.children[index].element.paint(window, cx);
                 }
-            }
+            });
         });
     }
 }

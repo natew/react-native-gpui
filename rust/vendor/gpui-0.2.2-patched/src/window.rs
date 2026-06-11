@@ -2465,7 +2465,15 @@ impl Window {
         result
     }
 
-    pub(crate) fn with_element_opacity<R>(
+    /// Run `f` with `opacity` multiplied onto the element-opacity stack, restoring the
+    /// previous value afterward. `paint_quad`/`paint_shadows`/`paint_path` multiply their
+    /// alpha by the current stack value, so this fades an element's whole subtree.
+    ///
+    /// rngpui patch: `pub` (upstream `pub(crate)`) so the host's custom div element can
+    /// apply `style.opacity` the way gpui's stock Div does. Without a public entry point
+    /// the host can't render div opacity at all, so opacity springs / enterStyle /
+    /// exitStyle (every dialog/sheet fade) paint at full opacity.
+    pub fn with_element_opacity<R>(
         &mut self,
         opacity: Option<f32>,
         f: impl FnOnce(&mut Self) -> R,

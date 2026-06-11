@@ -309,3 +309,12 @@ pub struct GpuSpecs {
     /// Further information about the driver, as reported by Vulkan.
     pub driver_info: String,
 }
+
+/// rngpui debug: gate for the [linetrace] glyph-paint diagnostics (silent-skip and
+/// error paths in text painting). Enabled by RNGPUI_SPRITE_TRACE so one env var
+/// drives the whole glyph-drop instrument.
+pub fn line_trace_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RNGPUI_SPRITE_TRACE").is_some())
+}

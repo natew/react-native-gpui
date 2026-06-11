@@ -3038,6 +3038,11 @@ impl Window {
                 tile,
                 transformation: TransformationMatrix::unit(),
             });
+        } else if crate::line_trace_enabled() && origin.y.0 < 100.0 && origin.x.0 < 320.0 {
+            eprintln!(
+                "[linetrace] ZERO-RASTER font={font_id:?} glyph={glyph_id:?} origin=({:.1},{:.1}) subpx=({},{})",
+                origin.x.0, origin.y.0, params.subpixel_variant.x, params.subpixel_variant.y,
+            );
         }
         Ok(())
     }

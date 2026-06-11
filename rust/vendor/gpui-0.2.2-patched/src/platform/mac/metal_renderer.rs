@@ -30,6 +30,95 @@ use std::{cell::Cell, ffi::c_void, mem, ptr, sync::Arc};
 // Exported to metal
 pub(crate) type PointF = crate::Point<f32>;
 
+// rngpui debug: RNGPUI_SPRITE_TRACE="x0,y0,x1,y1" (device px) dumps, per frame,
+// every monochrome sprite intersecting that band (order/texture/tile/bounds) plus
+// the frame's full batch sequence — the instrument for glyph-tail-drop diagnosis.
+fn sprite_trace_band() -> Option<(f32, f32, f32, f32)> {
+    use std::sync::OnceLock;
+    static BAND: OnceLock<Option<(f32, f32, f32, f32)>> = OnceLock::new();
+    *BAND.get_or_init(|| {
+        let v = std::env::var("RNGPUI_SPRITE_TRACE").ok()?;
+        let mut it = v.split(',').map(|s| s.trim().parse::<f32>().ok());
+        Some((it.next()??, it.next()??, it.next()??, it.next()??))
+    })
+}
+
+fn trace_scene_sprites(scene: &Scene, band: (f32, f32, f32, f32)) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static FRAME: AtomicU64 = AtomicU64::new(0);
+    let frame = FRAME.fetch_add(1, Ordering::Relaxed);
+    let (bx0, by0, bx1, by1) = band;
+    let hit = |b: &Bounds<ScaledPixels>| {
+        b.origin.x.0 < bx1
+            && b.origin.x.0 + b.size.width.0 > bx0
+            && b.origin.y.0 < by1
+            && b.origin.y.0 + b.size.height.0 > by0
+    };
+    let mut any = false;
+    for s in &scene.monochrome_sprites {
+        if !hit(&s.bounds) {
+            continue;
+        }
+        any = true;
+        let m = &s.content_mask.bounds;
+        let t = &s.tile;
+        eprintln!(
+            "[spritetrace] f={frame} ord={} tex={:?}/{} tile={} tb=({},{} {}x{}) b=({:.1},{:.1} {:.1}x{:.1}) mask=({:.1},{:.1} {:.1}x{:.1}) a={:.2}",
+            s.order,
+            t.texture_id.kind,
+            t.texture_id.index,
+            t.tile_id.0,
+            t.bounds.origin.x.0,
+            t.bounds.origin.y.0,
+            t.bounds.size.width.0,
+            t.bounds.size.height.0,
+            s.bounds.origin.x.0,
+            s.bounds.origin.y.0,
+            s.bounds.size.width.0,
+            s.bounds.size.height.0,
+            m.origin.x.0,
+            m.origin.y.0,
+            m.size.width.0,
+            m.size.height.0,
+            s.color.a,
+        );
+    }
+    if any {
+        let mut seq = String::new();
+        for batch in scene.batches() {
+            use std::fmt::Write as _;
+            match batch {
+                PrimitiveBatch::Shadows(s) => write!(seq, " sh{}", s.len()),
+                PrimitiveBatch::Quads(q) => write!(seq, " q{}", q.len()),
+                PrimitiveBatch::Paths(p) => write!(seq, " p{}", p.len()),
+                PrimitiveBatch::Underlines(u) => write!(seq, " u{}", u.len()),
+                PrimitiveBatch::MonochromeSprites { texture_id, sprites } => {
+                    let in_band = sprites.iter().filter(|s| hit(&s.bounds)).count();
+                    if in_band > 0 {
+                        write!(
+                            seq,
+                            " M{}(t{} ord={}..{} band={})",
+                            sprites.len(),
+                            texture_id.index,
+                            sprites.first().map(|s| s.order).unwrap_or(0),
+                            sprites.last().map(|s| s.order).unwrap_or(0),
+                            in_band
+                        )
+                    } else {
+                        write!(seq, " m{}(t{})", sprites.len(), texture_id.index)
+                    }
+                }
+                PrimitiveBatch::PolychromeSprites { texture_id, sprites } => {
+                    write!(seq, " po{}(t{})", sprites.len(), texture_id.index)
+                }
+                PrimitiveBatch::Surfaces(s) => write!(seq, " su{}", s.len()),
+            }
+            .ok();
+        }
+        eprintln!("[spritetrace] f={frame} batches:{seq}");
+    }
+}
+
 #[cfg(not(feature = "runtime_shaders"))]
 const SHADERS_METALLIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shaders.metallib"));
 #[cfg(feature = "runtime_shaders")]
@@ -455,6 +544,10 @@ impl MetalRenderer {
         let command_buffer = command_queue.new_command_buffer();
         let alpha = if self.layer.is_opaque() { 1. } else { 0. };
         let mut instance_offset = 0;
+
+        if let Some(band) = sprite_trace_band() {
+            trace_scene_sprites(scene, band);
+        }
 
         let mut command_encoder = new_command_encoder(
             command_buffer,

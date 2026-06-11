@@ -203,6 +203,23 @@ fn paint_line(
             line_height * (wrap_boundaries.len() as f32 + 1.),
         ),
     );
+    if crate::line_trace_enabled() && origin.y.0 < 100.0 && origin.x.0 < 320.0 {
+        let glyphs: usize = layout.runs.iter().map(|r| r.glyphs.len()).sum();
+        eprintln!(
+            "[linetrace] LINE origin=({:.1},{:.1}) w={:.1} runs={} glyphs={} wraps={} len={} mask=({:.1},{:.1} {:.1}x{:.1})",
+            origin.x.0,
+            origin.y.0,
+            layout.width.0,
+            layout.runs.len(),
+            glyphs,
+            wrap_boundaries.len(),
+            layout.len,
+            window.content_mask().bounds.origin.x.0,
+            window.content_mask().bounds.origin.y.0,
+            window.content_mask().bounds.size.width.0,
+            window.content_mask().bounds.size.height.0,
+        );
+    }
     window.paint_layer(line_bounds, |window| {
         let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
         let baseline_offset = point(px(0.), padding_top + layout.ascent);
@@ -369,13 +386,13 @@ fn paint_line(
 
                 let content_mask = window.content_mask();
                 if max_glyph_bounds.intersects(&content_mask.bounds) {
-                    if glyph.is_emoji {
+                    let painted = if glyph.is_emoji {
                         window.paint_emoji(
                             glyph_origin + baseline_offset,
                             run.font_id,
                             glyph.id,
                             layout.font_size,
-                        )?;
+                        )
                     } else {
                         window.paint_glyph(
                             glyph_origin + baseline_offset,
@@ -383,8 +400,30 @@ fn paint_line(
                             glyph.id,
                             layout.font_size,
                             color,
-                        )?;
+                        )
+                    };
+                    if let Err(err) = painted {
+                        if crate::line_trace_enabled() {
+                            eprintln!(
+                                "[linetrace] PAINT-ERR run={run_ix} glyph={glyph_ix} font={:?} origin=({:.1},{:.1}): {err:?}",
+                                run.font_id, glyph_origin.x.0, glyph_origin.y.0,
+                            );
+                        }
+                        return Err(err);
                     }
+                } else if crate::line_trace_enabled() && origin.y.0 < 100.0 && origin.x.0 < 320.0 {
+                    eprintln!(
+                        "[linetrace] SKIP-INTERSECT run={run_ix} glyph={glyph_ix} font={:?} origin=({:.1},{:.1}) max_glyph={:.1}x{:.1} mask=({:.1},{:.1} {:.1}x{:.1})",
+                        run.font_id,
+                        glyph_origin.x.0,
+                        glyph_origin.y.0,
+                        max_glyph_size.width.0,
+                        max_glyph_size.height.0,
+                        content_mask.bounds.origin.x.0,
+                        content_mask.bounds.origin.y.0,
+                        content_mask.bounds.size.width.0,
+                        content_mask.bounds.size.height.0,
+                    );
                 }
             }
         }

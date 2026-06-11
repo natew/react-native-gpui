@@ -53,6 +53,18 @@ impl PlatformAtlas for MetalAtlas {
             let texture = lock.texture(tile.texture_id);
             texture.upload(tile.bounds, &bytes);
             lock.tiles_by_key.insert(key.clone(), tile.clone());
+            if crate::line_trace_enabled() {
+                eprintln!(
+                    "[spritetrace] atlas insert {:?}/{} tile={} tb=({},{} {}x{})",
+                    tile.texture_id.kind,
+                    tile.texture_id.index,
+                    tile.tile_id.0,
+                    tile.bounds.origin.x.0,
+                    tile.bounds.origin.y.0,
+                    tile.bounds.size.width.0,
+                    tile.bounds.size.height.0,
+                );
+            }
             Ok(Some(tile))
         }
     }
@@ -62,6 +74,9 @@ impl PlatformAtlas for MetalAtlas {
         let Some(id) = lock.tiles_by_key.get(key).map(|v| v.texture_id) else {
             return;
         };
+        if crate::line_trace_enabled() {
+            eprintln!("[spritetrace] atlas remove {:?}/{}", id.kind, id.index);
+        }
 
         let textures = match id.kind {
             AtlasTextureKind::Monochrome => &mut lock.monochrome_textures,
@@ -111,6 +126,12 @@ impl MetalAtlasState {
         }
 
         let texture = self.push_texture(size, texture_kind);
+        if crate::line_trace_enabled() {
+            eprintln!(
+                "[spritetrace] atlas push-texture {:?}/{}",
+                texture.id.kind, texture.id.index
+            );
+        }
         texture.allocate(size)
     }
 

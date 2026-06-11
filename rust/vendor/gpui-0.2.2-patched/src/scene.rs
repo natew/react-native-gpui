@@ -71,6 +71,25 @@ impl Scene {
             .intersect(&primitive.content_mask().bounds);
 
         if clipped_bounds.is_empty() {
+            if crate::line_trace_enabled()
+                && matches!(primitive, Primitive::MonochromeSprite(_))
+            {
+                let b = primitive.bounds();
+                let m = &primitive.content_mask().bounds;
+                if b.origin.x.0 < 700.0 && b.origin.y.0 < 420.0 {
+                    eprintln!(
+                        "[linetrace] CULLED b=({:.1},{:.1} {:.1}x{:.1}) mask=({:.1},{:.1} {:.1}x{:.1})",
+                        b.origin.x.0,
+                        b.origin.y.0,
+                        b.size.width.0,
+                        b.size.height.0,
+                        m.origin.x.0,
+                        m.origin.y.0,
+                        m.size.width.0,
+                        m.size.height.0,
+                    );
+                }
+            }
             return;
         }
 

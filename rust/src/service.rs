@@ -2976,6 +2976,12 @@ fn main() {
                         if applied.is_err() {
                             break; // view dropped
                         }
+                        // One targeted repaint of OUR window per applied message. The
+                        // previous `cx.refresh_windows()` on top of this refreshed EVERY
+                        // window in the process on every SetNodeStyle — a per-spring-frame
+                        // all-windows redraw that taxed the main thread (a frame-drop
+                        // contributor on the loaded on-screen window). This is a
+                        // single-window app; the targeted refresh is sufficient.
                         if window_handle
                             .update(cx, |_root, window, root_cx| {
                                 root_cx.notify();
@@ -2983,9 +2989,6 @@ fn main() {
                             })
                             .is_err()
                         {
-                            break;
-                        }
-                        if cx.update(|cx| cx.refresh_windows()).is_err() {
                             break;
                         }
                         if drive_native_layout_animation

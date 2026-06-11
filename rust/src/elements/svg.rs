@@ -116,7 +116,11 @@ impl Element for ReactSvgElement {
         }
 
         if let Some(child) = self.child.as_mut() {
-            child.paint(window, cx);
+            // <Svg opacity=…> fades the icon; gpui's sprite paint multiplies by the
+            // element-opacity stack, but nothing pushes it for a top-level svg.
+            window.with_element_opacity(self.element.style.opacity, |window| {
+                child.paint(window, cx);
+            });
         }
     }
 }

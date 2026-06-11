@@ -245,7 +245,12 @@ impl Element for ReactTextElement {
         }
 
         if let Some(child) = self.child.as_mut() {
-            child.paint(window, cx);
+            // a top-level <Text opacity=…> fades its glyphs — gpui's text paint multiplies
+            // by the element-opacity stack, but nothing pushes it unless we do (the div fix
+            // only covers divs; text rendered directly under a non-div parent would miss it).
+            window.with_element_opacity(self.element.style.opacity, |window| {
+                child.paint(window, cx);
+            });
         }
     }
 }

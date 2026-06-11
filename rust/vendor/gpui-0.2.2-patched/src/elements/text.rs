@@ -362,7 +362,7 @@ impl TextLayout {
             .line_height
             .to_pixels(font_size.into(), window.rem_size());
 
-        let mut runs = if let Some(runs) = runs {
+        let runs = if let Some(runs) = runs {
             runs
         } else {
             vec![text_style.to_run(text.len())]
@@ -372,6 +372,15 @@ impl TextLayout {
             let element_state = self.clone();
 
             move |known_dimensions, available_space, window, cx| {
+                // react-native-gpui patch: taffy invokes this closure several times per
+                // solve (min-content probe, then the definite-width pass). truncate_line
+                // below MUTATES `runs` to match the truncated text, so a captured-by-move
+                // `runs` would leak one probe's truncation into the next call — the
+                // definite-width pass then shapes the full string against runs covering
+                // only the truncated prefix, and the shaper silently drops every glyph
+                // past the runs (the "Mac.lan · ~/agentbus paints as Mac" flicker, and
+                // its multi-line numberOfLines cousin). Work on a pristine copy per call.
+                let mut runs = runs.clone();
                 let wrap_width = if text_style.white_space == WhiteSpace::Normal {
                     known_dimensions.width.or(match available_space.width {
                         crate::AvailableSpace::Definite(x) => Some(x),

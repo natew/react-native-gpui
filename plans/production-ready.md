@@ -30,12 +30,28 @@ infrastructure (P2) is as important as fixing the bugs.
 
 ---
 
-## Done
+## Done (2026-06-11 session — all validated, regression-checked vs base binary)
 
-- ✅ `opacity` paints (div subtree incl. shadow) — `div.rs` paint wrap + gpui
+- ✅ **`opacity` paints** (div subtree incl. shadow) — `div.rs` paint wrap + gpui
   `with_element_opacity` pub patch. Pixel conformance `check-opacity-conformance.mjs`.
-- ✅ Per-frame pseudo-style global-lock gated on `has_pseudo_style`/`pseudo_events`
-  (`div.rs:1577,2155`) — was locking a process-global mutex on every div every frame.
+- ✅ **`opacity` on top-level `<Text>`/`<Image>`/`<Svg>`** (P0.3) — `text/image/svg.rs`
+  paint wraps.
+- ✅ **Pixel animation-ramp conformance** (P0.2, partial) — `check-opacity-ramp-conformance.mjs`
+  samples the real composited frame over time and asserts opacity interpolates in PIXELS
+  (the systemic guard). Transform variant still TODO once transform paints (P0.1).
+- ✅ **Pseudo-style global-lock gated** on `has_pseudo_style`/`pseudo_events`
+  (`div.rs:1577,2155`) — was locking a process-global mutex on every div every frame (P3.1).
+- ✅ **Overlay mutex skipped on static frames** via an `AtomicUsize` mirror (P3.2) —
+  `merged_gpui_style`/`has_overlay` no longer lock when nothing is animated.
+- ✅ **Per-`SetNodeStyle` all-windows refresh removed** (P3.3) — the pump refreshed every
+  window in the process per spring frame; now one targeted refresh. Validated animation
+  still paints per-frame.
+- ✅ **Frame-clock fires rAF sinks outside the SINKS lock** (P4.2) — was a poison/deadlock
+  hazard on the display-link thread; also recovers a poisoned lock.
+
+Remaining below. Suite is green except two PRE-EXISTING environmental failures (confirmed
+identical on the base binary): `rounded-overflow` (capture corner-AA) and `window-mode`
+(macOS clamps the −10000 offscreen origin on a multi-display layout).
 
 ---
 

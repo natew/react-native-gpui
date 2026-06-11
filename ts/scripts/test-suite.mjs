@@ -49,6 +49,7 @@ const tasks = [
     { name: "rounded-overflow", command: "bun", args: ["run", "scripts/rounded-overflow-conformance.mjs"], cwd: root },
     { name: "animation-diff", command: "bun", args: ["run", "scripts/animation-frame-diff.mjs"], cwd: root },
     { name: "opacity", command: "bun", args: ["run", "scripts/check-opacity-conformance.mjs"], cwd: root, timeoutMs: 120_000 },
+    { name: "opacity-ramp", command: "bun", args: ["run", "scripts/check-opacity-ramp-conformance.mjs"], cwd: root, timeoutMs: 120_000 },
     { name: "offthread-stall", command: "node", args: ["scripts/offthread-stall-conformance.mjs"], cwd: root, timeoutMs: 25_000 },
     { name: "webview-render", command: "bun", args: ["run", "scripts/webview-render-conformance.mjs"], cwd: root, timeoutMs: 12_000 },
     { name: "window-mode", command: "bun", args: ["run", "scripts/window-mode-conformance.mjs"], cwd: root },

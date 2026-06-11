@@ -49,6 +49,7 @@
         "conformance:webview:overlay": "bun run scripts/webview-overlay-conformance.mjs",
         "conformance:card-corner-shadow": "bun run scripts/card-corner-shadow-conformance.mjs",
         "conformance:opacity": "bun run scripts/check-opacity-conformance.mjs",
+        "conformance:opacity-ramp": "bun run scripts/check-opacity-ramp-conformance.mjs",
         "conformance:diagnostics": "node scripts/diagnostics-conformance.mjs",
         "conformance:file-picker": "bun run scripts/file-picker-conformance.ts",
         "conformance:display-none": "bun run scripts/display-none-conformance.ts",

@@ -1077,6 +1077,7 @@ mod tests {
             element_type: "system".to_string(),
             text: None,
             number_of_lines: None,
+            selectable: false,
             runs: Vec::new(),
             src: None,
             system_material: None,

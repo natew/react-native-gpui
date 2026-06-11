@@ -209,6 +209,20 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
             y: number(value, "y")?,
             reply,
         }),
+        // dispatch a gpui action by its registered name (e.g. "input::Copy") down the
+        // window's focused dispatch path — the same route the app-delegate menu
+        // fallthrough takes — and report the pasteboard string afterwards. Lets a
+        // probe exercise menu-equivalent behavior (Cmd+C copy of the native text
+        // selection) that DebugRealKey can't reach (the OS menu layer isn't present
+        // in a synthetic key dispatch).
+        "dispatchAction" => Ok(Incoming::DebugDispatchAction {
+            name: value
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("dispatchAction command needs name")?
+                .to_string(),
+            reply,
+        }),
         _ => Err("unknown debug command"),
     }
 }

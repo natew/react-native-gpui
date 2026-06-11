@@ -49,6 +49,7 @@ mod icons;
 mod inspector;
 #[cfg(target_os = "macos")]
 mod liquid_glass;
+mod selection;
 mod pseudo_style;
 mod style;
 
@@ -225,6 +226,10 @@ fn parse_json_tree(
         .and_then(|v| v.as_u64())
         .and_then(|n| usize::try_from(n).ok())
         .filter(|n| *n > 0);
+    let selectable = obj
+        .get("selectable")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let src = obj
         .get("src")
         .and_then(|v| v.as_str())
@@ -386,6 +391,7 @@ fn parse_json_tree(
         element_type: element_type.to_string(),
         text,
         number_of_lines,
+        selectable,
         runs,
         src,
         system_material,
@@ -1359,6 +1365,18 @@ impl Render for ServiceApp {
             .on_action(|action: &InvokeCommand, _window, _cx| {
                 bridge::command(&action.id);
             })
+            // Cmd+C with no Input focused: the chord misses the keymap, AppKit walks
+            // the responder chain, and gpui's app delegate (`copy:` → handle_menu_item)
+            // re-dispatches the menu's Copy action down the focus path — which ends
+            // here on the App-context root. Copy the native <Text selectable> drag
+            // selection if one exists. A focused Input handles Copy deeper (unchanged)
+            // and a first-responder WKWebView handles `copy:` before the delegate
+            // (webview page copy unchanged).
+            .on_action(|_: &gpui_component::input::Copy, _window, cx| {
+                if let Some(text) = crate::selection::selected_text() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+            })
             .on_mouse_up(MouseButton::Left, |_event: &MouseUpEvent, _window, _cx| {
                 elements::finish_pointer_gesture();
             })
@@ -1449,6 +1467,7 @@ fn fallback_root() -> Arc<ReactElement> {
         element_type: "div".to_string(),
         text: None,
         number_of_lines: None,
+        selectable: false,
         runs: Vec::new(),
         src: None,
         system_material: None,
@@ -1664,6 +1683,12 @@ pub(crate) enum Incoming {
     /// binding eating the terminal's submit). Reports how many host events fired.
     DebugRealKey {
         key: String,
+        reply: flume::Sender<serde_json::Value>,
+    },
+    /// dispatch a gpui action by registered name down the focused dispatch path
+    /// (the app-delegate menu fallthrough route) and report the pasteboard after.
+    DebugDispatchAction {
+        name: String,
         reply: flume::Sender<serde_json::Value>,
     },
     /// proof the standard Edit menu carries a nil-target `copy:` item AND that `copy:`
@@ -2822,6 +2847,29 @@ fn main() {
                             Err(_) => break,
                         }
                     }
+                    Incoming::DebugDispatchAction { name, reply } => {
+                        let dispatched = window_handle.update(cx, |_root, window, cx| {
+                            match cx.build_action(&name, None) {
+                                Ok(action) => {
+                                    window.dispatch_action(action, cx);
+                                    true
+                                }
+                                Err(_) => false,
+                            }
+                        });
+                        // dispatch_action defers through the effect queue; the update()
+                        // above flushed effects on drop, so the handler (and any
+                        // clipboard write) has run by now.
+                        let _ = reply.send(serde_json::json!({
+                            "ok": matches!(dispatched, Ok(true)),
+                            "type": "dispatchAction",
+                            "name": name,
+                            "pasteboard": read_general_pasteboard_string(),
+                        }));
+                        if dispatched.is_err() {
+                            break;
+                        }
+                    }
                     Incoming::DebugNativeScrollAt { x, y, dy, reply } => {
                         // proof the hitTest passthrough routes a REAL scroll-wheel NSEvent
                         // natively to the WKWebView — no rngpui JS delta-forwarding. resolve
@@ -3212,6 +3260,7 @@ fn main() {
                             | Incoming::DebugTypeText { .. }
                             | Incoming::DebugKeyPress { .. }
                             | Incoming::DebugRealKey { .. }
+                            | Incoming::DebugDispatchAction { .. }
                             | Incoming::DebugRealTap { .. }
                             | Incoming::DebugRealMove { .. }
                             | Incoming::DebugRealDrag { .. }

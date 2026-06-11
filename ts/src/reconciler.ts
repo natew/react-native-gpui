@@ -914,6 +914,7 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
             if (typeof props.numberOfLines === "number" && props.numberOfLines > 0) {
                 node.numberOfLines = Math.floor(props.numberOfLines);
             }
+            if (props.selectable === true) node.selectable = true;
             // emit runs only when there's >1 segment (inline style changes)
             if (runs.length > 1) node.runs = runs;
             break;

@@ -14,6 +14,9 @@ pub struct ReactTextElement {
     _window_id: u64,
     _parent_style: Option<ElementStyle>,
     child: Option<AnyElement>,
+    /// kept for `selectable` nodes so paint can map window positions ↔ char
+    /// indices for the native selection (crate::selection).
+    text_layout: Option<gpui::TextLayout>,
 }
 
 impl ReactTextElement {
@@ -27,10 +30,11 @@ impl ReactTextElement {
             _window_id: window_id,
             _parent_style: parent_style,
             child: None,
+            text_layout: None,
         }
     }
 
-    fn build_child(&self, window: &mut Window) -> AnyElement {
+    fn build_child(&mut self, window: &mut Window) -> AnyElement {
         let style = &self.element.style;
         let color = style.color.unwrap_or(Hsla {
             h: 0.0,
@@ -66,8 +70,9 @@ impl ReactTextElement {
         }
         el = apply_line_limit(el, self.element.number_of_lines);
 
-        // No inline runs → plain text.
-        if self.element.runs.is_empty() {
+        // No inline runs → plain text. (Selectable nodes always take the StyledText
+        // path below so paint has a TextLayout handle for position↔index mapping.)
+        if self.element.runs.is_empty() && !self.element.selectable {
             return el.child(text).into_any_element();
         }
 
@@ -88,7 +93,11 @@ impl ReactTextElement {
             base.line_height = px(lh).into();
         }
 
-        let flat: String = self.element.runs.iter().map(|r| r.text.as_str()).collect();
+        let flat: String = if self.element.runs.is_empty() {
+            text.clone()
+        } else {
+            self.element.runs.iter().map(|r| r.text.as_str()).collect()
+        };
         let mut highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = Vec::new();
         let mut ix = 0usize;
         for r in &self.element.runs {
@@ -113,8 +122,9 @@ impl ReactTextElement {
             ));
             ix += len;
         }
-        el.child(StyledText::new(flat).with_default_highlights(&base, highlights))
-            .into_any_element()
+        let styled = StyledText::new(flat).with_default_highlights(&base, highlights);
+        self.text_layout = self.element.selectable.then(|| styled.layout().clone());
+        el.child(styled).into_any_element()
     }
 }
 
@@ -172,7 +182,7 @@ fn apply_line_limit(el: gpui::Div, number_of_lines: Option<usize>) -> gpui::Div 
 
 impl Element for ReactTextElement {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    type PrepaintState = Option<gpui::Hitbox>;
 
     fn id(&self) -> Option<ElementId> {
         Some(ElementId::Integer(self.element.global_id))
@@ -210,21 +220,23 @@ impl Element for ReactTextElement {
         _: &mut (),
         window: &mut Window,
         cx: &mut App,
-    ) {
+    ) -> Option<gpui::Hitbox> {
         if self.element.style.is_display_none() {
-            return;
+            return None;
         }
 
         #[cfg(target_os = "macos")]
         crate::ax::update_frame(window, &self.element, bounds);
         report_layout(&self.element, bounds);
         if !bounds_have_drawable_area(bounds) {
-            return;
+            return None;
         }
 
         if let Some(child) = self.child.as_mut() {
             child.prepaint(window, cx);
         }
+        (self.element.selectable && self.text_layout.is_some())
+            .then(|| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal))
     }
 
     fn paint(
@@ -233,7 +245,7 @@ impl Element for ReactTextElement {
         _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
-        _: &mut (),
+        hitbox: &mut Option<gpui::Hitbox>,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -242,6 +254,10 @@ impl Element for ReactTextElement {
         }
         if !bounds_have_drawable_area(bounds) {
             return;
+        }
+
+        if let (Some(hitbox), Some(layout)) = (hitbox.as_ref(), self.text_layout.as_ref()) {
+            paint_native_selection(self.element.global_id, layout, hitbox, window);
         }
 
         if let Some(child) = self.child.as_mut() {
@@ -253,6 +269,118 @@ impl Element for ReactTextElement {
             });
         }
     }
+}
+
+// ── native text selection (<Text selectable>) ──
+// Paints this node's share of the window-global selection (see crate::selection),
+// registers its substring for Cmd+C, and wires the drag listeners. Highlight quads
+// go in BEFORE the glyph paint, so the wash sits under the text like AppKit.
+fn paint_native_selection(
+    global_id: u64,
+    layout: &gpui::TextLayout,
+    hitbox: &gpui::Hitbox,
+    window: &mut Window,
+) {
+    use gpui::{MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent};
+
+    window.set_cursor_style(gpui::CursorStyle::IBeam, hitbox);
+
+    if let Some(sel) = crate::selection::selection_bounds() {
+        let text = layout.text();
+        let line_height = layout.line_height();
+        // macOS selection wash; readable on light and dark, multiplies under glyphs.
+        let color = gpui::hsla(211.0 / 360.0, 1.0, 0.5, 0.30);
+        let mut selected = String::new();
+        let mut first: Option<gpui::Point<Pixels>> = None;
+        let mut run_start: Option<gpui::Point<Pixels>> = None;
+        let mut run_end_x = px(0.0);
+        let mut flush = |start: &mut Option<gpui::Point<Pixels>>, end_x: Pixels| {
+            if let Some(s) = start.take() {
+                window.paint_quad(gpui::fill(
+                    gpui::Bounds::from_corners(s, gpui::point(end_x, s.y + line_height)),
+                    color,
+                ));
+            }
+        };
+        let mut offset = 0usize;
+        for c in text.chars() {
+            let next = offset + c.len_utf8();
+            let Some(pos) = layout.position_for_index(offset) else {
+                offset = next;
+                continue;
+            };
+            let mut char_width = line_height * 0.5;
+            if let Some(next_pos) = layout.position_for_index(next) {
+                if next_pos.y == pos.y {
+                    char_width = next_pos.x - pos.x;
+                }
+            }
+            let hit = crate::selection::point_in_selection(pos, char_width, &sel, line_height);
+            if hit {
+                if first.is_none() {
+                    first = Some(pos);
+                }
+                selected.push(c);
+                match run_start {
+                    Some(s) if s.y == pos.y => {}
+                    _ => {
+                        flush(&mut run_start, run_end_x);
+                        run_start = Some(pos);
+                    }
+                }
+                run_end_x = pos.x + char_width;
+            } else {
+                flush(&mut run_start, run_end_x);
+            }
+            offset = next;
+        }
+        flush(&mut run_start, run_end_x);
+        let order = first
+            .map(|p| (f32::from(p.y), f32::from(p.x)))
+            .unwrap_or((f32::MAX, f32::MAX));
+        crate::selection::set_segment(global_id, order, selected);
+    } else {
+        crate::selection::set_segment(global_id, (0.0, 0.0), String::new());
+    }
+
+    // drag wiring. capture-phase mousedown clears any finished selection (any click
+    // dismisses, like AppKit); the hovered node's bubble-phase mousedown anchors a
+    // new drag. move/up listeners are global so the drag survives leaving the node.
+    window.on_mouse_event({
+        let hitbox = hitbox.clone();
+        move |event: &MouseDownEvent, phase, window, _cx| {
+            if event.button != MouseButton::Left {
+                return;
+            }
+            if phase.capture() {
+                if crate::selection::clear() {
+                    window.refresh();
+                }
+            } else if hitbox.is_hovered(window) {
+                crate::selection::begin_drag(event.position);
+            }
+        }
+    });
+    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, _cx| {
+        if !phase.bubble() || event.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        if crate::selection::is_dragging() && crate::selection::update_drag(event.position) {
+            window.refresh();
+        }
+    });
+    window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, _cx| {
+        if phase.bubble() && event.button == MouseButton::Left {
+            crate::selection::end_drag();
+        }
+    });
+    // selection anchors to window coords; scrolling would shear it off the text —
+    // dismiss instead (v1), matching how transient washes behave elsewhere.
+    window.on_mouse_event(move |_: &ScrollWheelEvent, phase, window, _cx| {
+        if phase.bubble() && crate::selection::clear() {
+            window.refresh();
+        }
+    });
 }
 
 impl IntoElement for ReactTextElement {

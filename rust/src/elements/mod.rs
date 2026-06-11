@@ -123,6 +123,8 @@ pub struct ReactElement {
     pub text: Option<String>,
     /// RN Text `numberOfLines`; clamps text and ellipsizes overflow.
     pub number_of_lines: Option<usize>,
+    /// RN Text `selectable`; opts this text into the native drag selection + Cmd+C.
+    pub selectable: bool,
     /// inline styled runs, when a `<Text>` has nested `<Text>` children.
     pub runs: Vec<TextRun>,
     /// image / webview source uri (for `<Image>` / `<WebView>`).

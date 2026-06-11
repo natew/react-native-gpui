@@ -807,6 +807,7 @@ mod tests {
             element_type: element_type.to_string(),
             text: text.map(String::from),
             number_of_lines: None,
+            selectable: false,
             runs: Vec::new(),
             src: None,
             system_material: None,

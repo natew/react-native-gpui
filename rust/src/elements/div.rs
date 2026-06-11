@@ -1574,7 +1574,8 @@ impl Element for ReactDivElement {
         // thread with ZERO JS round-trip and no relayout, so rapidly hovering rows holds frame
         // rate. Skipped while a reanimated overlay is live for this node (that path owns the style
         // for the frame).
-        if !crate::anim_overlay::has_overlay(self.element.global_id)
+        if self.element.has_pseudo_style
+            && !crate::anim_overlay::has_overlay(self.element.global_id)
             && let Some(pseudo) = crate::pseudo_style::get(self.element.global_id)
             && let Some(hitbox) = prepaint.hitbox.as_ref()
             && hitbox.is_hovered(window)
@@ -2156,11 +2157,20 @@ impl Element for ReactDivElement {
         //     tamagui platform driver can drive pseudo state with no React-event lane.
         // The flip is detected once here (PSEUDO_HOVER / PRESSED are the state of record);
         // both outputs ride off the same transition so they can't diverge.
-        let pseudo = crate::pseudo_style::get(self.element.global_id);
+        // Gate on the parse-time flags BEFORE touching the global pseudo-style mutex: a
+        // plain node (no pseudo style, no pseudo events — the overwhelming majority) must
+        // not pay a global-lock round-trip + map probe per frame. `has_pseudo_style` is the
+        // precondition for `pseudo_style::get` returning `Some`, so this changes nothing for
+        // pseudo nodes.
         let wants_events = self.element.pseudo_events;
-        if (pseudo.is_some() || wants_events)
+        if (self.element.has_pseudo_style || wants_events)
             && let Some(hitbox) = prepaint.hitbox.clone()
         {
+            let pseudo = if self.element.has_pseudo_style {
+                crate::pseudo_style::get(self.element.global_id)
+            } else {
+                None
+            };
             let id = self.element.global_id;
             let has_style = pseudo.is_some();
             // track press whenever a press style exists OR the JS lane wants press flips.

@@ -572,12 +572,18 @@ impl TextLayout {
             && element_state.reshape.is_some()
             && f32::from(bounds.origin.x) < 340.0
         {
+            let line_count: usize = element_state
+                .lines
+                .iter()
+                .map(|l| l.wrap_boundaries().len().max(0) + 1)
+                .sum();
             eprintln!(
-                "[paintlen] x={:.0} y={:.0} w={:.0} painted_len={} text={:?}",
+                "[paintlen] x={:.0} y={:.0} w={:.0} painted_len={} lines={} text={:?}",
                 f32::from(bounds.origin.x),
                 f32::from(bounds.origin.y),
                 f32::from(bounds.size.width),
                 element_state.len,
+                line_count,
                 &text[..text.len().min(24)]
             );
         }

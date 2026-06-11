@@ -11,11 +11,11 @@
 //! is what lets rapid hovering hold frame rate (the old path re-entered React: a hover event
 //! crossed to JS, re-serialized the node, and re-applied the whole tree).
 //!
-//! Lifecycle: parse `set`s entries for nodes that carry a pseudo style; [`retain`] drops entries
-//! for ids no longer in the live tree (called alongside `anim_overlay::retain` on every real Tree
-//! commit). A node that keeps its id but stops carrying any `hoverStyle`/`pressStyle` is the one
-//! case `retain` can't see — in practice a component's pseudo-style PRESENCE is static (only the
-//! value changes with state), so this is a non-issue; the same shape `anim_overlay` relies on.
+//! Lifecycle: parse calls [`set`] for EVERY node — entries are stored for nodes carrying a
+//! pseudo style and removed for nodes that stopped carrying one (a sidebar row flipping to
+//! active with `hoverStyle={active ? undefined : …}` must drop its stale hover, or the old
+//! hover bg repaints over the selection). [`retain`] drops entries for ids no longer in the
+//! live tree (called alongside `anim_overlay::retain` on every real Tree commit).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -30,8 +30,9 @@ pub struct PseudoStyles {
     pub press: Option<gpui::Style>,
 }
 
-/// globalId → its precomputed pseudo styles. Only nodes that carry a hover/press style appear, so
-/// the overwhelmingly common (non-pseudo) node never touches this map after parse.
+/// globalId → its precomputed pseudo styles. Only nodes that carry a hover/press style appear;
+/// paint never touches this map for other nodes (`ReactElement::has_pseudo_style` gates the
+/// read), and parse's unconditional `set` is a cheap remove-miss for them.
 static STYLES: Lazy<Mutex<HashMap<u64, PseudoStyles>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Record (or, with both `None`, clear) a node's precomputed pseudo styles. Called from
@@ -63,12 +64,19 @@ pub fn retain(present: &HashSet<u64>) {
     STYLES.lock().unwrap().retain(|id, _| present.contains(id));
 }
 
+/// Serializes tests that touch the global [`STYLES`] map (service.rs parse tests share it).
+#[cfg(test)]
+pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn test_clear() {
+    STYLES.lock().unwrap().clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     // build a minimal gpui::Style carrying a background, to assert hover vs base differ.
     fn styled(bg_present: bool) -> gpui::Style {
@@ -83,7 +91,7 @@ mod tests {
     #[test]
     fn set_get_has_and_clear() {
         let _serial = TEST_LOCK.lock().unwrap();
-        STYLES.lock().unwrap().clear();
+        test_clear();
 
         assert!(!has(1));
         assert!(get(1).is_none());
@@ -98,13 +106,13 @@ mod tests {
         set(1, None, None);
         assert!(!has(1));
 
-        STYLES.lock().unwrap().clear();
+        test_clear();
     }
 
     #[test]
     fn retain_prunes_absent_ids() {
         let _serial = TEST_LOCK.lock().unwrap();
-        STYLES.lock().unwrap().clear();
+        test_clear();
 
         set(1, Some(styled(true)), None);
         set(2, Some(styled(true)), None);
@@ -114,6 +122,6 @@ mod tests {
         assert!(has(1));
         assert!(!has(2));
 
-        STYLES.lock().unwrap().clear();
+        test_clear();
     }
 }

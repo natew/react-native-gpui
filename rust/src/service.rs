@@ -111,6 +111,45 @@ fn real_key_char(key: &str) -> Option<String> {
     }
 }
 
+// Read the general pasteboard's string (the webviewCopyProof readback). Returns None
+// when empty / no string type present.
+#[cfg(target_os = "macos")]
+fn read_general_pasteboard_string() -> Option<String> {
+    use cocoa::base::nil;
+    use objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        let pb: cocoa::base::id = msg_send![class!(NSPasteboard), generalPasteboard];
+        if pb == nil {
+            return None;
+        }
+        let ns_string_class: cocoa::base::id = msg_send![class!(NSString), class];
+        let s: cocoa::base::id = msg_send![pb, stringForType: pasteboard_string_type()];
+        let _ = ns_string_class;
+        if s == nil {
+            return None;
+        }
+        let bytes: *const std::os::raw::c_char = msg_send![s, UTF8String];
+        if bytes.is_null() {
+            return None;
+        }
+        Some(
+            std::ffi::CStr::from_ptr(bytes)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn pasteboard_string_type() -> cocoa::base::id {
+    use objc::{class, msg_send, sel, sel_impl};
+    // NSPasteboardTypeString = "public.utf8-plain-text"
+    unsafe {
+        let s = std::ffi::CString::new("public.utf8-plain-text").unwrap();
+        msg_send![class!(NSString), stringWithUTF8String: s.as_ptr()]
+    }
+}
+
 // Injected into every <WebView> before its content loads: the React Native bridge
 // global, so existing RN web content (and our own pages) can post to the host with
 // `window.ReactNativeWebView.postMessage(data)`. It tunnels through wry's IPC, which
@@ -282,9 +321,11 @@ fn parse_json_tree(
     let hover_style = build_pseudo("hoverStyle");
     let press_style = build_pseudo("pressStyle");
     let has_pseudo_style = hover_style.is_some() || press_style.is_some();
-    if has_pseudo_style {
-        crate::pseudo_style::set(global_id, hover_style, press_style);
-    }
+    // set unconditionally: with both `None` it REMOVES the node's entry. A still-mounted
+    // node that stops carrying a hoverStyle (e.g. a sidebar row flipping to active with
+    // `hoverStyle={active ? undefined : …}`) must drop its stale cached hover, or the old
+    // hover bg keeps repainting over the new base style (hover beat active selection).
+    crate::pseudo_style::set(global_id, hover_style, press_style);
     // opt-in renderer→JS pseudo lane: a node sets `pseudoEvents: true` (the tamagui
     // platform driver does this via the rngpui pseudo registry) to ask the host to emit a
     // coalesced `pseudo` event on each native hover/press flip. Opt-in so we don't spam an
@@ -1571,6 +1612,10 @@ pub(crate) enum Incoming {
         steps: u32,
         reply: flume::Sender<serde_json::Value>,
     },
+    DebugRealDragPath {
+        path: Vec<(f32, f32)>,
+        reply: flume::Sender<serde_json::Value>,
+    },
     /// resize the real gpui window to (w, h) content px. test mode sets
     /// is_resizable=false (blocking AX resize), so this command is the only way to
     /// drive a window resize offscreen for perf measurement.
@@ -1619,6 +1664,14 @@ pub(crate) enum Incoming {
     /// binding eating the terminal's submit). Reports how many host events fired.
     DebugRealKey {
         key: String,
+        reply: flume::Sender<serde_json::Value>,
+    },
+    /// proof the standard Edit menu carries a nil-target `copy:` item AND that `copy:`
+    /// on the WKWebView at (x,y) copies the page selection to the pasteboard. Selects
+    /// all page text first (JS), runs the copy, reads NSPasteboard back.
+    DebugWebviewCopyProof {
+        x: f32,
+        y: f32,
         reply: flume::Sender<serde_json::Value>,
     },
 }
@@ -1705,8 +1758,38 @@ fn install_app_commands(config: AppCommandConfig, cx: &mut App) {
         name: "react-native-gpui".into(),
         items: vec![MenuItem::action("Quit", Quit)],
     }];
+    menus.extend(standard_edit_menus());
     menus.extend(config.menus.into_iter().map(build_app_menu));
     cx.set_menus(menus);
+}
+
+// The standard macOS Edit menu (+ Select All). Without it the app has no
+// Cmd+C/Cmd+V/Cmd+X/Cmd+A key equivalents, so when a WKWebView underlay
+// (timeline) is the active surface those chords never reach it — copy out of the
+// page silently does nothing. Backing each item with gpui-component's own Input
+// Copy/Cut/Paste/SelectAll actions is deliberate: those actions already have
+// `cmd-c`/`cmd-v`/`cmd-x`/`cmd-a` bindings scoped to the `Input` key context
+// (gpui_component::init), so the menu derives its key equivalents from them AND
+// they only fire gpui-side when a TextInput is actually focused. The `os_action`
+// gives each item the OS selector (`copy:`/`paste:`/`cut:`/`selectAll:`) with a
+// nil target, so when no gpui Input is focused the chord falls through GPUIView's
+// `performKeyEquivalent:` (no keymap match → returns NO) and AppKit routes the
+// selector down the responder chain to the first responder — the focused
+// WKWebView — which copies the page selection natively. Composer TextInput copy
+// stays unchanged: when it's focused the context-scoped keymap binding wins.
+fn standard_edit_menus() -> Vec<Menu> {
+    use gpui::OsAction;
+    use gpui_component::input::{Copy, Cut, Paste, SelectAll};
+    vec![Menu {
+        name: "Edit".into(),
+        items: vec![
+            MenuItem::os_action("Cut", Cut, OsAction::Cut),
+            MenuItem::os_action("Copy", Copy, OsAction::Copy),
+            MenuItem::os_action("Paste", Paste, OsAction::Paste),
+            MenuItem::separator(),
+            MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
+        ],
+    }]
 }
 
 fn app_command_key_bindings(
@@ -2058,10 +2141,12 @@ fn main() {
             bridge::command(&action.id);
         });
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-        cx.set_menus(vec![Menu {
+        let mut initial_menus = vec![Menu {
             name: "react-native-gpui".into(),
             items: vec![MenuItem::action("Quit", Quit)],
-        }]);
+        }];
+        initial_menus.extend(standard_edit_menus());
+        cx.set_menus(initial_menus);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -2517,6 +2602,69 @@ fn main() {
                             Err(_) => break,
                         }
                     }
+                    Incoming::DebugRealDragPath { path, reply } => {
+                        // a real press-drag along a waypoint path through gpui's loop:
+                        // down at point[0], held moves through each subsequent point,
+                        // up at the last. lets a probe reverse direction mid-drag.
+                        let result = window_handle.update(cx, |_root, window, cx| {
+                            let before = crate::bridge::events_emitted_count();
+                            let (sx, sy) = path[0];
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::MouseMove(MouseMoveEvent {
+                                    position: gpui::point(px(sx), px(sy)),
+                                    pressed_button: None,
+                                    modifiers: gpui::Modifiers::default(),
+                                }),
+                                cx,
+                            );
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::MouseDown(MouseDownEvent {
+                                    button: MouseButton::Left,
+                                    position: gpui::point(px(sx), px(sy)),
+                                    modifiers: gpui::Modifiers::default(),
+                                    click_count: 1,
+                                    first_mouse: false,
+                                }),
+                                cx,
+                            );
+                            for &(px_, py_) in &path[1..] {
+                                dispatch_real_input(
+                                    window,
+                                    gpui::PlatformInput::MouseMove(MouseMoveEvent {
+                                        position: gpui::point(px(px_), px(py_)),
+                                        pressed_button: Some(MouseButton::Left),
+                                        modifiers: gpui::Modifiers::default(),
+                                    }),
+                                    cx,
+                                );
+                            }
+                            let (ex, ey) = *path.last().unwrap();
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::MouseUp(MouseUpEvent {
+                                    button: MouseButton::Left,
+                                    position: gpui::point(px(ex), px(ey)),
+                                    modifiers: gpui::Modifiers::default(),
+                                    click_count: 1,
+                                }),
+                                cx,
+                            );
+                            window.refresh();
+                            crate::bridge::events_emitted_count().saturating_sub(before)
+                        });
+                        match result {
+                            Ok(emitted) => {
+                                let _ = reply.send(serde_json::json!({
+                                    "ok": true,
+                                    "type": "realdragpath",
+                                    "eventsEmitted": emitted,
+                                }));
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     Incoming::DebugResize { w, h, reply } => {
                         let applied = window_handle.update(cx, |_root, window, cx| {
                             window.resize(size(px(w), px(h)));
@@ -2720,6 +2868,106 @@ fn main() {
                             // a webview region passes through hitTest (returns nil on
                             // GPUIView), so AppKit resolves a WebKit view — never GPUIView.
                             "passthrough": hit_class != "GPUIView",
+                        }));
+                    }
+                    Incoming::DebugWebviewCopyProof { x, y, reply } => {
+                        // resolve the webview at the point, select all its page text,
+                        // run the menu's `copy:` route against the WKWebView, then read
+                        // the pasteboard back — proof a webview Cmd+C copies the page.
+                        // The waits are async timers, NOT thread::sleep: the selection
+                        // and the pasteboard write both happen in WebKit's processes and
+                        // land via the main runloop — blocking it would starve exactly
+                        // the callbacks this proof is waiting on.
+                        let webview_id = pump
+                            .read_with(cx, |this, _| inspector::webview_at(&this.root, x, y))
+                            .ok()
+                            .flatten();
+                        #[cfg(target_os = "macos")]
+                        {
+                            let pump = pump.clone();
+                            cx.spawn(async move |cx| {
+                                let Some(id) = webview_id else {
+                                    let _ = reply.send(serde_json::json!({
+                                        "ok": false,
+                                        "type": "webviewCopyProof",
+                                        "error": "no webview at point",
+                                    }));
+                                    return;
+                                };
+                                // clear the pasteboard, then select the page text.
+                                let selected = pump.update(cx, |this, _| {
+                                    let Some(view) = this.webviews.get(&id) else {
+                                        return false;
+                                    };
+                                    unsafe {
+                                        use objc::{class, msg_send, sel, sel_impl};
+                                        let pb: cocoa::base::id =
+                                            msg_send![class!(NSPasteboard), generalPasteboard];
+                                        let _: i64 = msg_send![pb, clearContents];
+                                    }
+                                    view.evaluate_script(
+                                        "(()=>{const s=window.getSelection();s.removeAllRanges();const r=document.createRange();r.selectNodeContents(document.body);s.addRange(r);})();",
+                                    )
+                                    .is_ok()
+                                });
+                                if !matches!(selected, Ok(true)) {
+                                    let _ = reply.send(serde_json::json!({
+                                        "ok": false,
+                                        "type": "webviewCopyProof",
+                                        "error": "webview id not live",
+                                    }));
+                                    return;
+                                }
+                                // let the selection apply across XPC (runloop keeps spinning).
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(400))
+                                    .await;
+                                let menu_facts = pump.update(cx, |this, _| {
+                                    this.webviews
+                                        .get(&id)
+                                        .map(|view| elements::webview::webview_copy_proof(view))
+                                });
+                                let Ok(Some((menu_found, key_equiv, has_cmd, target_nil, responds))) =
+                                    menu_facts
+                                else {
+                                    let _ = reply.send(serde_json::json!({
+                                        "ok": false,
+                                        "type": "webviewCopyProof",
+                                        "error": "webview went away before copy",
+                                    }));
+                                    return;
+                                };
+                                // let WebKit land the async pasteboard write.
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(400))
+                                    .await;
+                                let pasteboard = read_general_pasteboard_string();
+                                let copied =
+                                    pasteboard.as_deref().is_some_and(|s| !s.trim().is_empty());
+                                let _ = reply.send(serde_json::json!({
+                                    "ok": menu_found && target_nil && has_cmd && responds && copied,
+                                    "type": "webviewCopyProof",
+                                    "webviewId": id,
+                                    // menu route facts:
+                                    "menuCopyItemFound": menu_found,
+                                    "copyKeyEquivalent": key_equiv,
+                                    "copyHasCommandModifier": has_cmd,
+                                    "copyTargetIsNil": target_nil,
+                                    "webviewRespondsToCopy": responds,
+                                    // actual result:
+                                    "pasteboardCopied": copied,
+                                    "pasteboardSample": pasteboard
+                                        .as_deref()
+                                        .map(|s| s.chars().take(80).collect::<String>()),
+                                }));
+                            })
+                            .detach();
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        let _ = reply.send(serde_json::json!({
+                            "ok": false,
+                            "type": "webviewCopyProof",
+                            "error": "non-macos",
                         }));
                     }
                     Incoming::AppCommands(config) => {
@@ -2967,8 +3215,10 @@ fn main() {
                             | Incoming::DebugRealTap { .. }
                             | Incoming::DebugRealMove { .. }
                             | Incoming::DebugRealDrag { .. }
+                            | Incoming::DebugRealDragPath { .. }
                             | Incoming::DebugResize { .. }
                             | Incoming::DebugNativeScrollAt { .. }
+                            | Incoming::DebugWebviewCopyProof { .. }
                             | Incoming::AppCommands(_)
                             | Incoming::DockBadge { .. }
                             | Incoming::RequestAttention { .. } => unreachable!(),
@@ -3063,6 +3313,45 @@ mod tests {
             Some(Incoming::Tree(t)) => t,
             _ => panic!("expected Incoming::Tree"),
         }
+    }
+
+    // A still-mounted node that stops carrying a hoverStyle must drop its cached
+    // pseudo entry, or the stale hover keeps repainting over the new base style
+    // (hover beat active selection in the agentbus sidebar).
+    #[test]
+    fn reparse_without_hover_style_clears_cached_pseudo_entry() {
+        let _serial = crate::pseudo_style::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::pseudo_style::test_clear();
+
+        let with_hover = json!({
+            "globalId": 7100, "type": "div", "children": [
+                { "globalId": 7101, "type": "div",
+                  "style": { "backgroundColor": "#111111" },
+                  "hoverStyle": { "backgroundColor": "#333333" } }
+            ]
+        });
+        tree_of(parse_incoming(&with_hover));
+        assert!(
+            crate::pseudo_style::get(7101).is_some(),
+            "hover entry stored on first parse"
+        );
+
+        // same node id, re-serialized without a hoverStyle (e.g. flipped to active).
+        let without_hover = json!({
+            "globalId": 7100, "type": "div", "children": [
+                { "globalId": 7101, "type": "div",
+                  "style": { "backgroundColor": "#222222" } }
+            ]
+        });
+        tree_of(parse_incoming(&without_hover));
+        assert!(
+            crate::pseudo_style::get(7101).is_none(),
+            "stale hover entry must be removed when the node stops carrying one"
+        );
+
+        crate::pseudo_style::test_clear();
     }
 
     // The delta wire: a full commit seeds the index, then a delta with a `ref` node

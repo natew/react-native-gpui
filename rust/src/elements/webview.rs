@@ -326,6 +326,98 @@ fn webview_object(view: &wry::WebView) -> id {
     (&*webview) as *const _ as id
 }
 
+/// Proof that the standard Edit menu routes Cmd+C to the WKWebView. Two facts:
+/// (1) NSApp's main menu carries an item whose action is the `copy:` selector with a
+/// nil target (so AppKit sends it down the responder chain to the first responder),
+/// and (2) sending that exact `copy:` selector to the WKWebView copies its current
+/// page selection to the general pasteboard. A real Cmd+C from the menu resolves to
+/// the same `[firstResponder copy:]` call this performs directly — when the webview
+/// is the active surface, the first responder IS the WKWebView. Returns
+/// (found_copy_menu_item, copy_key_equivalent, modifier_mask_has_command,
+///  target_is_nil, copy_responded). The caller checks the pasteboard for the text.
+#[cfg(target_os = "macos")]
+pub(crate) fn webview_copy_proof(view: &wry::WebView) -> (bool, String, bool, bool, bool) {
+    const NS_COMMAND_KEY_MASK: u64 = 1 << 20;
+    unsafe {
+        // 1. inspect NSApp.mainMenu for the item wired to the `copy:` selector.
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let main_menu: id = if app != nil {
+            msg_send![app, mainMenu]
+        } else {
+            nil
+        };
+        let (found, key_equiv, has_cmd, target_nil) = find_menu_item(main_menu, sel!(copy:))
+            .map(|item| {
+                let key: id = msg_send![item, keyEquivalent];
+                let key_str = ns_string_to_rust(key);
+                let mask: u64 = msg_send![item, keyEquivalentModifierMask];
+                let target: id = msg_send![item, target];
+                (
+                    true,
+                    key_str,
+                    mask & NS_COMMAND_KEY_MASK != 0,
+                    target == nil,
+                )
+            })
+            .unwrap_or((false, String::new(), false, false));
+
+        // 2. send `copy:` to the WKWebView exactly as the menu's nil-target dispatch
+        // would resolve it against the first responder. respondsToSelector proves the
+        // webview is a valid copy: target; the call performs the native page copy.
+        let webview = webview_object(view);
+        let responds: bool = msg_send![webview, respondsToSelector: sel!(copy:)];
+        if responds {
+            let _: () = msg_send![webview, copy: nil];
+        }
+        (found, key_equiv, has_cmd, target_nil, responds)
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn find_menu_item(menu: id, action: objc::runtime::Sel) -> Option<id> {
+    if menu == nil {
+        return None;
+    }
+    let items: id = msg_send![menu, itemArray];
+    if items == nil {
+        return None;
+    }
+    let count: usize = msg_send![items, count];
+    for i in 0..count {
+        let item: id = msg_send![items, objectAtIndex: i];
+        if item == nil {
+            continue;
+        }
+        let item_action: objc::runtime::Sel = msg_send![item, action];
+        if item_action == action {
+            return Some(item);
+        }
+        let submenu: id = msg_send![item, submenu];
+        if submenu != nil
+            && let Some(found) = unsafe { find_menu_item(submenu, action) }
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ns_string_to_rust(s: id) -> String {
+    if s == nil {
+        return String::new();
+    }
+    let bytes: *const std::os::raw::c_char = msg_send![s, UTF8String];
+    if bytes.is_null() {
+        return String::new();
+    }
+    unsafe {
+        std::ffi::CStr::from_ptr(bytes)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
 // Shared with blur.rs: resolve gpui's Metal NSView's parent + the Metal view itself,
 // installing the transparent-window backing if needed. Both native-underlay elements
 // (webview, blur) park their child views in this parent BELOW the Metal view.

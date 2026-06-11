@@ -132,6 +132,26 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
             steps: number(value, "steps").unwrap_or(8.0) as u32,
             reply,
         }),
+        // a REAL press-drag along an arbitrary waypoint PATH: MouseDown at the first
+        // point → held MouseMoves (pressed_button=Left) through every subsequent point
+        // → MouseUp at the last. unlike `realdrag` (straight line) this can reverse
+        // direction (down-then-up scrub) to exercise capture retention across a turn.
+        "realdragpath" => {
+            let points = value
+                .get("points")
+                .and_then(Value::as_array)
+                .ok_or("realdragpath needs points array")?;
+            let mut path = Vec::with_capacity(points.len());
+            for p in points {
+                let x = p.get("x").and_then(Value::as_f64).ok_or("point.x")? as f32;
+                let y = p.get("y").and_then(Value::as_f64).ok_or("point.y")? as f32;
+                path.push((x, y));
+            }
+            if path.len() < 2 {
+                return Err("realdragpath needs >=2 points");
+            }
+            Ok(Incoming::DebugRealDragPath { path, reply })
+        }
         "resize" => Ok(Incoming::DebugResize {
             w: number(value, "w")?,
             h: number(value, "h")?,
@@ -182,6 +202,11 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
                 .and_then(Value::as_str)
                 .ok_or("realKey command needs key")?
                 .to_string(),
+            reply,
+        }),
+        "webviewCopyProof" => Ok(Incoming::DebugWebviewCopyProof {
+            x: number(value, "x")?,
+            y: number(value, "y")?,
             reply,
         }),
         _ => Err("unknown debug command"),

@@ -112,6 +112,7 @@ pub fn is_paint_only_key(k: &str) -> bool {
             | "shadowColor"
             | "shadowOpacity"
             | "shadowRadius"
+            | "boxShadow"
             | "tintColor"
             | "transform"
             | "borderRadius"
@@ -170,6 +171,17 @@ pub fn take_layout_dirty() -> bool {
     LAYOUT_DIRTY.swap(false, std::sync::atomic::Ordering::Relaxed)
 }
 
+fn clears_overlay_key(k: &str, v: &Value) -> bool {
+    if v.is_null() {
+        return true;
+    }
+    // `boxShadow` is a CSS string at the bridge boundary. Tamagui's pseudo
+    // animation lane can emit `false` for "no pseudo shadow override"; keeping
+    // that value in the overlay would hide a committed base shadow forever
+    // because `ElementStyle::from_json` correctly ignores non-string shadows.
+    k == "boxShadow" && !matches!(v, Value::String(s) if !s.is_empty())
+}
+
 /// Apply a batch of per-node style overrides. Each entry is (globalId, styleObject).
 /// A style object that resolves empty clears that node's overlay. Returns true when
 /// anything actually changed (so the caller can skip the notify on a no-op frame).
@@ -206,33 +218,57 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
         // wholesale replace dropped backgroundColor (and the borders/padding/radius)
         // after frame 1, so the dialog/overlay painted with no background. Merging keeps
         // every key the node ever animated until a real Tree commit prunes it.
-        let entry = overlay.entry(id).or_insert_with(|| OverlayEntry {
-            style: serde_json::Map::new(),
-            rev: 0,
-        });
-        let mut entry_changed = false;
-        for (k, v) in style {
-            match entry.style.get(&k) {
-                Some(existing) if existing == &v => {}
-                _ => {
-                    if is_layout_key(&k) {
-                        // a layout-box key actually MOVED this frame (resize) — let the
-                        // render gate run the lifecycle so native WebViews follow.
-                        LAYOUT_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+        let existed = overlay.contains_key(&id);
+        let mut remove_empty_entry = false;
+        {
+            let entry = overlay.entry(id).or_insert_with(|| OverlayEntry {
+                style: serde_json::Map::new(),
+                rev: 0,
+            });
+            let mut entry_changed = false;
+            for (k, v) in style {
+                if clears_overlay_key(&k, &v) {
+                    if entry.style.remove(&k).is_some() {
+                        if is_layout_key(&k) {
+                            // removing a layout override reverts to the committed box.
+                            LAYOUT_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        if !is_paint_only_key(&k) {
+                            all_paint_only = false;
+                        }
+                        entry_changed = true;
                     }
-                    // a CHANGED key that isn't on the paint-only allowlist vetoes the
-                    // retained-layout reuse for this frame (force a full taffy solve).
-                    if !is_paint_only_key(&k) {
-                        all_paint_only = false;
+                    continue;
+                }
+                match entry.style.get(&k) {
+                    Some(existing) if existing == &v => {}
+                    _ => {
+                        if is_layout_key(&k) {
+                            // a layout-box key actually MOVED this frame (resize) — let the
+                            // render gate run the lifecycle so native WebViews follow.
+                            LAYOUT_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        // a CHANGED key that isn't on the paint-only allowlist vetoes the
+                        // retained-layout reuse for this frame (force a full taffy solve).
+                        if !is_paint_only_key(&k) {
+                            all_paint_only = false;
+                        }
+                        entry.style.insert(k, v);
+                        entry_changed = true;
                     }
-                    entry.style.insert(k, v);
-                    entry_changed = true;
                 }
             }
+            if entry_changed {
+                entry.rev += 1;
+                changed = true;
+                remove_empty_entry = entry.style.is_empty();
+            } else if !existed && entry.style.is_empty() {
+                remove_empty_entry = true;
+            }
         }
-        if entry_changed {
-            entry.rev += 1;
-            changed = true;
+        if remove_empty_entry {
+            overlay.remove(&id);
+            MERGED.lock().unwrap().remove(&id);
         }
     }
     // arm the retained-layout fast path only when SOMETHING changed and every changed key
@@ -523,6 +559,51 @@ mod tests {
             "backgroundColor was dropped by a later opacity-only op (the dialog-bg bug)"
         );
         assert_eq!(merged.opacity, Some(1.0));
+
+        OVERLAY.lock().unwrap().clear();
+        MERGED.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn null_overlay_value_removes_key_without_clobbering_committed_style() {
+        // Tamagui's hover/leave path can emit `boxShadow: null` for a pseudo state.
+        // Null means "clear this animated override"; it must not override the committed
+        // row/picker shadow with no shadow forever.
+        let _serial = TEST_LOCK.lock().unwrap();
+        OVERLAY.lock().unwrap().clear();
+        MERGED.lock().unwrap().clear();
+
+        let base_shadow = "0 2px 8px -2px rgba(15,18,28,0.30)";
+        let base_json = json!({
+            "backgroundColor": "#0f0f14",
+            "boxShadow": base_shadow,
+        });
+
+        assert!(apply_ops(vec![(
+            11,
+            obj(json!({ "backgroundColor": "#22222a", "boxShadow": null }))
+        )]));
+
+        let merged = merged_element_style(11, &base_json).expect("background override remains");
+        assert_eq!(merged.box_shadow.as_deref(), Some(base_shadow));
+        assert!(merged.background_color.is_some());
+
+        assert!(apply_ops(vec![(
+            11,
+            obj(json!({ "boxShadow": "0 0 4px red" }))
+        )]));
+        let merged = merged_element_style(11, &base_json).expect("shadow override present");
+        assert_eq!(merged.box_shadow.as_deref(), Some("0 0 4px red"));
+
+        assert!(apply_ops(vec![(11, obj(json!({ "boxShadow": false })))]));
+        let merged = merged_element_style(11, &base_json).expect("background override remains");
+        assert_eq!(merged.box_shadow.as_deref(), Some(base_shadow));
+
+        assert!(apply_ops(vec![(
+            11,
+            obj(json!({ "backgroundColor": null }))
+        )]));
+        assert!(merged_element_style(11, &base_json).is_none());
 
         OVERLAY.lock().unwrap().clear();
         MERGED.lock().unwrap().clear();

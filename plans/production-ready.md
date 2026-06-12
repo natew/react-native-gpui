@@ -58,7 +58,20 @@ identical on the base binary): `rounded-overflow` (capture corner-AA) and `windo
 
 ## P0 — finish the animation parity story (the user's reported bug)
 
-### P0.1 `transform` is parsed but NEVER applied — CRITICAL
+### P0.1 `transform` is parsed but NEVER applied — CRITICAL — **DONE (2026-06-11)**
+> Landed: element-transform stack in vendored gpui (`Window::with_element_transform`;
+> Quad/Shadow/MonochromeSprite/PolychromeSprite carry a `TransformationMatrix`, all three
+> backend shaders transform vertices and inverse-map fragment SDF/gradient math into
+> local space), `style.rs` parses the RN transform array into `TransformOp`s,
+> `div.rs` paint builds the matrix about the bounds center per frame (overlay value wins
+> over committed). `check-transform-conformance.mjs` is the pixel gate (verified to fail
+> with the fix reverted). Same patch fixed the shadow-underneath bug: shadow shaders now
+> cut the casting element's own rect out of the shadow (CSS outer-shadow semantics;
+> `occluder_bounds`), guarded in `check-opacity-conformance.mjs`.
+> Still open from the original plan: `dump.rs` does not yet emit transform; `paint_path`
+> / `paint_underline` are untransformed; hit-testing ignores transforms (fine for
+> transient animation, wrong for resting transforms); top-level `<Text>`/`<Image>`/
+> `<Svg>` elements don't apply transform (the div wrap covers the dominant case).
 - `style.rs:144,259` (parsed to `Option<String>`), `build_gpui_style` never reads it;
   `anim_overlay.rs:108` lists `transform` paint-only; `div.rs` paint never applies it;
   `dump.rs` doesn't even emit it. gpui 0.2.2 has `TransformationMatrix` (`scene.rs:519`)
@@ -132,7 +145,8 @@ identical on the base binary): `rounded-overflow` (capture corner-AA) and `windo
   a -10000 window; add `{"$cmd":"status"}` returning
   `{composited, onScreen, windowOrigin, captureMode, tracesEnabled, frameClock}`
   (`service.rs:1999`, `debug_control.rs`). Kills the false-positive offscreen oracle. **M**.
-- **P2.2 Painted-frame counter / FPS over the socket** — `AtomicU64` incremented in the
+- **P2.2 Painted-frame counter / FPS over the socket** — **DONE (2026-06-11)** as
+  `anim_trace.rs` + `{"$cmd":"frameStats"}` + `rngpui get frames`. — `AtomicU64` incremented in the
   paint pass + ring of present timestamps + `{"$cmd":"frameStats"}` →
   `{paintedTotal, fpsLast1s, lastFrameMs, droppedEstimate}` (`frame_clock.rs`,
   `service.rs`). There is currently NO way to ask "are frames dropping" — the exact
@@ -140,6 +154,12 @@ identical on the base binary): `rounded-overflow` (capture corner-AA) and `windo
 - **P2.3 Real `capture` socket command** (not the 250ms file-poll timer) —
   `{"$cmd":"capture",path}` runs `capture_layer_to_png` synchronously for the current
   frame and replies (`debug_control.rs`, `service.rs:2285`). Removes the settle race. **S**.
+- **P2.4/P2.5 — largely superseded by `rngpui trace` (2026-06-11)**: traceStart/traceStop
+  record every reanimated style write + NativeLayout tween tick with timestamps + painted
+  frame counter; the CLI resolves a selector subtree, optionally fires tap/key/type
+  actions, and reports per-key curves (sparkline, endpoints, cadence, dropped-frame gaps,
+  spring-overshoot count) — values-level proof without screenshots. Pixel burst capture
+  below is still the missing pixels-level complement.
 - **P2.4 `captureBurst` + `rngpui record`** — N frames at T-ms intervals during an
   interaction → `frame-NNN.png` + per-frame paint timestamps; pairwise `diff` proves
   motion. Underpins P0.2. **M**.

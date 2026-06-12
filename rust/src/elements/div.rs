@@ -302,13 +302,22 @@ fn native_layout_override(key: &str) -> NativeLayoutOverride {
                 animation.to_x,
                 animation.to_y,
             );
-            return NATIVE_LAYOUT_OVERRIDES
+            let settled = NATIVE_LAYOUT_OVERRIDES
                 .lock()
                 .unwrap()
                 .get(key)
                 .copied()
                 .unwrap_or_default();
+            crate::anim_trace::record_native_layout(
+                key,
+                settled.width,
+                settled.height,
+                settled.x,
+                settled.y,
+            );
+            return settled;
         }
+        crate::anim_trace::record_native_layout(key, next.width, next.height, next.x, next.y);
         return next;
     }
     NATIVE_LAYOUT_OVERRIDES
@@ -2234,20 +2243,33 @@ impl Element for ReactDivElement {
         // `None`/absent opacity is an immediate pass-through (no stack push), so an
         // un-animated node pays nothing.
         let element_opacity = style.opacity;
-        window.with_element_opacity(element_opacity, |window| {
-            style.paint(bounds, window, cx, |window, cx| {
-                let _rounded_clip_guard = push_rounded_overflow_clip(rounded_clip);
-                if let Some(mask) = overflow_mask {
-                    window.with_content_mask(Some(mask), |window| {
+        // `transform` rides the same subtree wrap: an animated (overlay) value wins over
+        // the committed style's ops, and the matrix is built fresh each paint around the
+        // CURRENT bounds center, so transform springs (dialog scale/translateY) paint
+        // per-frame with no relayout. Identity/absent → None → zero-cost pass-through.
+        let transform_ops = match crate::anim_overlay::overlay_transform(self.element.global_id) {
+            Some(value) => crate::style::parse_transform_ops(&value),
+            None => self.element.style.transform.clone(),
+        };
+        let element_transform = transform_ops.and_then(|ops| {
+            crate::style::transform_ops_matrix(&ops, bounds, window.scale_factor())
+        });
+        window.with_element_transform(element_transform, |window| {
+            window.with_element_opacity(element_opacity, |window| {
+                style.paint(bounds, window, cx, |window, cx| {
+                    let _rounded_clip_guard = push_rounded_overflow_clip(rounded_clip);
+                    if let Some(mask) = overflow_mask {
+                        window.with_content_mask(Some(mask), |window| {
+                            for index in order.iter() {
+                                self.children[index].element.paint(window, cx);
+                            }
+                        });
+                    } else {
                         for index in order.iter() {
                             self.children[index].element.paint(window, cx);
                         }
-                    });
-                } else {
-                    for index in order.iter() {
-                        self.children[index].element.paint(window, cx);
                     }
-                }
+                });
             });
         });
     }

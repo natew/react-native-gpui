@@ -149,3 +149,25 @@ launches `examples/describe-fixture.tsx` and asserts computed bounds + sampled c
 for known boxes. `node scripts/drive-conformance.mjs` (also `npm run conformance:drive`)
 keeps one session alive, taps a stateful fixture, re-describes it through `--session`,
 and asserts the sampled color changed. Keep both green.
+
+## Animation forensics: `rngpui trace` + `get frames` (2026-06-11)
+
+`rngpui trace <selector ...|--all> [--keys k,k] [--ms n] [--action "tap <sel>"]` records
+every off-thread reanimated style write (`anim_overlay::apply_ops`) and NativeLayout
+tween tick under the matched subtrees, with timestamps + the painted-frame counter, then
+reports per-key curves: sparkline, endpoints, min/max, sample cadence, dropped-frame
+gaps, and spring-overshoot count — values-level animation proof with NO screenshots.
+`rngpui get frames` returns the always-on painted-frame counter + fps + frame-gap stats
+(`{"$cmd":"frameStats"}`). Rust side: `rust/src/anim_trace.rs`; the three commands are
+answered inline in `debug_control.rs` (no main-loop round-trip). `examples/trace-fixture.tsx`
+is the interactive fixture (tap `go-button` → reanimated card spring + NativeLayout pane
+tween at once).
+
+Landed alongside (see plans/production-ready.md P0.1): the element-transform stack in
+the vendored gpui — `transform` now actually paints (translate/scale/rotate about the
+element center; quads, shadows, glyphs, images, svg) with fragment SDF/gradient math
+inverse-mapped into local space; and CSS-correct shadow occlusion (outer box-shadows cut
+the casting element's own rect out, so opacity fades never reveal a "shadow underneath").
+Pixel gates: `conformance:transform`, the shadow-under guard inside `conformance:opacity`.
+`rngpui do key enter` now emits gpui-component's `PressEnter` so `onSubmitEditing` fires
+like a real keystroke.

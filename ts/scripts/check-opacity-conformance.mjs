@@ -78,4 +78,15 @@ if (dg < 70 || db < 70) {
 const sdg = shadow.g - full.g
 if (sdg < 70) fail(`op-shadow body did not fade (${hex('op-shadow')} vs full ${hex('op-full')}) — opacity not applied to a shadowed node`)
 
-console.log(`OPACITY_CONFORMANCE_PASS op-full=${hex('op-full')} op-half=${hex('op-half')} op-shadow=${hex('op-shadow')} (Δg=${dg} Δb=${db})`)
+// shadow-underneath guard: an outer box-shadow must NOT paint underneath its own
+// element (CSS clips it to outside the border box). If it does, the translucent
+// op-shadow box composites over its own black shadow and reads markedly darker than
+// op-half. Regression target: the occluder_bounds cutout in gpui's shadow shaders.
+const underDg = Math.abs(shadow.g - half.g)
+const underDb = Math.abs(shadow.b - half.b)
+if (underDg > 12 || underDb > 12) {
+  fail(`shadow painted underneath its element: op-shadow ${hex('op-shadow')} vs op-half ${hex('op-half')} ` +
+       `(Δg=${underDg} Δb=${underDb}). The occluder cutout in shadow_fragment is missing/broken.`)
+}
+
+console.log(`OPACITY_CONFORMANCE_PASS op-full=${hex('op-full')} op-half=${hex('op-half')} op-shadow=${hex('op-shadow')} (Δg=${dg} Δb=${db}, under Δg=${underDg})`)

@@ -8,6 +8,7 @@ mod text;
 pub mod webview;
 
 pub use div::{
+    smoke_recently_painted,
     ReactDivElement, animate_native_layout_override, clear_native_layout_override,
     finish_pointer_gesture, native_layout_has_animations, native_resize_active,
     retain_native_layout_keys, retain_pointer_state, scroll_by, scroll_to, scroll_to_end,

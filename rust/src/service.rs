@@ -2415,6 +2415,45 @@ fn main() {
 
         let native_layout_driver_active = Arc::new(AtomicBool::new(false));
 
+        // Effects driver: animated procedural backgrounds (Background::Smoke) need the
+        // window repainting every frame while one is on screen. A paint-chained
+        // request_animation_frame is fragile (one dropped next-frame callback kills the
+        // chain for good), so this mirrors the native-layout driver instead: tick ~120Hz
+        // while a smoke quad painted recently, idle on a cheap poll otherwise.
+        {
+            let pump = pump.clone();
+            let window_handle = window_handle;
+            cx.spawn(async move |cx| {
+                loop {
+                    if elements::smoke_recently_painted() {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(8))
+                            .await;
+                        if pump.update(cx, |_this, cx| cx.notify()).is_err() {
+                            break;
+                        }
+                        if window_handle
+                            .update(cx, |_root, window, root_cx| {
+                                root_cx.notify();
+                                window.refresh();
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    } else {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(120))
+                            .await;
+                        if pump.update(cx, |_this, _cx| ()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            })
+            .detach();
+        }
+
         // Foreground pump: apply each message on the main thread. A new tree re-renders
         // (cx.notify); a webview command runs straight against the live wry view (which
         // must be driven from the main thread). Both arrive on the same ordered channel.

@@ -658,6 +658,11 @@ pub(crate) enum BackgroundTag {
     Solid = 0,
     LinearGradient = 1,
     PatternSlash = 2,
+    /// Procedural animated smoke (FBM noise wisps drifting upward, fading out).
+    /// `gradient_angle_or_pattern_height` carries the animation TIME in seconds —
+    /// the painter stamps it per frame, so no renderer uniform plumbing is needed.
+    /// colors[0] = dense wisp color, colors[1] = faded wisp color.
+    Smoke = 3,
 }
 
 /// A color space for color interpolation.
@@ -708,6 +713,9 @@ impl std::fmt::Debug for Background {
                     self.gradient_angle_or_pattern_height, self.colors[0], self.colors[1]
                 )
             }
+            BackgroundTag::Smoke => {
+                write!(f, "Smoke(t={}, {:?}, {:?})", self.gradient_angle_or_pattern_height, self.colors[0], self.colors[1])
+            }
             BackgroundTag::PatternSlash => {
                 write!(
                     f,
@@ -743,6 +751,21 @@ pub fn pattern_slash(color: Hsla, width: f32, interval: f32) -> Background {
         tag: BackgroundTag::PatternSlash,
         solid: color,
         gradient_angle_or_pattern_height: height,
+        ..Default::default()
+    }
+}
+
+/// Creates a procedural animated smoke background — subtle FBM wisps drifting
+/// upward and fading, alpha-composited (never opaque). The painter must stamp the
+/// per-frame time into `gradient_angle_or_pattern_height` (see `Background::with_time`)
+/// and keep the window repainting while one is visible.
+pub fn smoke_background(
+    dense: impl Into<LinearColorStop>,
+    faded: impl Into<LinearColorStop>,
+) -> Background {
+    Background {
+        tag: BackgroundTag::Smoke,
+        colors: [dense.into(), faded.into()],
         ..Default::default()
     }
 }
@@ -833,7 +856,23 @@ impl Background {
             BackgroundTag::Solid => self.solid.is_transparent(),
             BackgroundTag::LinearGradient => self.colors.iter().all(|c| c.color.is_transparent()),
             BackgroundTag::PatternSlash => self.solid.is_transparent(),
+            BackgroundTag::Smoke => self.colors.iter().all(|c| c.color.is_transparent()),
         }
+    }
+
+    /// True when this is the animated smoke background (the painter stamps time and
+    /// keeps the window repainting while one is on screen).
+    pub fn is_smoke(&self) -> bool {
+        self.tag == BackgroundTag::Smoke
+    }
+
+    /// Stamp the animation time (seconds) for a smoke background — called at paint,
+    /// each frame, so the shader animates without any global uniform.
+    pub fn with_time(mut self, seconds: f32) -> Self {
+        if self.tag == BackgroundTag::Smoke {
+            self.gradient_angle_or_pattern_height = seconds;
+        }
+        self
     }
 }
 

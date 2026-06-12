@@ -1173,6 +1173,10 @@ GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid,
   GradientColor out;
   if (tag == 0 || tag == 2) {
     out.solid = hsla_to_rgba(solid);
+  } else if (tag == 3) {
+    // smoke: dense + faded wisp colors, plain srgb
+    out.color0 = hsla_to_rgba(color0);
+    out.color1 = hsla_to_rgba(color1);
   } else if (tag == 1) {
     out.color0 = hsla_to_rgba(color0);
     out.color1 = hsla_to_rgba(color1);
@@ -1187,6 +1191,35 @@ GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid,
   }
 
   return out;
+}
+
+// --- procedural smoke (Background tag 3) -----------------------------------
+// value-noise FBM; cheap, no textures. time rides in
+// background.gradient_angle_or_pattern_height (stamped per frame at paint).
+float smoke_hash(float2 p) {
+  return fract(sin(dot(p, float2(127.1, 311.7))) * 43758.5453123);
+}
+
+float smoke_noise(float2 p) {
+  float2 i = floor(p);
+  float2 f = fract(p);
+  float2 u = f * f * (3.0 - 2.0 * f);
+  float a = smoke_hash(i);
+  float b = smoke_hash(i + float2(1.0, 0.0));
+  float c = smoke_hash(i + float2(0.0, 1.0));
+  float d = smoke_hash(i + float2(1.0, 1.0));
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+float smoke_fbm(float2 p) {
+  float v = 0.0;
+  float amp = 0.5;
+  for (int i = 0; i < 5; i++) {
+    v += amp * smoke_noise(p);
+    p = p * 2.03 + float2(13.7, 7.3);
+    amp *= 0.5;
+  }
+  return v;
 }
 
 float2x2 rotate2d(float angle) {
@@ -1263,6 +1296,36 @@ float4 fill_color(Background background,
         color = solid_color;
         color.a *= saturate(0.5 - distance);
         break;
+    }
+    case 3: {
+      // layered undulating smoke, drifting upward and fading as it rises.
+      float t = background.gradient_angle_or_pattern_height;
+      float2 size = float2(bounds.size.width, bounds.size.height);
+      float2 uv = (position - float2(bounds.origin.x, bounds.origin.y)) / max(size.y, 1.0);
+
+      // two counter-drifting layers; sampling y+t makes features rise.
+      // domain-warp each layer so the wisps undulate instead of scrolling.
+      float2 p1 = uv * 1.9 + float2(0.0, t * 0.14);
+      float2 warp1 = float2(smoke_fbm(p1 * 1.6 + float2(t * 0.045, 0.0)),
+                            smoke_fbm(p1 * 1.6 + float2(5.2, t * 0.038))) - 0.5;
+      float layer1 = smoke_fbm(p1 + warp1 * 1.2);
+
+      float2 p2 = uv * 3.4 + float2(3.7, t * 0.22);
+      float2 warp2 = float2(smoke_fbm(p2 * 1.2 + float2(0.0, t * 0.03)),
+                            smoke_fbm(p2 * 1.2 + float2(9.1, t * 0.05))) - 0.5;
+      float layer2 = smoke_fbm(p2 + warp2 * 0.9);
+
+      float density = layer1 * 0.66 + layer2 * 0.34;
+      // carve wisps out of the field — wide soft band so the body of the smoke reads
+      float wisp = smoothstep(0.30, 0.86, density);
+      // rise-and-fade: strongest near the bottom, dissolving toward the top
+      float vertical = mix(0.12, 1.0, smoothstep(0.0, 1.0, (position.y - bounds.origin.y) / max(size.y, 1.0)));
+
+      float4 dense = color0;
+      float4 faded = color1;
+      color = mix(faded, dense, wisp);
+      color.a *= wisp * vertical;
+      break;
     }
   }
 

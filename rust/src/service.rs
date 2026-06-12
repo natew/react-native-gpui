@@ -2058,6 +2058,8 @@ fn main() {
             eprintln!("[rngpui] failed to write service pid file {path}: {error}");
         }
     }
+    // `kill -USR2 <pid>` = live reload (same path as Cmd+R); see hermes.rs.
+    hermes::install_reload_signal_handler();
     // The JS runs in an embedded Hermes runtime on a dedicated thread (hermes.rs). The
     // bundle's reconciler hands every committed tree to __rngpui_applyTree, which parses it
     // and sends an Incoming on this channel: the first tree bootstraps the window size, the

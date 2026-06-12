@@ -343,6 +343,14 @@ extern "C" fn host_exit(_ud: *mut c_void, arg: *const c_char) {
 }
 
 extern "C" fn host_reload_app(_ud: *mut c_void, _arg: *const c_char) {
+    reload_app();
+}
+
+/// The one app-reload path: rebuild (when RNGPUI_RELOAD_CMD is set) then exec-replace
+/// the process with itself so the new bundle is read from disk. Reached from Cmd+R via
+/// the JS host fn above, and from an external `kill -USR2 <pid>` via
+/// `install_reload_signal_handler` (the live-reload watcher).
+pub(crate) fn reload_app() {
     // dev rebuild-on-reload: the launcher can set RNGPUI_RELOAD_CMD (e.g. a
     // one-shot Hermes bundle build) so a reload picks up source edits without a
     // separate watcher. runs synchronously — the exec below reads the bundle
@@ -382,6 +390,52 @@ extern "C" fn host_reload_app(_ud: *mut c_void, _arg: *const c_char) {
     let error = std::process::Command::new(exe).args(args).exec();
     eprintln!("[hermes] reload exec failed: {error}");
     std::process::exit(1);
+}
+
+// external live-reload trigger: `kill -USR2 <pid>` reloads the app through the same
+// path as Cmd+R. a signal handler can't rebuild/exec directly (not async-signal-safe),
+// so the handler writes one byte to a self-pipe and a dedicated thread does the work.
+// installing this also makes a stray SIGUSR2 harmless — the default action kills the
+// process.
+static RELOAD_PIPE_WRITE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+extern "C" fn on_sigusr2(_sig: libc::c_int) {
+    let fd = RELOAD_PIPE_WRITE.load(std::sync::atomic::Ordering::Relaxed);
+    if fd >= 0 {
+        unsafe {
+            libc::write(fd, b"r".as_ptr() as *const libc::c_void, 1);
+        }
+    }
+}
+
+pub(crate) fn install_reload_signal_handler() {
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        eprintln!("[hermes] reload signal pipe failed; kill -USR2 reload disabled");
+        return;
+    }
+    RELOAD_PIPE_WRITE.store(fds[1], std::sync::atomic::Ordering::Relaxed);
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = on_sigusr2 as *const () as usize;
+        sa.sa_flags = libc::SA_RESTART;
+        libc::sigaction(libc::SIGUSR2, &sa, std::ptr::null_mut());
+    }
+    let read_fd = fds[0];
+    std::thread::Builder::new()
+        .name("rngpui-reload-signal".into())
+        .spawn(move || {
+            let mut buf = [0u8; 1];
+            loop {
+                let n = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, 1) };
+                if n == 1 {
+                    reload_app();
+                } else if n <= 0 {
+                    break;
+                }
+            }
+        })
+        .expect("spawn reload signal thread");
 }
 
 // ── fetch (HTTP via ureq, on a worker thread, result posted back to JS) ──────

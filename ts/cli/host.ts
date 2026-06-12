@@ -13,6 +13,7 @@ import {
     existsSync,
     mkdtempSync,
     mkdirSync,
+    openSync,
     readdirSync,
     readFileSync,
     rmSync,
@@ -267,6 +268,7 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
     const pidPath = join(workdir, "service.pid");
     const socketPath = join(workdir, "control.sock");
     const capturePath = join(workdir, "frame.png");
+    const logPath = join(workdir, "service.log");
     const size = opts.size ?? "1280x860";
     const [w, h] = size.split("x").map((value) => parseInt(value, 10));
     const bundlePath = opts.bundle ? resolve(opts.bundle) : bundleEntry(entry, workdir);
@@ -293,10 +295,18 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
             RNGPUI_CONTROL_SOCKET: socketPath,
             RNGPUI_APP_NAME: appName,
         },
-        stdio: ["ignore", "ignore", "pipe"],
+        // stderr goes to a session log file, never a pipe back to this process: the
+        // service outlives the cli (dev/--keep), and an eprintln! into a closed pipe
+        // panics (EPIPE) and aborts the whole service mid-demo.
+        stdio: ["ignore", "ignore", openSync(logPath, "a")],
     });
-    let log = "";
-    child.stderr?.on("data", (chunk) => (log += chunk));
+    const logTail = () => {
+        try {
+            return readFileSync(logPath, "utf8").split("\n").slice(-30).join("\n");
+        } catch {
+            return "(no service log)";
+        }
+    };
 
     const fail = (message: string): never => {
         killPidFile(pidPath);
@@ -306,7 +316,7 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
             /* already gone */
         }
         rmSync(workdir, { recursive: true, force: true });
-        throw new Error(`${message}\n--- host log tail ---\n${log.split("\n").slice(-30).join("\n")}`);
+        throw new Error(`${message}\n--- host log tail ---\n${logTail()}`);
     };
 
     let servicePid = 0;

@@ -31,6 +31,7 @@ static APP_COMMAND_BINDING_SLOTS: Lazy<Mutex<HashSet<AppCommandBindingSlot>>> =
     Lazy::new(|| Mutex::new(HashSet::new()));
 
 mod anim_overlay;
+mod anim_trace;
 mod audio;
 #[cfg(target_os = "macos")]
 mod ax;
@@ -944,6 +945,8 @@ impl Render for ServiceApp {
         if window.focused(cx).is_none() {
             window.focus(&self.app_focus);
         }
+        // per-draw counter behind frameStats / trace — one atomic + bounded ring push.
+        anim_trace::on_frame_painted();
         // reset the per-frame hit-test passthrough registry before this frame's prepaint
         // pass repopulates it (webview rects + occluder rects, for native webview events).
         hit_passthrough::begin_frame();
@@ -2835,7 +2838,14 @@ fn main() {
                                     let key_lower = key.to_ascii_lowercase();
                                     state.update(cx, |input, cx| match key_lower.as_str() {
                                         "enter" | "return" => {
+                                            // mirror a REAL enter keystroke: the component
+                                            // inserts the newline then emits PressEnter, and
+                                            // the app-side subscription runs the submit path
+                                            // (stripping the just-inserted newline). Without
+                                            // the emit, `rngpui do key enter` never fires
+                                            // onSubmitEditing.
                                             input.insert("\n", window, cx);
+                                            cx.emit(InputEvent::PressEnter { secondary: false });
                                         }
                                         "backspace" => {
                                             let cursor = input.cursor();

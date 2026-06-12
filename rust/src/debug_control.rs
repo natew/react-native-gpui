@@ -69,6 +69,15 @@ fn handle_stream(mut stream: UnixStream, tx: &Sender<Incoming>) {
         }
     };
     let req_id = request.get("reqId").and_then(Value::as_u64).unwrap_or(0);
+    // animation tracing + frame stats touch only global state — answer inline, without
+    // a main-loop round-trip, so traceStop replies instantly even mid-animation.
+    if let Some(mut response) = handle_trace_request(&request) {
+        if let Value::Object(map) = &mut response {
+            map.insert("reqId".into(), json!(req_id));
+        }
+        write_response(&mut stream, response);
+        return;
+    }
     let (reply_tx, reply_rx) = flume::bounded::<Value>(1);
     let incoming = match incoming_for_request(&request, reply_tx) {
         Ok(incoming) => incoming,
@@ -95,6 +104,39 @@ fn handle_stream(mut stream: UnixStream, tx: &Sender<Incoming>) {
         map.insert("reqId".into(), json!(req_id));
     }
     write_response(&mut stream, response);
+}
+
+fn handle_trace_request(value: &Value) -> Option<Value> {
+    let cmd = value.get("$cmd").and_then(Value::as_str)?;
+    match cmd {
+        "frameStats" => Some(crate::anim_trace::frame_stats()),
+        "traceStart" => {
+            let ids = value.get("ids").and_then(Value::as_array).map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_u64)
+                    .collect::<std::collections::HashSet<u64>>()
+            });
+            let keys = string_set(value, "keys");
+            let native_keys = string_set(value, "nativeKeys");
+            let max_ms = value
+                .get("maxMs")
+                .and_then(Value::as_u64)
+                .unwrap_or(10_000);
+            Some(crate::anim_trace::start(ids, keys, native_keys, max_ms))
+        }
+        "traceStop" => Some(crate::anim_trace::stop()),
+        _ => None,
+    }
+}
+
+fn string_set(value: &Value, key: &str) -> Option<std::collections::HashSet<String>> {
+    value.get(key).and_then(Value::as_array).map(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    })
 }
 
 fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming, &'static str> {

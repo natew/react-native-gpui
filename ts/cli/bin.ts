@@ -15,6 +15,7 @@ import { attachHost, attachSession, closeSession, launchHost, type AttachedHost,
 import { runGet } from "./commands/get";
 import { runDo } from "./commands/do";
 import { runFlow } from "./commands/flow";
+import { runTrace } from "./commands/trace";
 import { runDiff, runShot, type ShotFlags } from "./commands/shot";
 
 const HELP = `rngpui — react-native-gpui developer CLI
@@ -25,6 +26,7 @@ usage:
   rngpui dev <--bundle app.hbc | --launch entry.tsx> [--size --appearance --fixture]   keep one offscreen instance alive; prints its session dir
   rngpui diff <before.png> <after.png> [--out highlight.png] [--threshold n]
   rngpui <get|do> <subcommand> [selector] [--launch <entry.tsx> | --bundle <app.hbc> | --session <dir> | --attach] [--json]
+  rngpui trace <selector ...|--all> [--keys k1,k2] [--ms n] [--action "tap <sel>"] [target] [--json]
   rngpui flow [--profile] tap <selector> [tap <selector> ...] [--out <dir>] [target]
   rngpui close --session <dir>
 
@@ -65,6 +67,19 @@ get (introspect — read-only):
   get style <selector>           resolved style facts (incl. background/border/color)
   get color <selector|x,y>       sampled dominant/average color in a node or at a point
   get point <x,y>                topmost node + pixel color at a window point
+  get frames                     painted-frame counter + live fps + frame-gap stats
+
+trace (animation forensics — no screenshots):
+  trace <selector ...>           record every animated style write (off-thread
+                                 reanimated / tamagui driver) and NativeLayout tween
+                                 tick under the matched subtrees, then report per-key
+                                 curves: sparkline, endpoints, min/max, sample cadence,
+                                 dropped-frame gaps, spring overshoot count.
+  --all                          trace every node instead of a subtree
+  --keys opacity,transform       only record these style keys
+  --ms <n>                       observation window after actions fire (default 1200)
+  --action "tap <sel>"           fire input after arming (repeatable; tap/key/type)
+  example: rngpui trace dialog --action "tap open-settings" --ms 1500 --session <dir>
 
 do (drive):
   do tap <selector|x,y>          synthesize a press at the node center / point
@@ -103,6 +118,7 @@ function parseArgs(argv: string[]) {
     const args = argv.slice(2);
     const flags: Record<string, string | boolean> = {};
     const select: string[] = [];
+    const actions: string[] = [];
     const positional: string[] = [];
     for (let i = 0; i < args.length; i++) {
         const a = args[i];
@@ -123,11 +139,15 @@ function parseArgs(argv: string[]) {
         else if (a === "--no-screenshots") flags.screenshots = false;
         else if (a === "--settle-ms") flags.settleMs = args[++i] ?? "";
         else if (a === "--cadence-ms") flags.cadenceMs = args[++i] ?? "";
+        else if (a === "--keys") flags.keys = args[++i] ?? "";
+        else if (a === "--ms") flags.ms = args[++i] ?? "";
+        else if (a === "--action") actions.push(args[++i] ?? "");
+        else if (a === "--all") flags.all = true;
         else if (a === "--out") flags.out = args[++i] ?? "";
         else if (a === "-h" || a === "--help") flags.help = true;
         else positional.push(a);
     }
-    return { flags, positional, select };
+    return { flags, positional, select, actions };
 }
 
 function shotFlags(flags: Record<string, string | boolean>, select: string[]): ShotFlags {
@@ -147,7 +167,7 @@ function shotFlags(flags: Record<string, string | boolean>, select: string[]): S
 }
 
 async function main(): Promise<number> {
-    const { flags, positional, select } = parseArgs(process.argv);
+    const { flags, positional, select, actions } = parseArgs(process.argv);
     if (flags.help || positional.length === 0) {
         console.log(HELP);
         return positional.length === 0 ? 1 : 0;
@@ -194,13 +214,13 @@ async function main(): Promise<number> {
         return 0;
     }
 
-    if (group !== "get" && group !== "do" && group !== "flow") {
+    if (group !== "get" && group !== "do" && group !== "flow" && group !== "trace") {
         console.error(`  unknown command group: ${group}`);
         console.error("  run `rngpui --help` for the surface.");
         return 1;
     }
-    if (!sub && group !== "flow") {
-        console.error(`  ${group} needs a subcommand — run \`rngpui --help\``);
+    if (!sub && group !== "flow" && !(group === "trace" && flags.all === true)) {
+        console.error(`  ${group} needs a ${group === "trace" ? "selector (or --all)" : "subcommand"} — run \`rngpui --help\``);
         return 1;
     }
 
@@ -230,7 +250,15 @@ async function main(): Promise<number> {
                 ? await runGet(host, sub, rest, json)
                 : group === "do"
                   ? await runDo(host, sub, rest, json)
-                  : await runFlow(host, sub ? [sub, ...rest] : rest, {
+                  : group === "trace"
+                    ? await runTrace(host, sub ? [sub, ...rest] : [], {
+                          json,
+                          keys: flags.keys ? String(flags.keys).split(",").map((k) => k.trim()).filter(Boolean) : undefined,
+                          ms: flags.ms ? Number(flags.ms) : 1_200,
+                          actions: actions.filter(Boolean),
+                          all: flags.all === true,
+                      })
+                    : await runFlow(host, sub ? [sub, ...rest] : rest, {
                         json,
                         profile: flags.profile === true,
                         screenshots: flags.screenshots === undefined ? undefined : flags.screenshots === true,

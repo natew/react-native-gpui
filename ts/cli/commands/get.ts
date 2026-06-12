@@ -181,6 +181,19 @@ function formatStateStyle(style: Record<string, unknown>): string {
 }
 
 export async function runGet(host: Host, sub: string, args: string[], json: boolean): Promise<number> {
+    if (sub === "frames") {
+        if (!isDriveableHost(host)) {
+            console.error("  get frames needs a driveable target (control socket)");
+            return 1;
+        }
+        const stats = await host.request<{ ok: boolean; framesPainted: number; fpsLast1s: number; lastFrameAgoMs: number | null; avgFrameGapMs: number | null }>({ $cmd: "frameStats" });
+        out(json, () => {
+            const ago = stats.lastFrameAgoMs == null ? "n/a" : `${stats.lastFrameAgoMs.toFixed(0)}ms ago`;
+            const gap = stats.avgFrameGapMs == null ? "n/a" : `${stats.avgFrameGapMs.toFixed(1)}ms`;
+            console.log(`  frames painted: ${stats.framesPainted} — ${stats.fpsLast1s}fps last 1s, last frame ${ago}, avg gap ${gap}`);
+        }, stats);
+        return 0;
+    }
     const dump = await host.dump();
     if (!dump) {
         if (sub === "color") {

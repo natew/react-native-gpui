@@ -203,6 +203,7 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
                 style.keys().cloned().collect::<Vec<_>>().join(",")
             );
         }
+        crate::anim_trace::record_style_op(id, &style);
         if style.is_empty() {
             if overlay.remove(&id).is_some() {
                 MERGED.lock().unwrap().remove(&id);
@@ -332,6 +333,23 @@ pub fn merged_gpui_style(
         );
     }
     Some(style)
+}
+
+/// The live animated `transform` value for a node, if reanimated is currently driving
+/// one. `transform` lives outside `gpui::Style` (it's applied via the element-transform
+/// stack at paint, not the style build), so paint asks for it separately. The
+/// OVERLAY_COUNT fast path keeps this a single atomic load for the un-animated app.
+pub fn overlay_transform(global_id: u64) -> Option<Value> {
+    if OVERLAY_COUNT.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    OVERLAY
+        .lock()
+        .unwrap()
+        .get(&global_id)?
+        .style
+        .get("transform")
+        .cloned()
 }
 
 /// Uncached merge returning the `ElementStyle` — debug dump and tests only; the hot

@@ -28,6 +28,7 @@ float pick_corner_radius(float2 center_to_point, Corners_ScaledPixels corner_rad
 float quad_sdf(float2 point, Bounds_ScaledPixels bounds,
                Corners_ScaledPixels corner_radii);
 float quad_sdf_impl(float2 center_to_point, float corner_radius);
+float2 transform_inverse_apply(TransformationMatrix t, float2 p);
 float gaussian(float x, float sigma);
 float2 erf(float2 x);
 float blur_along_x(float x, float y, float sigma, float corner,
@@ -73,10 +74,10 @@ vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
                                     [[buffer(QuadInputIndex_ViewportSize)]]) {
   float2 unit_vertex = unit_vertices[unit_vertex_id];
   Quad quad = quads[quad_id];
-  float4 device_position =
-      to_device_position(unit_vertex, quad.bounds, viewport_size);
-  float4 clip_distance = distance_from_clip_rect(unit_vertex, quad.bounds,
-                                                 quad.content_mask.bounds);
+  float4 device_position = to_device_position_transformed(
+      unit_vertex, quad.bounds, quad.transformation, viewport_size);
+  float4 clip_distance = distance_from_clip_rect_transformed(
+      unit_vertex, quad.bounds, quad.content_mask.bounds, quad.transformation);
   float4 border_color = hsla_to_rgba(quad.border_color);
 
   GradientColor gradient = prepare_fill_color(
@@ -101,7 +102,11 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
                               constant Quad *quads
                               [[buffer(QuadInputIndex_Quads)]]) {
   Quad quad = quads[input.quad_id];
-  float4 background_color = fill_color(quad.background, input.position.xy, quad.bounds,
+  // SDF + gradient math runs in the quad's untransformed local space; map the
+  // device-space fragment position back through the element transform.
+  float2 local_position =
+      transform_inverse_apply(quad.transformation, input.position.xy);
+  float4 background_color = fill_color(quad.background, local_position, quad.bounds,
     input.background_solid, input.background_color0, input.background_color1);
 
   bool unrounded = quad.corner_radii.top_left == 0.0 &&
@@ -120,7 +125,7 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
 
   float2 size = float2(quad.bounds.size.width, quad.bounds.size.height);
   float2 half_size = size / 2.0;
-  float2 point = input.position.xy - float2(quad.bounds.origin.x, quad.bounds.origin.y);
+  float2 point = local_position - float2(quad.bounds.origin.x, quad.bounds.origin.y);
   float2 center_to_point = point - half_size;
 
   // Signed distance field threshold for inclusion of pixels. 0.5 is the
@@ -477,10 +482,10 @@ vertex ShadowVertexOutput shadow_vertex(
   bounds.size.width += 2. * margin;
   bounds.size.height += 2. * margin;
 
-  float4 device_position =
-      to_device_position(unit_vertex, bounds, viewport_size);
-  float4 clip_distance =
-      distance_from_clip_rect(unit_vertex, bounds, shadow.content_mask.bounds);
+  float4 device_position = to_device_position_transformed(
+      unit_vertex, bounds, shadow.transformation, viewport_size);
+  float4 clip_distance = distance_from_clip_rect_transformed(
+      unit_vertex, bounds, shadow.content_mask.bounds, shadow.transformation);
   float4 color = hsla_to_rgba(shadow.color);
 
   return ShadowVertexOutput{
@@ -495,11 +500,13 @@ fragment float4 shadow_fragment(ShadowFragmentInput input [[stage_in]],
                                 [[buffer(ShadowInputIndex_Shadows)]]) {
   Shadow shadow = shadows[input.shadow_id];
 
+  float2 local_position =
+      transform_inverse_apply(shadow.transformation, input.position.xy);
   float2 origin = float2(shadow.bounds.origin.x, shadow.bounds.origin.y);
   float2 size = float2(shadow.bounds.size.width, shadow.bounds.size.height);
   float2 half_size = size / 2.;
   float2 center = origin + half_size;
-  float2 point = input.position.xy - center;
+  float2 point = local_position - center;
   float corner_radius;
   if (point.x < 0.) {
     if (point.y < 0.) {
@@ -517,7 +524,7 @@ fragment float4 shadow_fragment(ShadowFragmentInput input [[stage_in]],
 
   float alpha;
   if (shadow.blur_radius == 0.) {
-    float distance = quad_sdf(input.position.xy, shadow.bounds, shadow.corner_radii);
+    float distance = quad_sdf(local_position, shadow.bounds, shadow.corner_radii);
     alpha = saturate(0.5 - distance);
   } else {
     // The signal is only non-zero in a limited range, so don't waste samples
@@ -537,6 +544,13 @@ fragment float4 shadow_fragment(ShadowFragmentInput input [[stage_in]],
       y += step;
     }
   }
+
+  // CSS box-shadow semantics: outer shadows are not painted underneath the
+  // casting element, so translucent or fading elements never reveal their own
+  // shadow through their background
+  float occluder_distance = quad_sdf(local_position, shadow.occluder_bounds,
+                                     shadow.corner_radii);
+  alpha *= saturate(0.5 + occluder_distance);
 
   return input.color * float4(1., 1., 1., alpha);
 }
@@ -683,10 +697,10 @@ vertex PolychromeSpriteVertexOutput polychrome_sprite_vertex(
 
   float2 unit_vertex = unit_vertices[unit_vertex_id];
   PolychromeSprite sprite = sprites[sprite_id];
-  float4 device_position =
-      to_device_position(unit_vertex, sprite.bounds, viewport_size);
-  float4 clip_distance = distance_from_clip_rect(unit_vertex, sprite.bounds,
-                                                 sprite.content_mask.bounds);
+  float4 device_position = to_device_position_transformed(
+      unit_vertex, sprite.bounds, sprite.transformation, viewport_size);
+  float4 clip_distance = distance_from_clip_rect_transformed(
+      unit_vertex, sprite.bounds, sprite.content_mask.bounds, sprite.transformation);
   float2 tile_position = to_tile_position(unit_vertex, sprite.tile, atlas_size);
   return PolychromeSpriteVertexOutput{
       device_position,
@@ -704,8 +718,9 @@ fragment float4 polychrome_sprite_fragment(
                                           min_filter::linear);
   float4 sample =
       atlas_texture.sample(atlas_texture_sampler, input.tile_position);
-  float distance =
-      quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
+  float distance = quad_sdf(
+      transform_inverse_apply(sprite.transformation, input.position.xy),
+      sprite.bounds, sprite.corner_radii);
 
   float4 color = sample;
   if (sprite.grayscale) {
@@ -994,6 +1009,22 @@ float4 to_device_position(float2 unit_vertex, Bounds_ScaledPixels bounds,
   float2 device_position =
       position / viewport_size * float2(2., -2.) + float2(-1., 1.);
   return float4(device_position, 0., 1.);
+}
+
+// Map a device-space point back into an element's untransformed local space by
+// applying the inverse of its (affine, invertible) transform.
+float2 transform_inverse_apply(TransformationMatrix t, float2 p) {
+  float a = t.rotation_scale[0][0];
+  float b = t.rotation_scale[0][1];
+  float c = t.rotation_scale[1][0];
+  float d = t.rotation_scale[1][1];
+  float det = a * d - b * c;
+  // a degenerate transform (scale 0) collapses the element anyway; avoid the div-by-0
+  if (fabs(det) < 1e-6) {
+    return p;
+  }
+  float2 q = p - float2(t.translation[0], t.translation[1]);
+  return float2((d * q.x - b * q.y) / det, (-c * q.x + a * q.y) / det);
 }
 
 float4 to_device_position_transformed(float2 unit_vertex, Bounds_ScaledPixels bounds,

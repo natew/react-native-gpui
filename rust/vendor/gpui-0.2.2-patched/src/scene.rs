@@ -478,6 +478,8 @@ pub(crate) struct Quad {
     pub border_color: Hsla,
     pub corner_radii: Corners<ScaledPixels>,
     pub border_widths: Edges<ScaledPixels>,
+    // element transform (animated scale/translate/rotate); identity when untransformed
+    pub transformation: TransformationMatrix,
 }
 
 impl From<Quad> for Primitive {
@@ -510,9 +512,15 @@ pub(crate) struct Shadow {
     pub order: DrawOrder,
     pub blur_radius: ScaledPixels,
     pub bounds: Bounds<ScaledPixels>,
+    // the casting element's own bounds; outer shadows are clipped to outside
+    // this rect (CSS box-shadow semantics) so a translucent or fading element
+    // never reveals its own shadow underneath itself
+    pub occluder_bounds: Bounds<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub color: Hsla,
+    // element transform (animated scale/translate/rotate); identity when untransformed
+    pub transformation: TransformationMatrix,
 }
 
 impl From<Shadow> for Primitive {
@@ -664,6 +672,8 @@ pub(crate) struct PolychromeSprite {
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     pub tile: AtlasTile,
+    // element transform (animated scale/translate/rotate); identity when untransformed
+    pub transformation: TransformationMatrix,
 }
 
 impl From<PolychromeSprite> for Primitive {

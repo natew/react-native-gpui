@@ -80,6 +80,15 @@ objc = "0.2"
 #    opacity spring / enterStyle / exitStyle / AnimatePresence (all dialog & sheet fades)
 #    painted at full opacity — only `transform` animated, and drop shadows never faded.
 #    `ts/scripts/check-opacity-conformance.mjs` is the pixel regression guard.
+#
+# 4. CSS-correct box-shadow occlusion (src/scene.rs `Shadow.occluder_bounds`,
+#    src/window.rs `paint_shadows`, all three backend shaders). Upstream paints the
+#    blurred shadow across the WHOLE rounded rect, including underneath the casting
+#    element; CSS clips outer shadows to outside the border box. Invisible while the
+#    element is opaque, but any opacity fade (dialog exits, AnimatePresence) lets the
+#    shadow bleed through the now-translucent background — the "shadow underneath"
+#    artifact. The shadow fragment shaders now cut out the element's own rounded rect
+#    via `quad_sdf` on the new `occluder_bounds` field.
 [patch.crates-io]
 gpui = { path = "vendor/gpui-0.2.2-patched" }
 # Patched gpui-component 0.5.1 (vendored alongside gpui, same precedent). Divergences

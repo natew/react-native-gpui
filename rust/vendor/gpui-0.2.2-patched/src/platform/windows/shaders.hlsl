@@ -817,6 +817,7 @@ struct Shadow {
     uint order;
     float blur_radius;
     Bounds bounds;
+    Bounds occluder_bounds;
     Corners corner_radii;
     Bounds content_mask;
     Hsla color;
@@ -883,6 +884,12 @@ float4 shadow_fragment(ShadowFragmentInput input): SV_TARGET {
                 gaussian(y, shadow.blur_radius) * step;
         y += step;
     }
+
+    // CSS box-shadow semantics: outer shadows are not painted underneath the
+    // casting element, so translucent or fading elements never reveal their own
+    // shadow through their background
+    float occluder_distance = quad_sdf(input.position.xy, shadow.occluder_bounds, shadow.corner_radii);
+    alpha *= saturate(0.5 + occluder_distance);
 
     return input.color * float4(1., 1., 1., alpha);
 }

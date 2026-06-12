@@ -911,6 +911,7 @@ struct Shadow {
     order: u32,
     blur_radius: f32,
     bounds: Bounds,
+    occluder_bounds: Bounds,
     corner_radii: Corners,
     content_mask: Bounds,
     color: Hsla,
@@ -974,6 +975,12 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
         alpha +=  blur * gaussian(y, shadow.blur_radius) * step;
         y += step;
     }
+
+    // CSS box-shadow semantics: outer shadows are not painted underneath the
+    // casting element, so translucent or fading elements never reveal their own
+    // shadow through their background
+    let occluder_distance = quad_sdf(input.position.xy, shadow.occluder_bounds, shadow.corner_radii);
+    alpha *= saturate(0.5 + occluder_distance);
 
     return blend_color(input.color, alpha);
 }

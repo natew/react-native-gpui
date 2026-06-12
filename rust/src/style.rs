@@ -140,8 +140,9 @@ pub struct ElementStyle {
     // Overflow
     pub overflow: Option<String>,
 
-    // Transform
-    pub transform: Option<String>,
+    // Transform: parsed RN transform ops (`[{translateY: 24}, {scale: 0.92}]`),
+    // applied at paint via gpui's element-transform stack (never affects layout)
+    pub transform: Option<Vec<TransformOp>>,
 
     // Cursor
     pub cursor: Option<String>,
@@ -256,7 +257,7 @@ impl ElementStyle {
         s!(font_family, "fontFamily");
         s!(text_align, "textAlign");
         s!(cursor, "cursor");
-        s!(transform, "transform");
+        s.transform = o.get("transform").and_then(parse_transform_ops);
         s!(border_style, "borderStyle");
         s!(box_shadow, "boxShadow");
         s!(background_image, "backgroundImage");
@@ -920,5 +921,89 @@ mod tests {
         assert!((shadows[0].color.h - (240.0 / 360.0)).abs() < 0.001);
         assert!((shadows[0].color.a - 0.08).abs() < 0.001);
         assert!((shadows[1].color.a - 0.05).abs() < 0.001);
+    }
+}
+
+/// One RN transform list entry. Parsed from the array form reanimated and RN both emit:
+/// `transform: [{translateY: 24}, {scale: 0.92}, {rotate: "45deg"}]`. Percent translate
+/// and skew are not supported (silently skipped).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TransformOp {
+    TranslateX(f32),
+    TranslateY(f32),
+    Scale(f32),
+    ScaleX(f32),
+    ScaleY(f32),
+    /// radians, clockwise
+    Rotate(f32),
+}
+
+pub fn parse_transform_ops(value: &Value) -> Option<Vec<TransformOp>> {
+    let items = value.as_array()?;
+    let mut ops = Vec::with_capacity(items.len());
+    for item in items {
+        let obj = item.as_object()?;
+        for (k, v) in obj {
+            let num = v.as_f64().map(|n| n as f32);
+            match (k.as_str(), num) {
+                ("translateX", Some(n)) => ops.push(TransformOp::TranslateX(n)),
+                ("translateY", Some(n)) => ops.push(TransformOp::TranslateY(n)),
+                ("scale", Some(n)) => ops.push(TransformOp::Scale(n)),
+                ("scaleX", Some(n)) => ops.push(TransformOp::ScaleX(n)),
+                ("scaleY", Some(n)) => ops.push(TransformOp::ScaleY(n)),
+                ("rotate" | "rotateZ", _) => {
+                    if let Some(rad) = parse_angle(v) {
+                        ops.push(TransformOp::Rotate(rad));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if ops.is_empty() { None } else { Some(ops) }
+}
+
+fn parse_angle(v: &Value) -> Option<f32> {
+    if let Some(n) = v.as_f64() {
+        return Some(n as f32); // bare number = radians (reanimated convention)
+    }
+    let s = v.as_str()?.trim();
+    if let Some(deg) = s.strip_suffix("deg") {
+        return deg.trim().parse::<f32>().ok().map(f32::to_radians);
+    }
+    if let Some(rad) = s.strip_suffix("rad") {
+        return rad.trim().parse::<f32>().ok();
+    }
+    None
+}
+
+/// Fold transform ops into a gpui matrix around the element's center (RN's default
+/// transform origin), in scaled (device) pixel space. Ops compose with CSS semantics:
+/// the last op in the list applies to the element first. Returns `None` for an
+/// identity result so untransformed nodes skip the transform stack entirely.
+pub fn transform_ops_matrix(
+    ops: &[TransformOp],
+    bounds: gpui::Bounds<gpui::Pixels>,
+    scale_factor: f32,
+) -> Option<gpui::TransformationMatrix> {
+    use gpui::TransformationMatrix;
+    let center = bounds.center().scale(scale_factor);
+    let neg_center = bounds.center().map(|v| v * -1.0).scale(scale_factor);
+    let mut m = TransformationMatrix::unit().translate(center);
+    for op in ops {
+        m = match *op {
+            TransformOp::TranslateX(x) => m.translate(point(px(x), px(0.0)).scale(scale_factor)),
+            TransformOp::TranslateY(y) => m.translate(point(px(0.0), px(y)).scale(scale_factor)),
+            TransformOp::Scale(s) => m.scale(gpui::size(s, s)),
+            TransformOp::ScaleX(s) => m.scale(gpui::size(s, 1.0)),
+            TransformOp::ScaleY(s) => m.scale(gpui::size(1.0, s)),
+            TransformOp::Rotate(rad) => m.rotate(gpui::radians(rad)),
+        };
+    }
+    m = m.translate(neg_center);
+    if m == TransformationMatrix::unit() {
+        None
+    } else {
+        Some(m)
     }
 }

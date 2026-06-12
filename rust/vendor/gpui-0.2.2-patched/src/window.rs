@@ -841,6 +841,7 @@ pub struct Window {
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
+    pub(crate) element_transform: TransformationMatrix,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
@@ -1226,6 +1227,7 @@ impl Window {
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
+            element_transform: TransformationMatrix::unit(),
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
@@ -2491,6 +2493,32 @@ impl Window {
         result
     }
 
+    /// Update the global element transform based on the given matrix, composing with any
+    /// ancestor transform, then restore the previous value afterward. `paint_quad`/
+    /// `paint_shadows`/`paint_glyph`/`paint_emoji`/`paint_image`/`paint_svg` stamp the
+    /// current transform onto their primitives, so wrapping a subtree's paint applies an
+    /// animated translate/scale/rotate to everything it draws on the GPU — no relayout,
+    /// no glyph re-shaping. (`paint_underline` and `paint_path` are not yet transformed.)
+    /// `None` is an immediate pass-through. The matrix operates in scaled (device) pixel
+    /// space, like the sprite transforms.
+    pub fn with_element_transform<R>(
+        &mut self,
+        transform: Option<TransformationMatrix>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint_or_prepaint();
+
+        let Some(transform) = transform else {
+            return f(self);
+        };
+
+        let previous = self.element_transform;
+        self.element_transform = previous.compose(transform);
+        let result = f(self);
+        self.element_transform = previous;
+        result
+    }
+
     /// Perform prepaint on child elements in a "retryable" manner, so that any side effects
     /// of prepaints can be discarded before prepainting again. This is used to support autoscroll
     /// where we need to prepaint children to detect the autoscroll bounds, then adjust the
@@ -2863,9 +2891,11 @@ impl Window {
                 order: 0,
                 blur_radius: shadow.blur_radius.scale(scale_factor),
                 bounds: shadow_bounds.scale(scale_factor),
+                occluder_bounds: bounds.scale(scale_factor),
                 content_mask: content_mask.scale(scale_factor),
                 corner_radii: corner_radii.scale(scale_factor),
                 color: shadow.color.opacity(opacity),
+                transformation: self.element_transform,
             });
         }
     }
@@ -2894,6 +2924,7 @@ impl Window {
             corner_radii: quad.corner_radii.scale(scale_factor),
             border_widths: quad.border_widths.scale(scale_factor),
             border_style: quad.border_style,
+            transformation: self.element_transform,
         });
     }
 
@@ -3036,7 +3067,7 @@ impl Window {
                 content_mask,
                 color: color.opacity(element_opacity),
                 tile,
-                transformation: TransformationMatrix::unit(),
+                transformation: self.element_transform,
             });
         } else if crate::line_trace_enabled() && origin.y.0 < 100.0 && origin.x.0 < 320.0 {
             eprintln!(
@@ -3102,6 +3133,7 @@ impl Window {
                 content_mask,
                 tile,
                 opacity,
+                transformation: self.element_transform,
             });
         }
         Ok(())
@@ -3164,7 +3196,7 @@ impl Window {
             content_mask,
             color: color.opacity(element_opacity),
             tile,
-            transformation,
+            transformation: self.element_transform.compose(transformation),
         });
 
         Ok(())
@@ -3218,6 +3250,7 @@ impl Window {
             corner_radii,
             tile,
             opacity,
+            transformation: self.element_transform,
         });
         Ok(())
     }

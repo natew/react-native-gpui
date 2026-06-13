@@ -11,8 +11,8 @@ use std::rc::Rc;
 use gpui::{
     App, AppContext, Bounds, Context, Entity, InteractiveElement as _, IntoElement, KeyBinding,
     Menu, MenuItem, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, Styled, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, actions, point, px, size,
+    MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, Styled, TitlebarOptions,
+    Window, WindowBounds, WindowOptions, actions, point, px, size,
 };
 use gpui_component::input::{Enter, InputEvent, InputState, Position};
 use gpui_component::theme::{Theme, ThemeMode};
@@ -115,6 +115,36 @@ fn real_key_char(key: &str) -> Option<String> {
         k if k.chars().count() == 1 => Some(k.to_string()),
         _ => None,
     }
+}
+
+fn js_key_for_keystroke(keystroke: &gpui::Keystroke) -> String {
+    if keystroke.key == "enter" || keystroke.key_char.as_deref() == Some("\n") {
+        "Enter".to_string()
+    } else {
+        keystroke
+            .key_char
+            .clone()
+            .unwrap_or_else(|| js_named_key(&keystroke.key))
+    }
+}
+
+fn js_named_key(key: &str) -> String {
+    match key {
+        "escape" => "Escape",
+        "tab" => "Tab",
+        "backspace" => "Backspace",
+        "delete" => "Delete",
+        "up" => "ArrowUp",
+        "down" => "ArrowDown",
+        "left" => "ArrowLeft",
+        "right" => "ArrowRight",
+        "home" => "Home",
+        "end" => "End",
+        "pageup" => "PageUp",
+        "pagedown" => "PageDown",
+        other => other,
+    }
+    .to_string()
 }
 
 // Read the general pasteboard's string (the webviewCopyProof readback). Returns None
@@ -891,6 +921,22 @@ fn collect_layout_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
     for c in &el.children {
         collect_layout_ids(c, out);
     }
+}
+
+fn first_app_key_press_listener(el: &Arc<ReactElement>) -> Option<u64> {
+    let text_owner = matches!(
+        el.element_type.as_str(),
+        "textinput" | "textarea" | "terminal" | "ghostty-terminal"
+    );
+    if !text_owner && el.listens("keyPress") {
+        return Some(el.global_id);
+    }
+    for c in &el.children {
+        if let Some(id) = first_app_key_press_listener(c) {
+            return Some(id);
+        }
+    }
+    None
 }
 
 /// Map gpui's window appearance to the JS color-scheme name the bridge speaks.
@@ -2329,6 +2375,20 @@ fn main() {
                     })
                     .detach();
                 });
+                let content_for_keys = content.clone();
+                cx.intercept_keystrokes(move |event, _window, cx| {
+                    let key = js_key_for_keystroke(&event.keystroke);
+                    let shift = event.keystroke.modifiers.shift;
+                    let control = event.keystroke.modifiers.control;
+                    let alt = event.keystroke.modifiers.alt;
+                    let platform = event.keystroke.modifiers.platform;
+                    let _ = content_for_keys.update(cx, |this, _cx| {
+                        if let Some(id) = first_app_key_press_listener(&this.root) {
+                            bridge::key_press(id, &key, shift, control, alt, platform);
+                        }
+                    });
+                })
+                .detach();
                 // follow the system light/dark setting: gpui delivers an appearance
                 // change whenever macOS toggles theme. push it to JS so tamagui
                 // re-themes live, and emit the current value once so JS matches the
@@ -2928,41 +2988,38 @@ fn main() {
                         }
                     }
                     Incoming::DebugRealKey { key, reply } => {
-                        // dispatch a REAL KeyDown through gpui's actual key dispatch
-                        // (keymap bindings first, then the focused element). This is the
-                        // only probe that surfaces a global binding swallowing a key
-                        // before it reaches the focused element.
-                        let result = window_handle.update(cx, |_root, window, cx| {
-                            let before = crate::bridge::events_emitted_count();
-                            let keystroke = gpui::Keystroke {
-                                modifiers: gpui::Modifiers::default(),
-                                key: key.clone(),
-                                key_char: real_key_char(&key),
-                            };
-                            dispatch_real_input(
-                                window,
-                                gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
-                                    keystroke,
-                                    is_held: false,
-                                }),
-                                cx,
-                            );
-                            let contexts: Vec<String> = window
-                                .context_stack()
-                                .iter()
-                                .map(|c| format!("{c:?}"))
-                                .collect();
-                            (
-                                crate::bridge::events_emitted_count().saturating_sub(before),
-                                contexts,
-                            )
-                        });
-                        match result {
-                            Ok((emitted, contexts)) => {
-                                let _ = reply.send(serde_json::json!({
+                        let reply_after_dispatch = reply.clone();
+                        let key_after_dispatch = key.clone();
+                        let scheduled = window_handle.update(cx, |_root, window, cx| {
+                            // KeyDown can synchronously emit JS events whose handlers update
+                            // React. Run it after the current root update unwinds so the debug
+                            // probe exercises the real dispatch path without re-entering Root.
+                            window.defer(cx, move |window, cx| {
+                                let before = crate::bridge::events_emitted_count();
+                                let keystroke = gpui::Keystroke {
+                                    modifiers: gpui::Modifiers::default(),
+                                    key: key_after_dispatch.clone(),
+                                    key_char: real_key_char(&key_after_dispatch),
+                                };
+                                dispatch_real_input(
+                                    window,
+                                    gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                                        keystroke,
+                                        is_held: false,
+                                    }),
+                                    cx,
+                                );
+                                let contexts: Vec<String> = window
+                                    .context_stack()
+                                    .iter()
+                                    .map(|c| format!("{c:?}"))
+                                    .collect();
+                                let emitted =
+                                    crate::bridge::events_emitted_count().saturating_sub(before);
+                                let _ = reply_after_dispatch.send(serde_json::json!({
                                     "ok": true,
                                     "type": "realKey",
-                                    "key": key,
+                                    "key": key_after_dispatch,
                                     // a key reaching a focused element that forwards it
                                     // emits >=1 host event; 0 = the key was swallowed
                                     // (e.g. by a global binding) before any element saw it.
@@ -2973,8 +3030,16 @@ fn main() {
                                     // context-gated bindings can never fire.
                                     "contextStack": contexts,
                                 }));
-                            }
-                            Err(_) => break,
+                            });
+                        });
+                        if scheduled.is_err() {
+                            let _ = reply.send(serde_json::json!({
+                                "ok": false,
+                                "type": "realKey",
+                                "key": key,
+                                "error": "window update failed",
+                            }));
+                            break;
                         }
                     }
                     Incoming::DebugDispatchAction { name, reply } => {

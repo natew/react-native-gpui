@@ -171,3 +171,44 @@ the casting element's own rect out, so opacity fades never reveal a "shadow unde
 Pixel gates: `conformance:transform`, the shadow-under guard inside `conformance:opacity`.
 `rngpui do key enter` now emits gpui-component's `PressEnter` so `onSubmitEditing` fires
 like a real keystroke.
+
+## Native AppKit controls: `<NativeButton>` / `<NativeTextInput>` (2026-06-13, spike)
+
+Real `NSButton` / `NSTextField` (`NSSecureTextField` when `secureTextEntry`) hole-punched
+through the gpui Metal layer — the macOS-native counterpart to the gpui-drawn `<Button>` /
+`<TextInput>`. `rust/src/elements/native_control.rs` is the whole implementation; TS surface
+is `NativeButton` / `NativeTextInput` in `ts/src/components.tsx` → host types
+`nativebutton` / `nativeinput` (reconciler switch) → `create_element` in `elements/mod.rs`.
+Props reuse existing wire fields: button title rides `text`; input uses
+`value`/`placeholder`/`editable`/`secureTextEntry`. Events come back through the normal
+bridge (`event(id,"press")`, `change_text`/`change`, `submit`, `focus`/`blur`) via a single
+shared target/delegate object that routes by the control's `tag` (= node id).
+
+Non-obvious facts (these cost real debugging — don't relearn them):
+
+- **Native controls sit ABOVE the Metal layer** (`positioned: NSWindowAbove relativeTo:
+  gpui_view`), unlike `<WebView>`/`<SystemView>` which sit BELOW it. Interactive chrome must
+  paint over app content (so its bezel/field isn't occluded by an opaque app background) and
+  takes the real click/keystroke directly — no `hit_passthrough` needed for routing (the
+  control is topmost). The tradeoff: gpui overlays can't paint over a native control, and
+  there's no gpui clip/transform/animation on it (same as WebView). Use for chrome/forms,
+  not dense scroll lists.
+- **The offscreen `rngpui shot` capture does NOT composite native AppKit controls** — their
+  region comes back fully transparent (CGWindowList in-service capture only sees gpui's Metal
+  output + WKWebView, not sibling NSViews). Visual validation MUST be an on-screen
+  `screencapture` of a real launched window. Don't be fooled: the stale packaged
+  `ts/native/rngpui-service` renders an unknown `nativebutton` type as an empty div, so a
+  shot can look like a positioned box with the page-bg color — that's NOT the native control.
+  Force the fresh binary with `RNGPUI_SERVICE=…/target/release/rngpui-service`.
+- **Validate the event round trip with `do tap <native-selector>`**: the `DebugTap` handler
+  routes a tapped native control to `native_control::perform_native_click` (real
+  `performClick:` → target/action → bridge → JS) instead of a gpui synth-tap. Proven via
+  `examples/native-controls.tsx`: each tap bumps a gpui `presses:` counter (which DOES
+  capture), so `do tap native-btn` then `get tree` shows the count climb.
+
+Known gaps (spike follow-ups): appearance is hardcoded Aqua (`set_aqua_appearance`) instead
+of following the app theme; native controls aren't in the AX tree because gpui's
+`RNGPUIAccessibilityView.accessibilityChildren` returns only synthetic children (so VoiceOver
+/ cua-driver can't see them); no gpui-layout measurement of the AppKit intrinsic size, so
+native controls need explicit `style` sizing; Windows/Linux backends are unimplemented (the
+TS API is platform-agnostic; only the per-OS Rust element backend differs).

@@ -913,6 +913,15 @@ fn collect_system_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
     }
 }
 
+fn collect_native_control_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
+    if el.element_type == "nativebutton" || el.element_type == "nativeinput" {
+        out.insert(el.global_id);
+    }
+    for c in &el.children {
+        collect_native_control_ids(c, out);
+    }
+}
+
 /// Collect ids of every node that listens for onLayout, to GC stale dedup state.
 fn collect_layout_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
     if el.listens("layout") {
@@ -1354,6 +1363,13 @@ impl Render for ServiceApp {
             let mut system_ids = HashSet::new();
             collect_system_ids(&self.root, &mut system_ids);
             elements::system::retain_system_views(&system_ids);
+
+            // Parallel lifecycle for native AppKit controls (<NativeButton>/<NativeTextInput>):
+            // GC the NSButton/NSTextField views for any id that left the tree. The views are
+            // created lazily in the element's prepaint, so retaining present ids is all we do.
+            let mut native_control_ids = HashSet::new();
+            collect_native_control_ids(&self.root, &mut native_control_ids);
+            elements::native_control::retain_native_controls(&native_control_ids);
 
             if self.inspector.enabled() {
                 inspector::refresh_snapshot_cache(&self.root);
@@ -3315,7 +3331,18 @@ fn main() {
                             Incoming::DebugTap { x, y, reply } => {
                                 let target = inspector::tap_target_at(&this.root, x, y);
                                 if let Some(target) = target {
-                                    elements::synth_tap(target.id, &target.events, target.bounds, x, y);
+                                    // a native AppKit control (NSButton) takes the real
+                                    // target/action route via performClick:; only fall back
+                                    // to a gpui synth-tap for ordinary gpui nodes.
+                                    if !elements::native_control::perform_native_click(target.id) {
+                                        elements::synth_tap(
+                                            target.id,
+                                            &target.events,
+                                            target.bounds,
+                                            x,
+                                            y,
+                                        );
+                                    }
                                     if target.focusable_input {
                                         this.focused_input = Some(target.id);
                                     }

@@ -478,6 +478,36 @@ export const Button: FC<ButtonProps> = ({ title, onPress, color = "#2f6fed", dis
     );
 };
 
+// ── native AppKit controls ──────────────────────────────────────────
+// Real NSButton / NSTextField hole-punched through the gpui Metal layer (the same
+// native-underlay pattern WebView uses), so they get the genuine macOS bezel, focus ring,
+// accent color, and IME. Tradeoff (shared with WebView): the control tracks layout bounds
+// but is a separate layer, so it doesn't ride gpui's transform/animation stack and isn't
+// clipped by an ancestor's rounded/overflow clip. Best for chrome/forms; for in-content
+// (scrolling lists, animated) use the gpui-drawn <Button>/<TextInput>. Native controls
+// currently need explicit sizing via `style` — gpui can't measure the AppKit intrinsic size.
+// macOS only; on other platforms the element lays out but paints nothing (native backends
+// for Windows/Linux land later).
+
+export interface NativeButtonProps extends AccessibilityProps {
+    title: string;
+    onPress?: (event: GestureResponderEvent) => void;
+    disabled?: boolean;
+    style?: StyleProp<ViewStyle>;
+}
+/** `<NativeButton>` — a real AppKit `NSButton`. See note above on the chrome/forms tradeoff. */
+export const NativeButton: FC<NativeButtonProps> = ({ title, ...rest }) =>
+    createElement("NativeButton" as any, {
+        ...rest,
+        title,
+        accessibilityRole: rest.accessibilityRole ?? "button",
+        accessibilityLabel: rest.accessibilityLabel ?? title,
+    });
+
+/** `<NativeTextInput>` — a real AppKit `NSTextField`/`NSSecureTextField`. See note above. */
+export const NativeTextInput: FC<TextInputProps> = (props) =>
+    createElement("NativeTextInput" as any, props);
+
 // ── layout passthroughs (no insets / keyboard on desktop) ───────────
 export const SafeAreaView: FC<ViewProps> = (props) => createElement(View, props);
 export interface KeyboardAvoidingViewProps extends ViewProps {

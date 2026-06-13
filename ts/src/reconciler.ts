@@ -928,6 +928,24 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
             if (props.value != null) node.value = String(props.value);
             else if (props.defaultValue != null) node.value = String(props.defaultValue);
             break;
+        case "NativeButton":
+            // real AppKit NSButton underlay. `text` carries the button title (the host
+            // overloads it the same way it does for input placeholders); `editable=false`
+            // carries the disabled state.
+            node.type = "nativebutton";
+            node.text = props.title != null ? String(props.title) : "";
+            if (props.disabled === true) node.editable = false;
+            break;
+        case "NativeTextInput":
+            // real AppKit NSTextField/NSSecureTextField underlay. Same wire fields as the
+            // gpui-drawn textinput so the host parses them identically.
+            node.type = "nativeinput";
+            node.placeholder = (props.placeholder as string) ?? "";
+            if (props.editable === false) node.editable = false;
+            if (props.secureTextEntry === true) node.secureTextEntry = true;
+            if (props.value != null) node.value = String(props.value);
+            else if (props.defaultValue != null) node.value = String(props.defaultValue);
+            break;
         case "Image":
             node.type = "image";
             node.src = imageSource(props.source) ?? (props.src as string);
@@ -1217,6 +1235,22 @@ const hostConfig: any = {
         textInstance.text = next;
         // text has no cache of its own; its serialized form lives in its parent.
         markSerializeDirty(textInstance.parent);
+    },
+    // React sets the ContentReset flag (and calls this) when a host node that
+    // held inline string content (shouldSetTextContent → true, so the text lives
+    // in props.children rather than child TextInstances) is about to receive
+    // element/child mutations instead. Clear the inline string so it doesn't leak
+    // through the props.children fallback in serialize(). REQUIRED: without it
+    // React invokes an undefined host-config method mid-commit
+    // ("undefined is not a function"), which tears down the tree and blanks the
+    // window once dynamic content toggles between text and elements.
+    resetTextContent(instance: Instance) {
+        const children = instance.props?.children;
+        if (typeof children === "string" || typeof children === "number") {
+            instance.props = { ...instance.props, children: undefined };
+            invalidateLayout(instance);
+            markSerializeDirty(instance);
+        }
     },
     finalizeInitialChildren: () => false,
     shouldSetTextContent: (type: string, props: Record<string, unknown>) =>

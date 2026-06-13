@@ -1,6 +1,7 @@
 mod div;
 mod image;
 pub mod input;
+pub mod native_control;
 mod svg;
 pub mod system;
 mod terminal;
@@ -16,6 +17,7 @@ pub use div::{
 };
 pub use image::ReactImageElement;
 pub use input::ReactInputElement;
+pub use native_control::ReactNativeControlElement;
 pub use svg::ReactSvgElement;
 pub use system::ReactSystemElement;
 pub use terminal::ReactGhosttyTerminalElement;
@@ -289,6 +291,9 @@ pub fn create_element(element: Arc<ReactElement>, window_id: u64) -> AnyElement 
         }
         "textinput" | "textarea" => {
             ReactInputElement::new(element, window_id, None).into_any_element()
+        }
+        "nativebutton" | "nativeinput" => {
+            ReactNativeControlElement::new(element).into_any_element()
         }
         _ => ReactDivElement::new(element, window_id).into_element(),
     }

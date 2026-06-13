@@ -98,6 +98,13 @@ mod imp {
         record(x, y, w, h, true);
     }
 
+    /// A native AppKit control (`NSButton`/`NSTextField`) underlay. Same passthrough
+    /// semantics as a webview rect: the control sits below the Metal layer, so the real
+    /// click/keystroke must fall through to it (unless a gpui surface paints on top).
+    pub fn record_native_control(x: f64, y: f64, w: f64, h: f64) {
+        record(x, y, w, h, true);
+    }
+
     pub fn record_occluder(x: f64, y: f64, w: f64, h: f64) {
         record(x, y, w, h, false);
     }
@@ -187,12 +194,16 @@ mod imp {
 }
 
 #[cfg(target_os = "macos")]
-pub use imp::{begin_frame, record_occluder, record_webview, set_input_grab};
+pub use imp::{
+    begin_frame, record_native_control, record_occluder, record_webview, set_input_grab,
+};
 
 #[cfg(not(target_os = "macos"))]
 pub fn begin_frame() {}
 #[cfg(not(target_os = "macos"))]
 pub fn record_webview(_x: f64, _y: f64, _w: f64, _h: f64) {}
+#[cfg(not(target_os = "macos"))]
+pub fn record_native_control(_x: f64, _y: f64, _w: f64, _h: f64) {}
 #[cfg(not(target_os = "macos"))]
 pub fn record_occluder(_x: f64, _y: f64, _w: f64, _h: f64) {}
 #[cfg(not(target_os = "macos"))]

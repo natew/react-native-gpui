@@ -28,7 +28,7 @@ use gpui::{
     LayoutId, Pixels, Window,
 };
 
-use crate::elements::{ReactElement, report_layout};
+use crate::elements::{report_layout, ReactElement};
 
 #[cfg(target_os = "macos")]
 use std::cell::RefCell;
@@ -48,7 +48,7 @@ use cocoa::appkit::{
     NSVisualEffectState,
 };
 #[cfg(target_os = "macos")]
-use cocoa::base::{NO, YES, id, nil};
+use cocoa::base::{id, nil, NO, YES};
 #[cfg(target_os = "macos")]
 use cocoa::foundation::{NSPoint, NSRect, NSSize};
 #[cfg(target_os = "macos")]
@@ -113,6 +113,8 @@ struct SystemViewStyle {
     corner_clip: SystemCornerClip,
     tint: Option<(f32, f32, f32, f32)>,
     shadow: Option<SystemShadow>,
+    edge_fade: Option<f32>,
+    top_fade_start: Option<f32>,
 }
 
 // The native surface kind to back this SystemView with, resolved from the `material` +
@@ -347,31 +349,33 @@ fn system_view_style(element: &ReactElement) -> SystemViewStyle {
             (r as f32, g as f32, b as f32, a as f32)
         }),
         shadow: system_shadow_style(element, corner_clip),
+        edge_fade: element
+            .system_edge_fade
+            .map(|v| v.clamp(0.0, 0.5))
+            .filter(|v| *v > 0.0),
+        top_fade_start: element.system_top_fade_start.map(|v| v.clamp(0.0, 1.0)),
     }
 }
 
-// Create the surface view for an id from the resolved SystemSurface:
-//   - Glass  → NSGlassEffectView (macOS 26+) with the i64 `variant`; if the class is
-//     missing at runtime, builds the NSVisualEffectView `fallback` instead.
-//   - Effect → NSVisualEffectView with the semantic material.
-//   - Plain  → a plain transparent NSView (so a tint-only / shadow-only SystemView
-//     still has a layer to clip + host the tint).
-// Layer-backed + transparent everywhere it doesn't draw.
+// Create a maskable host view for a SystemView. The AppKit blur/glass view is a child,
+// not the host itself: NSGlassEffectView/NSVisualEffectView are compositor-backed, and
+// their own layer masks do not reliably fade the material. A plain transparent NSView
+// host gives us one normal layer for corner clipping, alpha masks, and tint overlays.
 #[cfg(target_os = "macos")]
 unsafe fn create_surface_view(surface: SystemSurface) -> id {
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0));
 
+    let host: id = msg_send![class!(NSView), alloc];
+    let host: id = msg_send![host, initWithFrame: frame];
+    unsafe {
+        configure_transparent_view(host);
+    }
+    let _: () = msg_send![host, setAutoresizesSubviews: YES];
+
     match surface {
-        SystemSurface::Plain => {
-            let view: id = msg_send![class!(NSView), alloc];
-            let view: id = msg_send![view, initWithFrame: frame];
-            unsafe {
-                configure_transparent_view(view);
-            }
-            view
-        }
+        SystemSurface::Plain => {}
         SystemSurface::Glass { variant, fallback } => {
-            if let Some(class) = Class::get("NSGlassEffectView") {
+            let child = if let Some(class) = Class::get("NSGlassEffectView") {
                 let glass: id = msg_send![class, alloc];
                 let glass: id = msg_send![glass, initWithFrame: frame];
                 let _: () = msg_send![glass, setWantsLayer: YES];
@@ -381,10 +385,24 @@ unsafe fn create_surface_view(surface: SystemSurface) -> id {
                 glass
             } else {
                 unsafe { create_effect_view(fallback) }
+            };
+            if child != nil {
+                unsafe {
+                    configure_surface_child(host, child);
+                }
             }
         }
-        SystemSurface::Effect(material) => unsafe { create_effect_view(material) },
+        SystemSurface::Effect(material) => {
+            let child = unsafe { create_effect_view(material) };
+            if child != nil {
+                unsafe {
+                    configure_surface_child(host, child);
+                }
+            }
+        }
     }
+
+    host
 }
 
 // A configured NSVisualEffectView: BehindWindow blurs the desktop/windows behind the
@@ -400,6 +418,205 @@ unsafe fn create_effect_view(material: NSVisualEffectMaterial) -> id {
     let _: () = msg_send![visual, setMaterial: material];
     let _: () = msg_send![visual, setState: NSVisualEffectState::Active];
     visual
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn configure_surface_child(host: id, child: id) {
+    if host == nil || child == nil {
+        return;
+    }
+    let _: () = msg_send![child, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
+    let bounds: NSRect = msg_send![host, bounds];
+    let _: () = msg_send![child, setFrame: bounds];
+    let _: () = msg_send![host, addSubview: child];
+    let _: () = msg_send![child, release];
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn sync_surface_children_frame(host: id) {
+    if host == nil {
+        return;
+    }
+    let bounds: NSRect = msg_send![host, bounds];
+    let subviews: id = msg_send![host, subviews];
+    let count: usize = msg_send![subviews, count];
+    for index in 0..count {
+        let child: id = msg_send![subviews, objectAtIndex: index];
+        if child != nil {
+            let _: () = msg_send![child, setFrame: bounds];
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn apply_visual_effect_mask_image(host: id, style: &SystemViewStyle) {
+    if host == nil {
+        return;
+    }
+    let bounds: NSRect = msg_send![host, bounds];
+    let needs_mask = style.corner_clip.radius > 0.0
+        || style.edge_fade.is_some()
+        || style.top_fade_start.is_some();
+    let mask = if needs_mask {
+        unsafe {
+            create_visual_effect_mask_image(
+                bounds.size.width,
+                bounds.size.height,
+                style.corner_clip.radius,
+                style.edge_fade,
+                style.top_fade_start,
+            )
+        }
+    } else {
+        nil
+    };
+
+    let selector = Sel::register("setMaskImage:");
+    let subviews: id = msg_send![host, subviews];
+    let count: usize = msg_send![subviews, count];
+    for index in 0..count {
+        let child: id = msg_send![subviews, objectAtIndex: index];
+        if child == nil {
+            continue;
+        }
+        let responds: bool = msg_send![child, respondsToSelector: selector];
+        if responds {
+            let _: () = msg_send![child, setMaskImage: mask];
+        }
+    }
+
+    if mask != nil {
+        let _: () = msg_send![mask, release];
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn create_visual_effect_mask_image(
+    width: f64,
+    height: f64,
+    radius: f32,
+    edge_fade: Option<f32>,
+    top_fade_start: Option<f32>,
+) -> id {
+    let width = width.max(1.0).ceil() as usize;
+    let height = height.max(1.0).ceil() as usize;
+    let bytes_per_row = width * 4;
+    let color_space: id =
+        msg_send![class!(NSString), stringWithUTF8String: c"NSDeviceRGBColorSpace".as_ptr()];
+    let planes: *mut *mut u8 = std::ptr::null_mut();
+    let rep: id = msg_send![class!(NSBitmapImageRep), alloc];
+    let rep: id = msg_send![
+        rep,
+        initWithBitmapDataPlanes: planes
+        pixelsWide: width
+        pixelsHigh: height
+        bitsPerSample: 8usize
+        samplesPerPixel: 4usize
+        hasAlpha: YES
+        isPlanar: NO
+        colorSpaceName: color_space
+        bytesPerRow: bytes_per_row
+        bitsPerPixel: 32usize
+    ];
+    if rep == nil {
+        return nil;
+    }
+
+    let data: *mut u8 = msg_send![rep, bitmapData];
+    if data.is_null() {
+        let _: () = msg_send![rep, release];
+        return nil;
+    }
+
+    let width_f = width as f64;
+    let height_f = height as f64;
+    let radius = f64::from(radius).clamp(0.0, width_f.min(height_f) * 0.5);
+    let edge = edge_fade.map(|v| f64::from(v.clamp(0.0, 0.5)));
+    let top = top_fade_start.map(|v| f64::from(v.clamp(0.0, 1.0)));
+
+    for row in 0..height {
+        let y_top = if height <= 1 {
+            1.0
+        } else {
+            row as f64 / (height - 1) as f64
+        };
+        let top_alpha = top
+            .map(|start| smoothstep(0.0, start, y_top))
+            .unwrap_or(1.0);
+        for col in 0..width {
+            let x_norm = if width <= 1 {
+                0.5
+            } else {
+                col as f64 / (width - 1) as f64
+            };
+            let edge_alpha = edge
+                .map(|fade| {
+                    smoothstep(0.0, fade, x_norm) * (1.0 - smoothstep(1.0 - fade, 1.0, x_norm))
+                })
+                .unwrap_or(1.0);
+            let corner_alpha = rounded_rect_alpha(
+                col as f64 + 0.5,
+                row as f64 + 0.5,
+                width_f,
+                height_f,
+                radius,
+            );
+            let alpha = (top_alpha * edge_alpha * corner_alpha * 255.0)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+            let offset = row * bytes_per_row + col * 4;
+            unsafe {
+                *data.add(offset) = 255;
+                *data.add(offset + 1) = 255;
+                *data.add(offset + 2) = 255;
+                *data.add(offset + 3) = alpha;
+            }
+        }
+    }
+
+    let image: id = msg_send![class!(NSImage), alloc];
+    let image: id = msg_send![image, initWithSize: NSSize::new(width_f, height_f)];
+    if image == nil {
+        let _: () = msg_send![rep, release];
+        return nil;
+    }
+    let _: () = msg_send![image, addRepresentation: rep];
+    let _: () = msg_send![rep, release];
+    image
+}
+
+#[cfg(target_os = "macos")]
+fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
+    if (edge1 - edge0).abs() <= f64::EPSILON {
+        return if x >= edge1 { 1.0 } else { 0.0 };
+    }
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+#[cfg(target_os = "macos")]
+fn rounded_rect_alpha(x: f64, y: f64, width: f64, height: f64, radius: f64) -> f64 {
+    if radius <= 0.0 {
+        return 1.0;
+    }
+    let cx = if x < radius {
+        radius
+    } else if x > width - radius {
+        width - radius
+    } else {
+        x
+    };
+    let cy = if y < radius {
+        radius
+    } else if y > height - radius {
+        height - radius
+    } else {
+        y
+    };
+    let dx = x - cx;
+    let dy = y - cy;
+    let dist = (dx * dx + dy * dy).sqrt();
+    (radius + 0.75 - dist).clamp(0.0, 1.0)
 }
 
 // Send a private/public `set<Key>:`-style i64 setter if the view responds (used for
@@ -610,9 +827,13 @@ unsafe fn apply_layer_corner_clip(layer: id, clip: SystemCornerClip) {
 unsafe fn apply_surface_style(id: u64, view: id, style: &SystemViewStyle) {
     let clip = style.corner_clip;
     let _: () = msg_send![view, setWantsLayer: YES];
+    unsafe {
+        sync_surface_children_frame(view);
+    }
     let layer: id = msg_send![view, layer];
     unsafe {
         apply_layer_corner_clip(layer, clip);
+        apply_visual_effect_mask_image(view, style);
     }
 
     match style.tint {
@@ -643,6 +864,86 @@ unsafe fn apply_surface_style(id: u64, view: id, style: &SystemViewStyle) {
             });
         }
     }
+
+    unsafe {
+        apply_fade_mask(layer, style.edge_fade, style.top_fade_start);
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn apply_fade_mask(layer: id, edge_fade: Option<f32>, top_fade_start: Option<f32>) {
+    if layer == nil {
+        return;
+    }
+    if let Some(start) = top_fade_start {
+        unsafe {
+            apply_top_fade_mask(layer, f64::from(start.clamp(0.0, 1.0)));
+        }
+        return;
+    }
+    let Some(edge_fade) = edge_fade else {
+        let _: () = msg_send![layer, setMask: nil];
+        return;
+    };
+    let edge = f64::from(edge_fade.clamp(0.0, 0.5));
+    if edge <= 0.0 {
+        let _: () = msg_send![layer, setMask: nil];
+        return;
+    }
+
+    let mask: id = msg_send![class!(CAGradientLayer), layer];
+    let bounds: NSRect = msg_send![layer, bounds];
+    let _: () = msg_send![mask, setFrame: bounds];
+    let _: () = msg_send![mask, setStartPoint: NSPoint::new(0.0, 0.5)];
+    let _: () = msg_send![mask, setEndPoint: NSPoint::new(1.0, 0.5)];
+
+    let transparent: id = msg_send![class!(NSColor), colorWithSRGBRed: 1.0f64 green: 1.0f64 blue: 1.0f64 alpha: 0.0f64];
+    let opaque: id = msg_send![class!(NSColor), colorWithSRGBRed: 1.0f64 green: 1.0f64 blue: 1.0f64 alpha: 1.0f64];
+    let transparent_cg: id = msg_send![transparent, CGColor];
+    let opaque_cg: id = msg_send![opaque, CGColor];
+    let colors = [transparent_cg, opaque_cg, opaque_cg, transparent_cg];
+    let colors_array: id =
+        msg_send![class!(NSArray), arrayWithObjects: colors.as_ptr() count: colors.len()];
+
+    let left: id = msg_send![class!(NSNumber), numberWithDouble: edge];
+    let right: id = msg_send![class!(NSNumber), numberWithDouble: 1.0f64 - edge];
+    let zero: id = msg_send![class!(NSNumber), numberWithDouble: 0.0f64];
+    let one: id = msg_send![class!(NSNumber), numberWithDouble: 1.0f64];
+    let locations = [zero, left, right, one];
+    let locations_array: id =
+        msg_send![class!(NSArray), arrayWithObjects: locations.as_ptr() count: locations.len()];
+
+    let _: () = msg_send![mask, setColors: colors_array];
+    let _: () = msg_send![mask, setLocations: locations_array];
+    let _: () = msg_send![layer, setMask: mask];
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn apply_top_fade_mask(layer: id, start: f64) {
+    let mask: id = msg_send![class!(CAGradientLayer), layer];
+    let bounds: NSRect = msg_send![layer, bounds];
+    let _: () = msg_send![mask, setFrame: bounds];
+    let _: () = msg_send![mask, setStartPoint: NSPoint::new(0.5, 0.0)];
+    let _: () = msg_send![mask, setEndPoint: NSPoint::new(0.5, 1.0)];
+
+    let transparent: id = msg_send![class!(NSColor), colorWithSRGBRed: 1.0f64 green: 1.0f64 blue: 1.0f64 alpha: 0.0f64];
+    let opaque: id = msg_send![class!(NSColor), colorWithSRGBRed: 1.0f64 green: 1.0f64 blue: 1.0f64 alpha: 1.0f64];
+    let transparent_cg: id = msg_send![transparent, CGColor];
+    let opaque_cg: id = msg_send![opaque, CGColor];
+    let colors = [transparent_cg, opaque_cg, opaque_cg];
+    let colors_array: id =
+        msg_send![class!(NSArray), arrayWithObjects: colors.as_ptr() count: colors.len()];
+
+    let zero: id = msg_send![class!(NSNumber), numberWithDouble: 0.0f64];
+    let fade: id = msg_send![class!(NSNumber), numberWithDouble: start];
+    let one: id = msg_send![class!(NSNumber), numberWithDouble: 1.0f64];
+    let locations = [zero, fade, one];
+    let locations_array: id =
+        msg_send![class!(NSArray), arrayWithObjects: locations.as_ptr() count: locations.len()];
+
+    let _: () = msg_send![mask, setColors: colors_array];
+    let _: () = msg_send![mask, setLocations: locations_array];
+    let _: () = msg_send![layer, setMask: mask];
 }
 
 // Drive the shadow decor view from the resolved shadow. Like the webview decor, split
@@ -1084,6 +1385,8 @@ mod tests {
             system_glass_variant: None,
             system_tint: None,
             system_shadow: shadow,
+            system_edge_fade: None,
+            system_top_fade_start: None,
             value: None,
             secure_text_entry: false,
             editable: true,

@@ -814,6 +814,8 @@ mod tests {
             system_glass_variant: None,
             system_tint: None,
             system_shadow: None,
+            system_edge_fade: None,
+            system_top_fade_start: None,
             value: None,
             secure_text_entry: false,
             editable: true,

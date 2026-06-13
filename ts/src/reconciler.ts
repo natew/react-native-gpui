@@ -728,6 +728,14 @@ function boolProp(props: Record<string, unknown>, ...names: string[]): boolean |
     return undefined;
 }
 
+function numberProp(props: Record<string, unknown>, ...names: string[]): number | undefined {
+    for (const name of names) {
+        const value = props[name];
+        if (typeof value === "number" && Number.isFinite(value)) return value;
+    }
+    return undefined;
+}
+
 function accessibilityValueText(value: unknown): string | undefined {
     if (typeof value === "string" || typeof value === "number") return String(value);
     if (!value || typeof value !== "object") return undefined;
@@ -946,6 +954,10 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
             }
             const shadow = normalizeSystemShadow(props.shadow);
             if (shadow) node.systemShadow = shadow;
+            const edgeFade = numberProp(props, "edgeFade");
+            if (edgeFade && edgeFade > 0) node.systemEdgeFade = edgeFade;
+            const topFadeStart = numberProp(props, "topFadeStart");
+            if (topFadeStart != null) node.systemTopFadeStart = topFadeStart;
             break;
         }
         case "GhosttyTerminal": {

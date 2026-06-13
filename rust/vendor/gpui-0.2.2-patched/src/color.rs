@@ -658,10 +658,10 @@ pub(crate) enum BackgroundTag {
     Solid = 0,
     LinearGradient = 1,
     PatternSlash = 2,
-    /// Procedural animated smoke (FBM noise wisps drifting upward, fading out).
+    /// procedural animated smoke/scrim (fbm noise softly modulates alpha).
     /// `gradient_angle_or_pattern_height` carries the animation TIME in seconds —
     /// the painter stamps it per frame, so no renderer uniform plumbing is needed.
-    /// colors[0] = dense wisp color, colors[1] = faded wisp color.
+    /// colors[0] = dense lower scrim color, colors[1] = faded upper scrim color.
     Smoke = 3,
 }
 
@@ -755,8 +755,9 @@ pub fn pattern_slash(color: Hsla, width: f32, interval: f32) -> Background {
     }
 }
 
-/// Creates a procedural animated smoke background — subtle FBM wisps drifting
-/// upward and fading, alpha-composited (never opaque). The painter must stamp the
+/// creates a procedural animated smoke/scrim background — a bottom-heavy
+/// alpha gradient with subtle fbm motion, alpha-composited (never opaque).
+/// the painter must stamp the
 /// per-frame time into `gradient_angle_or_pattern_height` (see `Background::with_time`)
 /// and keep the window repainting while one is visible.
 pub fn smoke_background(

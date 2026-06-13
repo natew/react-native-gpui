@@ -50,6 +50,10 @@ export type SerializedNode = {
         offsetY?: number;
         opacity?: number;
     };
+    /** `<SystemView>` horizontal native alpha fade at the left/right edges, 0..0.5 */
+    systemEdgeFade?: number;
+    /** `<SystemView>` vertical native alpha fade start, 0..1 from top to bottom */
+    systemTopFadeStart?: number;
     events?: string[];
     children?: SerializedNode[];
     /** inline styled runs for `<Text>` with nested `<Text>` children */

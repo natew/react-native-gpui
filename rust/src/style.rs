@@ -512,7 +512,7 @@ impl ElementStyle {
             };
         }
 
-        // Background — `backgroundImage` wins (CSS linear-gradient, or the rngpui
+        // background — `backgroundImage` wins (CSS linear-gradient, or the rngpui
         // `smoke(dense, faded)` animated effect); else a solid color.
         if let Some(smoke) = parse_smoke(self.background_image.as_deref()) {
             style.background = Some(smoke.into());
@@ -674,9 +674,9 @@ fn parse_linear_gradient(input: Option<&str>) -> Option<gpui::Background> {
     ))
 }
 
-/// `smoke(<dense-color>, <faded-color>)` — rngpui's procedural animated smoke
-/// background (gpui Background tag Smoke). Subtle FBM wisps drifting upward and
-/// fading; div paint stamps the per-frame time and keeps the window repainting.
+/// `smoke(<dense-color>, <faded-color>)` — rngpui's procedural animated
+/// smoke/scrim background (gpui Background tag Smoke). div paint stamps the
+/// per-frame time and keeps the window repainting.
 fn parse_smoke(input: Option<&str>) -> Option<gpui::Background> {
     let s = input?.trim();
     let inner = s.strip_prefix("smoke(")?.strip_suffix(')')?;

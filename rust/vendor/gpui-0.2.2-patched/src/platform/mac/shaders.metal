@@ -1174,7 +1174,7 @@ GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid,
   if (tag == 0 || tag == 2) {
     out.solid = hsla_to_rgba(solid);
   } else if (tag == 3) {
-    // smoke: dense + faded wisp colors, plain srgb
+    // smoke: dense + faded scrim colors, plain srgb
     out.color0 = hsla_to_rgba(color0);
     out.color1 = hsla_to_rgba(color1);
   } else if (tag == 1) {
@@ -1193,7 +1193,7 @@ GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid,
   return out;
 }
 
-// --- procedural smoke (Background tag 3) -----------------------------------
+// --- procedural smoke/scrim (Background tag 3) ------------------------------
 // value-noise FBM; cheap, no textures. time rides in
 // background.gradient_angle_or_pattern_height (stamped per frame at paint).
 float smoke_hash(float2 p) {
@@ -1298,33 +1298,55 @@ float4 fill_color(Background background,
         break;
     }
     case 3: {
-      // layered undulating smoke, drifting upward and fading as it rises.
+      // bottom-anchored black-to-transparent shadow tongues. these are not smoke
+      // blobs: every tongue starts below the bottom edge, is darkest at its base,
+      // fades upward, and only moves by slow left/right bending.
       float t = background.gradient_angle_or_pattern_height;
       float2 size = float2(bounds.size.width, bounds.size.height);
-      float2 uv = (position - float2(bounds.origin.x, bounds.origin.y)) / max(size.y, 1.0);
+      float2 local = position - float2(bounds.origin.x, bounds.origin.y);
+      float2 uv = local / max(size, float2(1.0, 1.0));
+      float aspect = max(size.x / max(size.y, 1.0), 0.01);
+      float x = uv.x * aspect;
+      float y = clamp(uv.y, 0.0, 1.0);
+      float tongue_shade = 0.0;
 
-      // two counter-drifting layers; sampling y+t makes features rise.
-      // domain-warp each layer so the wisps undulate instead of scrolling.
-      float2 p1 = uv * 1.9 + float2(0.0, t * 0.14);
-      float2 warp1 = float2(smoke_fbm(p1 * 1.6 + float2(t * 0.045, 0.0)),
-                            smoke_fbm(p1 * 1.6 + float2(5.2, t * 0.038))) - 0.5;
-      float layer1 = smoke_fbm(p1 + warp1 * 1.2);
+      for (int i = 0; i < 24; i++) {
+        float fi = float(i);
+        float r0 = smoke_hash(float2(fi * 5.17, 1.3));
+        float r1 = smoke_hash(float2(fi * 7.91, 4.7));
+        float r2 = smoke_hash(float2(fi * 3.31, 9.2));
+        float r3 = smoke_hash(float2(fi * 11.4, 2.6));
 
-      float2 p2 = uv * 3.4 + float2(3.7, t * 0.22);
-      float2 warp2 = float2(smoke_fbm(p2 * 1.2 + float2(0.0, t * 0.03)),
-                            smoke_fbm(p2 * 1.2 + float2(9.1, t * 0.05))) - 0.5;
-      float layer2 = smoke_fbm(p2 + warp2 * 0.9);
+        float base_y = 1.06 + r0 * 0.10;
+        float height = 0.86 + r1 * 0.82;
+        float rise = (base_y - y) / height;
+        float in_range = step(0.0, rise) * step(rise, 1.0);
+        float vertical = pow(1.0 - smoothstep(0.0, 0.96, rise), 1.05);
 
-      float density = layer1 * 0.66 + layer2 * 0.34;
-      // carve wisps out of the field — wide soft band so the body of the smoke reads
-      float wisp = smoothstep(0.30, 0.86, density);
-      // rise-and-fade: strongest near the bottom, dissolving toward the top
-      float vertical = mix(0.12, 1.0, smoothstep(0.0, 1.0, (position.y - bounds.origin.y) / max(size.y, 1.0)));
+        float center = (r0 * 1.60 - 0.30) * aspect;
+        center += sin(t * (0.155 + r1 * 0.055) + rise * (3.4 + r2 * 2.2) + r3 * 6.28318) * (0.120 + r2 * 0.115);
+        center += sin(t * (0.074 + r3 * 0.034) + rise * (7.0 + r1 * 3.2) + fi) * (0.052 + r1 * 0.050);
 
-      float4 dense = color0;
-      float4 faded = color1;
-      color = mix(faded, dense, wisp);
-      color.a *= wisp * vertical;
+        float width = (0.115 + r3 * 0.165) * (1.0 - rise * (0.55 + r2 * 0.13));
+        width = max(width, 0.030);
+        float dx = abs((x - center) / width);
+        float side = smoothstep(1.0, 0.08, dx);
+        side = pow(side, 1.25);
+
+        float top = smoothstep(0.36, 0.90, rise);
+        float wind_alpha = 0.64 + 0.36 * sin(t * (0.180 + r2 * 0.060) + rise * (9.0 + r1 * 4.0) + fi * 2.17);
+        float tongue = side * vertical * in_range * mix(1.0, wind_alpha, top);
+        float center_u = center / max(aspect, 0.01);
+        float edge_taper = smoothstep(-0.34, 0.16, center_u) * (1.0 - smoothstep(0.84, 1.34, center_u));
+        tongue_shade += tongue * edge_taper * (0.125 + r2 * 0.115);
+      }
+
+      float base_edge = 0.74 + 0.26 * smoothstep(0.00, 0.34, uv.x) * (1.0 - smoothstep(0.66, 1.0, uv.x));
+      float upper_field_mask = smoothstep(0.18, 0.38, y);
+      float base_ramp = smoothstep(0.02, 0.62, y) * base_edge;
+      float shade = clamp(max(base_ramp, tongue_shade * upper_field_mask), 0.0, 1.0);
+
+      color = mix(color1, color0, shade);
       break;
     }
   }

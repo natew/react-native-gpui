@@ -256,6 +256,15 @@ fn parse_json_tree(
         .and_then(|v| v.as_str())
         .and_then(crate::style::parse_css_color);
     let system_shadow = obj.get("systemShadow").and_then(parse_system_shadow);
+    let system_edge_fade = obj
+        .get("systemEdgeFade")
+        .and_then(|v| v.as_f64())
+        .map(|v| (v as f32).clamp(0.0, 0.5))
+        .filter(|v| *v > 0.0);
+    let system_top_fade_start = obj
+        .get("systemTopFadeStart")
+        .and_then(|v| v.as_f64())
+        .map(|v| (v as f32).clamp(0.0, 1.0));
     let value = obj
         .get("value")
         .and_then(|v| v.as_str())
@@ -374,6 +383,8 @@ fn parse_json_tree(
         system_glass_variant,
         system_tint,
         system_shadow,
+        system_edge_fade,
+        system_top_fade_start,
         value,
         secure_text_entry,
         editable,
@@ -1457,6 +1468,8 @@ fn fallback_root() -> Arc<ReactElement> {
         system_glass_variant: None,
         system_tint: None,
         system_shadow: None,
+        system_edge_fade: None,
+        system_top_fade_start: None,
         value: None,
         secure_text_entry: false,
         editable: true,

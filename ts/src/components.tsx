@@ -201,6 +201,10 @@ export interface SystemViewProps extends AccessibilityProps {
     tint?: ColorValue;
     /** optional native outer drop shadow (spills outside the rounded rect). */
     shadow?: SystemViewShadow;
+    /** horizontal native alpha fade at the left/right edges, as a 0..0.5 width fraction. */
+    edgeFade?: number;
+    /** vertical native alpha fade: full opacity below this 0..1 height fraction, transparent at top. */
+    topFadeStart?: number;
     onLayout?: (event: LayoutChangeEvent) => void;
 }
 

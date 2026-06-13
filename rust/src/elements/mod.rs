@@ -140,6 +140,10 @@ pub struct ReactElement {
     pub system_tint: Option<Hsla>,
     /// optional native outer drop shadow for `<SystemView>`, drawn below the surface.
     pub system_shadow: Option<SystemShadowSpec>,
+    /// optional horizontal alpha fade applied to the native `<SystemView>` surface.
+    pub system_edge_fade: Option<f32>,
+    /// optional vertical alpha fade start applied to the native `<SystemView>` surface.
+    pub system_top_fade_start: Option<f32>,
     /// text input value from react props.
     pub value: Option<String>,
     /// whether text input values render as password/secret text.

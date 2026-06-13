@@ -1298,53 +1298,48 @@ float4 fill_color(Background background,
         break;
     }
     case 3: {
-      // bottom-anchored black-to-transparent shadow tongues. these are not smoke
-      // blobs: every tongue starts below the bottom edge, is darkest at its base,
-      // fades upward, and only moves by slow left/right bending.
+      // bottom-anchored black shadow field. this intentionally avoids particles:
+      // each contribution is a wide vertical curtain connected to the bottom,
+      // drifting only left/right and feathering upward into transparency.
       float t = background.gradient_angle_or_pattern_height;
       float2 size = float2(bounds.size.width, bounds.size.height);
       float2 local = position - float2(bounds.origin.x, bounds.origin.y);
       float2 uv = local / max(size, float2(1.0, 1.0));
-      float aspect = max(size.x / max(size.y, 1.0), 0.01);
-      float x = uv.x * aspect;
+      float x = clamp(uv.x, 0.0, 1.0);
       float y = clamp(uv.y, 0.0, 1.0);
-      float tongue_shade = 0.0;
+      float base_reach = clamp(background.colors[0].percentage, 0.05, 0.98);
+      float top_clear_reach = clamp(background.colors[1].percentage, 0.02, 0.95);
+      float curtain_shade = 0.0;
 
-      for (int i = 0; i < 24; i++) {
+      for (int i = 0; i < 22; i++) {
         float fi = float(i);
         float r0 = smoke_hash(float2(fi * 5.17, 1.3));
         float r1 = smoke_hash(float2(fi * 7.91, 4.7));
         float r2 = smoke_hash(float2(fi * 3.31, 9.2));
         float r3 = smoke_hash(float2(fi * 11.4, 2.6));
 
-        float base_y = 1.06 + r0 * 0.10;
-        float height = 0.86 + r1 * 0.82;
-        float rise = (base_y - y) / height;
-        float in_range = step(0.0, rise) * step(rise, 1.0);
-        float vertical = pow(1.0 - smoothstep(0.0, 0.96, rise), 1.05);
+        float center = -0.14 + r0 * 1.28;
+        center += sin(t * (0.135 + r1 * 0.045) + y * (2.6 + r2 * 1.8) + r3 * 6.28318) * (0.035 + r2 * 0.055);
+        center += sin(t * (0.075 + r3 * 0.030) + y * (6.2 + r1 * 2.4) + fi) * (0.020 + r1 * 0.034);
 
-        float center = (r0 * 1.60 - 0.30) * aspect;
-        center += sin(t * (0.155 + r1 * 0.055) + rise * (3.4 + r2 * 2.2) + r3 * 6.28318) * (0.120 + r2 * 0.115);
-        center += sin(t * (0.074 + r3 * 0.034) + rise * (7.0 + r1 * 3.2) + fi) * (0.052 + r1 * 0.050);
-
-        float width = (0.115 + r3 * 0.165) * (1.0 - rise * (0.55 + r2 * 0.13));
-        width = max(width, 0.030);
+        float width = mix(0.090 + r3 * 0.075, 0.230 + r2 * 0.130, y);
         float dx = abs((x - center) / width);
-        float side = smoothstep(1.0, 0.08, dx);
-        side = pow(side, 1.25);
+        float side = pow(smoothstep(1.0, 0.0, dx), 1.55);
 
-        float top = smoothstep(0.36, 0.90, rise);
-        float wind_alpha = 0.64 + 0.36 * sin(t * (0.180 + r2 * 0.060) + rise * (9.0 + r1 * 4.0) + fi * 2.17);
-        float tongue = side * vertical * in_range * mix(1.0, wind_alpha, top);
-        float center_u = center / max(aspect, 0.01);
-        float edge_taper = smoothstep(-0.34, 0.16, center_u) * (1.0 - smoothstep(0.84, 1.34, center_u));
-        tongue_shade += tongue * edge_taper * (0.125 + r2 * 0.115);
+        float top_edge = 0.16 + r1 * 0.22;
+        top_edge += sin(t * (0.080 + r2 * 0.035) + fi * 1.91) * 0.018;
+        float vertical = smoothstep(top_edge, top_edge + 0.30 + r2 * 0.13, y);
+        vertical = pow(vertical, 0.72);
+
+        float edge_taper = smoothstep(-0.18, 0.18, center) * (1.0 - smoothstep(0.82, 1.18, center));
+        float wind_alpha = 0.78 + 0.22 * sin(t * (0.155 + r2 * 0.045) + y * (8.0 + r1 * 3.0) + fi * 2.17);
+        curtain_shade += side * vertical * edge_taper * wind_alpha * (0.060 + r2 * 0.070);
       }
 
-      float base_edge = 0.74 + 0.26 * smoothstep(0.00, 0.34, uv.x) * (1.0 - smoothstep(0.66, 1.0, uv.x));
-      float upper_field_mask = smoothstep(0.18, 0.38, y);
-      float base_ramp = smoothstep(0.02, 0.62, y) * base_edge;
-      float shade = clamp(max(base_ramp, tongue_shade * upper_field_mask), 0.0, 1.0);
+      float base_edge = 0.82 + 0.18 * smoothstep(0.00, 0.30, x) * (1.0 - smoothstep(0.70, 1.0, x));
+      float top_clear = smoothstep(0.0, top_clear_reach, y);
+      float base_ramp = pow(smoothstep(0.00, base_reach, y), 0.72) * base_edge;
+      float shade = clamp(base_ramp + curtain_shade, 0.0, 1.0) * top_clear;
 
       color = mix(color1, color0, shade);
       break;

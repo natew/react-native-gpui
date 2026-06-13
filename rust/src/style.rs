@@ -674,9 +674,11 @@ fn parse_linear_gradient(input: Option<&str>) -> Option<gpui::Background> {
     ))
 }
 
-/// `smoke(<dense-color>, <faded-color>)` — rngpui's procedural animated
+/// `smoke(<dense-color> [reach%], <faded-color> [top-clear%])` — rngpui's procedural animated
 /// smoke/scrim background (gpui Background tag Smoke). div paint stamps the
-/// per-frame time and keeps the window repainting.
+/// per-frame time and keeps the window repainting. The optional percentages are
+/// runtime shader parameters: dense stop = lower black reach, faded stop = top
+/// transparent fade depth.
 fn parse_smoke(input: Option<&str>) -> Option<gpui::Background> {
     let s = input?.trim();
     let inner = s.strip_prefix("smoke(")?.strip_suffix(')')?;
@@ -684,12 +686,19 @@ fn parse_smoke(input: Option<&str>) -> Option<gpui::Background> {
     if parts.len() != 2 {
         return None;
     }
-    let dense = parse_stop_color(&parts[0])?;
-    let faded = parse_stop_color(&parts[1])?;
-    Some(gpui::smoke_background(
-        linear_color_stop(dense, 0.0),
-        linear_color_stop(faded, 1.0),
-    ))
+    Some(gpui::smoke_background(parse_smoke_stop(&parts[0], 0.58)?, parse_smoke_stop(&parts[1], 0.34)?))
+}
+
+fn parse_smoke_stop(seg: &str, default_percentage: f32) -> Option<gpui::LinearColorStop> {
+    let color = parse_stop_color(seg)?;
+    let percentage = seg
+        .trim()
+        .split_whitespace()
+        .skip(1)
+        .find_map(|token| token.strip_suffix('%').and_then(|pct| pct.parse::<f32>().ok()))
+        .map(|pct| (pct / 100.0).clamp(0.0, 1.0))
+        .unwrap_or(default_percentage);
+    Some(linear_color_stop(color, percentage))
 }
 
 fn parse_stop_color(seg: &str) -> Option<Hsla> {

@@ -4,6 +4,7 @@
  * Native events (press / changeText / layout / resize) flow back the other way.
  */
 import { createElement, type ReactElement, type ComponentType } from "react";
+import { isHotUpdateEvaluating } from "./refresh";
 import Reconciler, { setCommitSink, serializeContainer, invalidateSerializeCaches, dispatchEvent, type Container } from "./reconciler";
 import { setEventBatcher, startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type SerializedNode } from "./runtime";
 import { toWireDelta } from "./wire-delta";
@@ -223,6 +224,16 @@ export interface RunApplicationOptions extends RootOptions {
 }
 
 const registry = new Map<string, ComponentProvider>();
+const running = new Map<
+    string,
+    {
+        root: Root;
+        initialProps?: Record<string, unknown>;
+        width?: number;
+        height?: number;
+        devtools?: boolean | DevtoolsOptions;
+    }
+>();
 
 export const AppRegistry = {
     registerComponent(appKey: string, provider: ComponentProvider): string {
@@ -232,9 +243,28 @@ export const AppRegistry = {
     runApplication(appKey: string, options: RunApplicationOptions = {}): Root {
         const provider = registry.get(appKey);
         if (!provider) throw new Error(`Application "${appKey}" has not been registered.`);
-        const Component = provider();
         const { initialProps, width, height, devtools } = options;
-        return render(createElement(Component, initialProps), { width, height, devtools });
+        const active = running.get(appKey);
+        if (active) {
+            active.initialProps = initialProps;
+            active.width = width;
+            active.height = height;
+            active.devtools = devtools;
+            const renderActive = () => {
+                const latestProvider = registry.get(appKey);
+                if (!latestProvider) return;
+                const Component = latestProvider();
+                active.root.render(createElement(Component, active.initialProps));
+            };
+            if (!isHotUpdateEvaluating()) {
+                renderActive();
+            }
+            return active.root;
+        }
+        const Component = provider();
+        const root = render(createElement(Component, initialProps), { width, height, devtools });
+        running.set(appKey, { root, initialProps, width, height, devtools });
+        return root;
     },
     getAppKeys(): string[] {
         return [...registry.keys()];

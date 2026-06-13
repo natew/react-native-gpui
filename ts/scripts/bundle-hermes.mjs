@@ -5,9 +5,12 @@
 //   bun scripts/bundle-hermes.mjs [entry] [out.js] [--bytecode]
 //
 // Bun is used only as the dev bundler here; the output runs under Hermes.
-import { resolve } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { reanimatedBunPlugin } from './reanimated-bun-plugin.mjs'
+import { rngpuiHotUpdateAliasPlugin } from './hot-update-alias-plugin.mjs'
+import { createReactRefreshSwcTransform } from './react-refresh-swc.mjs'
 
 const root = resolve(import.meta.dirname, '..') // ts/
 const args = process.argv.slice(2).filter((a) => !a.startsWith('--'))
@@ -15,6 +18,8 @@ const wantBytecode = process.argv.includes('--bytecode')
 const entry = args[0] ? resolve(args[0]) : resolve(root, 'examples/hermes-smoke.tsx')
 const outJs = args[1] ? resolve(args[1]) : '/tmp/hermes-bundle.js'
 const mode = process.env.NODE_ENV || 'development'
+const hotUpdate = process.env.RNGPUI_HOT_UPDATE === '1'
+const refreshPlugin = mode === 'development' ? reactRefreshPlugin({ roots: [dirname(entry)] }) : null
 
 const result = await Bun.build({
   entrypoints: [entry],
@@ -33,7 +38,11 @@ const result = await Bun.build({
   },
   // wire real react-native-reanimated@4 + worklets for the embedded Hermes target:
   // worklet babel transform (content-gated) + native-seam redirect to ts/src/reanimated.
-  plugins: [reanimatedBunPlugin({ rngTsRoot: root })],
+  plugins: [
+    ...(hotUpdate ? [rngpuiHotUpdateAliasPlugin()] : []),
+    ...(refreshPlugin ? [refreshPlugin] : []),
+    reanimatedBunPlugin({ rngTsRoot: root }),
+  ],
   sourcemap: 'none',
   throw: false,
 })
@@ -63,10 +72,31 @@ if (wantBytecode) {
 // every app bundle needs the worklet/UI runtime bundle staged next to the service
 // binary (plans/off-thread-reanimated.md). mtime-cached, so usually a no-op.
 // guard: build-ui-runtime.mjs itself bundles ui-entry.ts through this script.
-if (!entry.endsWith('/reanimated/ui-entry.ts')) {
+if (!hotUpdate && !entry.endsWith('/reanimated/ui-entry.ts')) {
   const ui = spawnSync('bun', ['scripts/build-ui-runtime.mjs'], { cwd: root, stdio: 'inherit' })
   if (ui.status !== 0) {
     console.error('[bundle-hermes] build-ui-runtime failed')
     process.exit(ui.status || 1)
+  }
+}
+
+function reactRefreshPlugin({ roots }) {
+  const normalizedRoots = roots.map((dir) => resolve(dir) + sep)
+  const transform = createReactRefreshSwcTransform()
+  return {
+    name: 'rngpui-react-refresh',
+    setup(build) {
+      build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (args) => {
+        if (args.path.includes(`${sep}node_modules${sep}`)) return undefined
+        if (!normalizedRoots.some((dir) => args.path.startsWith(dir))) return undefined
+        const isTs = /\.[cm]?tsx?$/.test(args.path)
+        const isJsx = /x$/.test(args.path)
+        const source = readFileSync(args.path, 'utf8')
+        return {
+          contents: await transform(source, { filename: args.path, isTs, isJsx }),
+          loader: 'js',
+        }
+      })
+    },
   }
 }

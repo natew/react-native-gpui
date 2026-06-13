@@ -78,6 +78,13 @@ fn handle_stream(mut stream: UnixStream, tx: &Sender<Incoming>) {
         write_response(&mut stream, response);
         return;
     }
+    if let Some(mut response) = handle_hermes_request(&request) {
+        if let Value::Object(map) = &mut response {
+            map.insert("reqId".into(), json!(req_id));
+        }
+        write_response(&mut stream, response);
+        return;
+    }
     let (reply_tx, reply_rx) = flume::bounded::<Value>(1);
     let incoming = match incoming_for_request(&request, reply_tx) {
         Ok(incoming) => incoming,
@@ -104,6 +111,34 @@ fn handle_stream(mut stream: UnixStream, tx: &Sender<Incoming>) {
         map.insert("reqId".into(), json!(req_id));
     }
     write_response(&mut stream, response);
+}
+
+fn handle_hermes_request(value: &Value) -> Option<Value> {
+    let cmd = value.get("$cmd").and_then(Value::as_str)?;
+    match cmd {
+        "hotEval" | "evalJs" => {
+            let code = value.get("code").and_then(Value::as_str).unwrap_or("");
+            let url = value
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or(if cmd == "hotEval" {
+                    "rngpui-hot-update.js"
+                } else {
+                    "rngpui-eval.js"
+                });
+            let hot = cmd == "hotEval";
+            match crate::hermes::eval_script_blocking(
+                code.to_string(),
+                url.to_string(),
+                hot,
+                RESPONSE_TIMEOUT,
+            ) {
+                Ok(()) => Some(json!({"ok": true, "type": cmd})),
+                Err(error) => Some(json!({"ok": false, "type": cmd, "error": error})),
+            }
+        }
+        _ => None,
+    }
 }
 
 fn handle_trace_request(value: &Value) -> Option<Value> {

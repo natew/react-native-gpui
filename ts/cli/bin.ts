@@ -17,6 +17,8 @@ import { runDo } from "./commands/do";
 import { runFlow } from "./commands/flow";
 import { runTrace } from "./commands/trace";
 import { runDiff, runShot, type ShotFlags } from "./commands/shot";
+import { runWatchReload } from "./watchReload";
+import { runHotReload } from "./hotReload";
 
 const HELP = `rngpui — react-native-gpui developer CLI
 
@@ -24,6 +26,8 @@ usage:
   rngpui shot <--bundle app.hbc | --launch entry.tsx | --session dir> [--size WxH] [--appearance light|dark] [--select id ...] [--out png] [--fixture] [--keep]
   rngpui reshot --session <dir> [--select id ...] [--out png]      sub-second re-capture of a kept session
   rngpui dev <--bundle app.hbc | --launch entry.tsx> [--size --appearance --fixture]   keep one offscreen instance alive; prints its session dir
+  rngpui hot-reload --socket <control.sock> --build <cmd> --bundle <bundle.js> --root <dir> [--pid <pid-file>]   Fast Refresh on edit; SIGUSR2 fallback
+  rngpui watch-reload --pid <pid-file> --root <dir> [--root <dir> ...]   send SIGUSR2 reload on source edits
   rngpui diff <before.png> <after.png> [--out highlight.png] [--threshold n]
   rngpui <get|do> <subcommand> [selector] [--launch <entry.tsx> | --bundle <app.hbc> | --session <dir> | --attach] [--json]
   rngpui trace <selector ...|--all> [--keys k1,k2] [--ms n] [--action "tap <sel>"] [target] [--json]
@@ -119,6 +123,9 @@ function parseArgs(argv: string[]) {
     const flags: Record<string, string | boolean> = {};
     const select: string[] = [];
     const actions: string[] = [];
+    const roots: string[] = [];
+    const ignores: string[] = [];
+    const extensions: string[] = [];
     const positional: string[] = [];
     for (let i = 0; i < args.length; i++) {
         const a = args[i];
@@ -144,10 +151,19 @@ function parseArgs(argv: string[]) {
         else if (a === "--action") actions.push(args[++i] ?? "");
         else if (a === "--all") flags.all = true;
         else if (a === "--out") flags.out = args[++i] ?? "";
+        else if (a === "--pid") flags.pid = args[++i] ?? "";
+        else if (a === "--socket") flags.socket = args[++i] ?? "";
+        else if (a === "--build") flags.build = args[++i] ?? "";
+        else if (a === "--root") roots.push(args[++i] ?? "");
+        else if (a === "--ignore") ignores.push(args[++i] ?? "");
+        else if (a === "--ext") extensions.push(args[++i] ?? "");
+        else if (a === "--debounce-ms") flags.debounceMs = args[++i] ?? "";
+        else if (a === "--label") flags.label = args[++i] ?? "";
+        else if (a === "--once") flags.once = true;
         else if (a === "-h" || a === "--help") flags.help = true;
         else positional.push(a);
     }
-    return { flags, positional, select, actions };
+    return { flags, positional, select, actions, roots, ignores, extensions };
 }
 
 function shotFlags(flags: Record<string, string | boolean>, select: string[]): ShotFlags {
@@ -167,7 +183,7 @@ function shotFlags(flags: Record<string, string | boolean>, select: string[]): S
 }
 
 async function main(): Promise<number> {
-    const { flags, positional, select, actions } = parseArgs(process.argv);
+    const { flags, positional, select, actions, roots, ignores, extensions } = parseArgs(process.argv);
     if (flags.help || positional.length === 0) {
         console.log(HELP);
         return positional.length === 0 ? 1 : 0;
@@ -193,6 +209,30 @@ async function main(): Promise<number> {
         // keep one offscreen instance alive; capture a first frame, then leave it for reshot.
         const code = await runShot({ ...shotFlags(flags, select), keep: true });
         return code;
+    }
+    if (group === "hot-reload") {
+        return runHotReload({
+            socketPath: flags.socket ? String(flags.socket) : undefined,
+            pidPath: flags.pid ? String(flags.pid) : undefined,
+            roots: roots.filter(Boolean),
+            buildCommand: flags.build ? String(flags.build) : undefined,
+            bundlePath: flags.bundle ? String(flags.bundle) : undefined,
+            ignores: ignores.filter(Boolean),
+            extensions: extensions.filter(Boolean),
+            debounceMs: flags.debounceMs ? Number(flags.debounceMs) : undefined,
+            label: flags.label ? String(flags.label) : undefined,
+            once: flags.once === true,
+        });
+    }
+    if (group === "watch-reload") {
+        return runWatchReload({
+            pidPath: flags.pid ? String(flags.pid) : undefined,
+            roots: roots.filter(Boolean),
+            ignores: ignores.filter(Boolean),
+            extensions: extensions.filter(Boolean),
+            debounceMs: flags.debounceMs ? Number(flags.debounceMs) : undefined,
+            label: flags.label ? String(flags.label) : undefined,
+        });
     }
     if (group === "diff") {
         return runDiff(positional.slice(1), {

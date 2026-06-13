@@ -19,10 +19,7 @@
         "cli",
         "dist",
         "native",
-        "scripts/bundle-hermes.mjs",
-        "scripts/conformance-utils.mjs",
-        "scripts/pixel.mjs",
-        "scripts/png.mjs",
+        "scripts",
         "README.md"
     ],
     "scripts": {
@@ -36,6 +33,8 @@
         "typecheck": "tsc --noEmit",
         "test": "bun run scripts/test-suite.mjs",
         "test:animated-driver": "bun run scripts/animated-driver-unit.mjs",
+        "test:keyboard-navigation": "bun run scripts/keyboard-navigation-unit.mjs",
+        "test:surfaces": "bun run scripts/surfaces-unit.mjs",
         "kitchen": "node scripts/run-hermes-example.mjs examples/kitchen-sink.tsx --interactive",
         "conformance:animation": "node scripts/run-hermes-example.mjs examples/animation-conformance.tsx --timeout-ms 8000",
         "conformance:animation:diff": "bun run scripts/animation-frame-diff.mjs",
@@ -65,6 +64,7 @@
         "conformance:raf-pacing": "RNGPUI_NO_ACTIVATE=1 RNGPUI_TEST_MODE=1 node scripts/run-hermes-example.mjs examples/raf-pacing-conformance.tsx --timeout-ms 15000",
         "conformance:rounded-overflow": "bun run scripts/rounded-overflow-conformance.mjs",
         "conformance:text-lines": "bun run scripts/text-lines-conformance.mjs",
+        "conformance:watch-reload": "node scripts/watch-reload-conformance.mjs",
         "pixel-diff": "bun run scripts/pixel-diff.mjs",
         "pixel-sample": "bun run scripts/pixel-sample.mjs",
         "png-grid": "bun run scripts/png-grid.mjs",
@@ -74,6 +74,8 @@
         "conformance:describe": "node scripts/describe-conformance.mjs",
         "conformance:drive": "node scripts/drive-conformance.mjs",
         "conformance:reload": "node scripts/reload-conformance.mjs",
+        "conformance:hot-reload": "node scripts/hot-reload-conformance.mjs",
+        "conformance:hot-reload-cli": "node scripts/hot-reload-cli-conformance.mjs",
         "conformance:startup": "node scripts/startup-conformance.mjs",
         "prepublishOnly": "npm run build"
     },
@@ -97,6 +99,8 @@
         "react": ">=19.0.0"
     },
     "dependencies": {
+        "@swc/core": "1.15.40",
+        "react-refresh": "0.14.2",
         "react-reconciler": "^0.31.0"
     },
     "devDependencies": {
@@ -105,9 +109,9 @@
         "@babel/plugin-transform-flow-strip-types": "^7.26.0",
         "@babel/preset-typescript": "^7.26.0",
         "@types/node": "25.9.1",
-        "esbuild": "^0.25.0",
         "@types/react": "^19.0.0",
         "@types/react-reconciler": "^0.31.0",
+        "esbuild": "^0.25.0",
         "react": "^19.0.0",
         "react-native-reanimated": "4.3.0",
         "react-native-worklets": "0.8.1",

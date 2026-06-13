@@ -73,16 +73,47 @@ unsafe extern "C" {
 // ── host → JS call queue ────────────────────────────────────────────────────
 // anything on any thread that needs to invoke a JS global posts here; the JS thread's
 // loop drains it and calls the function on the (single) JS thread.
-struct JsCall {
+struct HostCall {
     func: &'static str,
     arg: String,
+}
+enum JsCall {
+    Call(HostCall),
+    Eval {
+        code: String,
+        url: String,
+        hot: bool,
+        reply: Option<Sender<Result<(), String>>>,
+    },
 }
 static JS_CALLS: OnceLock<Sender<JsCall>> = OnceLock::new();
 
 pub fn post(func: &'static str, arg: String) {
     if let Some(tx) = JS_CALLS.get() {
-        let _ = tx.send(JsCall { func, arg });
+        let _ = tx.send(JsCall::Call(HostCall { func, arg }));
     }
+}
+
+pub fn eval_script_blocking(
+    code: String,
+    url: String,
+    hot: bool,
+    timeout: Duration,
+) -> Result<(), String> {
+    let Some(tx) = JS_CALLS.get() else {
+        return Err("JS runtime is not ready".to_string());
+    };
+    let (reply_tx, reply_rx) = flume::bounded::<Result<(), String>>(1);
+    tx.send(JsCall::Eval {
+        code,
+        url,
+        hot,
+        reply: Some(reply_tx),
+    })
+    .map_err(|_| "JS runtime is closed".to_string())?;
+    reply_rx
+        .recv_timeout(timeout)
+        .map_err(|_| "timed out waiting for JS eval".to_string())?
 }
 
 // ── reanimated worklet/UI runtime (see plans/off-thread-reanimated.md) ──────
@@ -94,7 +125,7 @@ static UI_CALLS: OnceLock<Sender<JsCall>> = OnceLock::new();
 
 pub fn post_ui(func: &'static str, arg: String) {
     if let Some(tx) = UI_CALLS.get() {
-        let _ = tx.send(JsCall { func, arg });
+        let _ = tx.send(JsCall::Call(HostCall { func, arg }));
     }
 }
 
@@ -1047,7 +1078,7 @@ fn flush_events(rt: *mut c_void, events: &mut Vec<String>) {
 /// input always runs before async completions so a slow fetch/ws frame cannot jump ahead of
 /// a tap that native already accepted; async completions still run before coalesced layout /
 /// move / scroll noise.
-fn dispatch_coalesced(rt: *mut c_void, batch: Vec<JsCall>) {
+fn dispatch_coalesced(rt: *mut c_void, batch: Vec<HostCall>) {
     if batch.len() == 1 {
         call1(rt, batch[0].func, &batch[0].arg);
         return;
@@ -1105,6 +1136,40 @@ fn dispatch_coalesced(rt: *mut c_void, batch: Vec<JsCall>) {
     flush_events(rt, &mut events);
 }
 
+fn dispatch_batch(rt: *mut c_void, batch: Vec<JsCall>) {
+    let mut calls = Vec::new();
+    for job in batch {
+        match job {
+            JsCall::Call(call) => calls.push(call),
+            JsCall::Eval {
+                code,
+                url,
+                hot,
+                reply,
+            } => {
+                dispatch_coalesced(rt, calls);
+                calls = Vec::new();
+                let result = if hot {
+                    let wrapped = format!(
+                        "globalThis.__rngpuiBeginHotUpdate&&globalThis.__rngpuiBeginHotUpdate();\ntry{{\n{}\n}}finally{{globalThis.__rngpuiEndHotUpdate&&globalThis.__rngpuiEndHotUpdate();}}",
+                        code
+                    );
+                    eval(rt, wrapped.as_bytes(), &url)
+                } else {
+                    eval(rt, code.as_bytes(), &url)
+                };
+                unsafe { rng_hermes_drain_microtasks(rt) };
+                if let Some(reply) = reply {
+                    let _ = reply.send(result);
+                } else if let Err(error) = result {
+                    eprintln!("[hermes] eval failed: {error}");
+                }
+            }
+        }
+    }
+    dispatch_coalesced(rt, calls);
+}
+
 fn run_loop(rt: *mut c_void, ctx: &JsContext, calls_rx: &Receiver<JsCall>) {
     let max_wait = Duration::from_millis(250);
     // RNGPUI_PERF_TRACE=1 logs the wall time the single JS thread spends processing
@@ -1152,7 +1217,7 @@ fn run_loop(rt: *mut c_void, ctx: &JsContext, calls_rx: &Receiver<JsCall>) {
         } else {
             None
         };
-        dispatch_coalesced(rt, batch);
+        dispatch_batch(rt, batch);
 
         // fire due timers, then run microtasks (Promises / React scheduling).
         let due = ctx.timers.borrow_mut().pop_due(Instant::now());
@@ -1176,16 +1241,22 @@ fn run_loop(rt: *mut c_void, ctx: &JsContext, calls_rx: &Receiver<JsCall>) {
 fn perf_batch_label(batch: &[JsCall]) -> String {
     let mut parts: Vec<String> = Vec::new();
     for call in batch.iter().take(3) {
-        if call.func == "__rngpui_onHostEvent" {
-            let ev = call
-                .arg
-                .split("\"event\":\"")
-                .nth(1)
-                .and_then(|s| s.split('"').next())
-                .unwrap_or("event");
-            parts.push(ev.to_string());
-        } else {
-            parts.push(call.func.trim_start_matches("__rngpui_").to_string());
+        match call {
+            JsCall::Call(call) if call.func == "__rngpui_onHostEvent" => {
+                let ev = call
+                    .arg
+                    .split("\"event\":\"")
+                    .nth(1)
+                    .and_then(|s| s.split('"').next())
+                    .unwrap_or("event");
+                parts.push(ev.to_string());
+            }
+            JsCall::Call(call) => {
+                parts.push(call.func.trim_start_matches("__rngpui_").to_string());
+            }
+            JsCall::Eval { hot, .. } => {
+                parts.push(if *hot { "hotEval" } else { "eval" }.to_string());
+            }
         }
     }
     if batch.len() > 3 {

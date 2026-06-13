@@ -69,6 +69,68 @@ APIs: `StyleSheet`, `Dimensions`, `useWindowDimensions`, `Platform`, `PixelRatio
 - **Styling** matches RN: flexbox (Yoga semantics — `flex:1`, `%`, `auto`), `backgroundColor`, gradients via `backgroundImage`, `boxShadow` / iOS `shadow*` / `elevation`, `borderRadius`, `overflow: scroll`, `opacity`.
 - **`Svg`** renders a monochrome icon tinted by `style.color`.
 
+## Native surfaces
+
+For app chrome that needs native glass or GPUI shader-backed effects, use the
+surface components instead of baking app-specific behavior into the renderer:
+
+```tsx
+import {
+  LiquidGlassBackground,
+  SmokeEffectSurface,
+  View,
+} from "react-native-gpui";
+
+export function Shell({ children }) {
+  return (
+    <View style={{ flex: 1, borderRadius: 32, overflow: "hidden" }}>
+      <LiquidGlassBackground
+        radius={32}
+        material="underWindowBackground"
+        glassVariant="controlCenter"
+      />
+      <SmokeEffectSurface
+        pointerEvents="none"
+        radius={32}
+        alpha={0.9}
+        reach={0.28}
+        topClear={0.06}
+      />
+      {children}
+    </View>
+  );
+}
+```
+
+`LiquidGlassBackground` / `LiquidGlassView` wrap native `SystemView` glass.
+`EffectSurface` / `SmokeEffectSurface` are ordinary React components that set
+`backgroundImage` to renderer effects such as `smoke(...)`. Apps can tune these
+from React props while the renderer owns only the generic native primitive.
+
+## Dev loop
+
+`rngpui hot-reload` watches source roots, runs a caller-provided build command,
+and pushes the resulting JS bundle into the running Hermes runtime through the
+app control socket. React Fast Refresh state is preserved when compatible. If
+the control socket is still coming up, the CLI waits briefly instead of
+immediately downgrading. If hot eval still fails and `--pid` is supplied, the
+CLI falls back to SIGUSR2 live reload.
+
+```sh
+rngpui hot-reload \
+  --socket /tmp/my-app.control.sock \
+  --pid /tmp/my-app.pid \
+  --bundle native-shell/.gpui-hermes/hot-update.js \
+  --build "RNGPUI_HOT_UPDATE=1 NODE_ENV=development bun native-shell/scripts/bundle-app-hermes.mjs native-shell/app.tsx native-shell/.gpui-hermes/hot-update.js" \
+  --root app --root interface --root native-shell
+```
+
+For a live-reload-only fallback watcher:
+
+```sh
+rngpui watch-reload --pid /tmp/my-app.pid --root app --root interface
+```
+
 ## Native inspector
 
 Enable the GPUI node inspector for any root:

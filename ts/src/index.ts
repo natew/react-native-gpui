@@ -5,6 +5,7 @@
  *   import { View, Text, StyleSheet, AppRegistry } from "react-native-gpui";
  */
 import "./raf";
+import "./hotModules";
 
 // render entry points
 export { createRoot, render, AppRegistry, type Root, type RootOptions, type DevtoolsOptions, type RunApplicationOptions } from "./render";
@@ -85,6 +86,23 @@ export type {
     NativeResizeEdge,
     NativeResizeSpec,
 } from "./types";
+export {
+    LiquidGlassBackground,
+    LiquidGlassView,
+    EffectSurface,
+    SmokeEffectSurface,
+    effectBackgroundImage,
+    smokeEffectBackgroundImage,
+} from "./surfaces";
+export type {
+    LiquidGlassBackgroundProps,
+    LiquidGlassChrome,
+    LiquidGlassViewProps,
+    EffectSurfaceEffect,
+    EffectSurfaceProps,
+    SmokeEffect,
+    SmokeEffectSurfaceProps,
+} from "./surfaces";
 
 // dimensions + platform APIs
 export { Dimensions, type ScaledSize } from "./Dimensions";
@@ -131,6 +149,38 @@ export {
     type AppCommandMenu,
     type AppCommandMenuItem,
 } from "./commands";
+export {
+    KeyboardNavigationProvider,
+    useKeyboardNavigation,
+    useKeyboardNavigationController,
+    useKeyboardNavigationState,
+    useKeyboardNavigationTarget,
+    useKeyboardNavigationKeyPress,
+    useKeyboardNavigationWindowKeyboard,
+    mergeRefs,
+    enabledKeyboardNavigationTargets,
+    firstKeyboardNavigationTarget,
+    hasKeyboardNavigationModifier,
+    nextKeyboardNavigationTarget,
+    nextSequentialKeyboardNavigationTarget,
+} from "./keyboard";
+export type {
+    KeyboardNavigationChange,
+    KeyboardNavigationController,
+    KeyboardNavigationControllerOptions,
+    KeyboardNavigationDirection,
+    KeyboardNavigationEventLike,
+    KeyboardNavigationFocusOptions,
+    KeyboardNavigationKeyPressOptions,
+    KeyboardNavigationModelOptions,
+    KeyboardNavigationReason,
+    KeyboardNavigationRect,
+    KeyboardNavigationSequentialDirection,
+    KeyboardNavigationState,
+    KeyboardNavigationTarget,
+    KeyboardNavigationTargetModel,
+    KeyboardNavigationVerticalScope,
+} from "./keyboard";
 export {
     Portal,
     PortalHost,

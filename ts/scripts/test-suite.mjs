@@ -15,6 +15,8 @@ const suiteStart = performance.now();
 const tasks = [
     { name: "typecheck", command: "npm", args: ["run", "typecheck"], cwd: root, timeoutMs: 20_000 },
     { name: "animated-driver", command: "bun", args: ["run", "scripts/animated-driver-unit.mjs"], cwd: root, timeoutMs: 10_000 },
+    { name: "keyboard-navigation", command: "bun", args: ["run", "scripts/keyboard-navigation-unit.mjs"], cwd: root, timeoutMs: 10_000 },
+    { name: "surfaces", command: "bun", args: ["run", "scripts/surfaces-unit.mjs"], cwd: root, timeoutMs: 10_000 },
     { name: "wire-delta", command: "bun", args: ["run", "scripts/wire-delta-unit.mjs"], cwd: root, timeoutMs: 10_000 },
     { name: "worklet-runtime", command: "bun", args: ["run", "scripts/worklet-runtime-unit.mjs"], cwd: root, timeoutMs: 10_000 },
     { name: "appearance-serialize", command: "bun", args: ["run", "scripts/appearance-serialize-unit.tsx"], cwd: root, timeoutMs: 15_000 },
@@ -45,6 +47,9 @@ const tasks = [
     { name: "list-group", command: "node", args: ["scripts/list-group-conformance-driver.mjs"], cwd: root, timeoutMs: 20_000 },
     { name: "inspector", command: "node", args: ["scripts/inspector-conformance.mjs"], cwd: root, timeoutMs: 12_000 },
     { name: "reload", command: "node", args: ["scripts/reload-conformance.mjs"], cwd: root, timeoutMs: 18_000 },
+    { name: "hot-reload", command: "node", args: ["scripts/hot-reload-conformance.mjs"], cwd: root, timeoutMs: 18_000 },
+    { name: "hot-reload-cli", command: "node", args: ["scripts/hot-reload-cli-conformance.mjs"], cwd: root, timeoutMs: 12_000 },
+    { name: "watch-reload", command: "node", args: ["scripts/watch-reload-conformance.mjs"], cwd: root, timeoutMs: 12_000 },
     { name: "text-lines", command: "bun", args: ["run", "scripts/text-lines-conformance.mjs"], cwd: root },
     { name: "rounded-overflow", command: "bun", args: ["run", "scripts/rounded-overflow-conformance.mjs"], cwd: root },
     { name: "animation-diff", command: "bun", args: ["run", "scripts/animation-frame-diff.mjs"], cwd: root },

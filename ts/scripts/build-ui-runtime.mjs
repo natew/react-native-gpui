@@ -48,7 +48,7 @@ if (!fresh) {
     const result = spawnSync("bun", ["scripts/bundle-hermes.mjs", entry, out], {
         cwd: root,
         stdio: "inherit",
-        env: { ...process.env, NODE_ENV: process.env.NODE_ENV || "production" },
+        env: { ...process.env, NODE_ENV: "production" },
     });
     if (result.status !== 0) process.exit(result.status ?? 1);
 } else {

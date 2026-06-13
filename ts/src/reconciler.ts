@@ -1,3 +1,4 @@
+import "./refresh";
 import { createContext } from "react";
 import ReactReconciler from "react-reconciler";
 import { DefaultEventPriority, NoEventPriority } from "react-reconciler/constants";
@@ -1271,4 +1272,12 @@ const hostConfig: any = {
 let currentUpdatePriority: number = NoEventPriority;
 
 const Reconciler = ReactReconciler(hostConfig);
+if (typeof __DEV__ !== "undefined" && __DEV__) {
+    (Reconciler as unknown as { injectIntoDevTools?: (config: { bundleType: 1; version: string; rendererPackageName: string }) => boolean })
+        .injectIntoDevTools?.({
+            bundleType: 1,
+            version: "0.1.26",
+            rendererPackageName: "react-native-gpui",
+        });
+}
 export default Reconciler;

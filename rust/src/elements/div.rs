@@ -2180,8 +2180,26 @@ impl Element for ReactDivElement {
         let wants_events = self.element.pseudo_events;
         if wants_events && let Some(hitbox) = prepaint.hitbox.clone() {
             let id = self.element.global_id;
+            // off-thread pseudo routing (plans/off-thread-pseudo-routing.md): if the
+            // Tamagui reanimated driver registered shared-value slots for this node, a
+            // flip writes those slots and wakes the UI-runtime worklet directly —
+            // never touching the main React runtime. The slot map is consulted per
+            // flip (not captured) because registration can land after first paint.
+            // Unregistered nodes — and any node whose slots aren't BOTH valid yet —
+            // fall back to the main-thread `bridge::pseudo` emit. Requiring both slots
+            // >= 0 avoids stranding an axis: a -1 slot (shared-value `_id` not assigned
+            // when registerPseudoSlots ran) would otherwise write no cell AND skip the
+            // main-thread emit, so that axis would fire nowhere. One trigger lane per flip.
             let emit_pseudo = move |hovered: bool, pressed: bool| {
-                crate::bridge::pseudo(id, hovered, pressed);
+                if let Some((hover_slot, press_slot)) = crate::hermes::pseudo_slots_for(id)
+                    && hover_slot >= 0
+                    && press_slot >= 0
+                {
+                    crate::hermes::set_pseudo_slot_and_wake(hover_slot, if hovered { 1.0 } else { 0.0 });
+                    crate::hermes::set_pseudo_slot_and_wake(press_slot, if pressed { 1.0 } else { 0.0 });
+                } else {
+                    crate::bridge::pseudo(id, hovered, pressed);
+                }
             };
             let move_hitbox = hitbox.clone();
             window.on_mouse_event(move |_ev: &MouseMoveEvent, phase, window, _cx| {

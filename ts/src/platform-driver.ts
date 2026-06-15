@@ -19,6 +19,15 @@
  */
 import { setPseudoEvents } from "./reconciler";
 
+// host fns installed on the React runtime (rust/src/hermes.rs). Off-thread pseudo
+// routing (plans/off-thread-pseudo-routing.md): a node registers two shared-value
+// slots (hover, press) keyed by its host globalId; on a native flip the host then
+// writes those slot cells + wakes the UI worklet directly, instead of emitting a
+// main-thread `pseudo` event. -1 for an axis = no slot (host keeps the main-thread
+// emit for it).
+declare const __rngpui_registerPseudoSlots: ((json: string) => void) | undefined;
+declare const __rngpui_unregisterPseudoSlots: ((json: string) => void) | undefined;
+
 export type PseudoState = { hovered: boolean; pressed: boolean };
 export type PseudoListener = (state: PseudoState) => void;
 
@@ -63,17 +72,53 @@ export function dispatchPseudo(globalId: number, hovered: boolean, pressed: bool
 }
 
 /**
+ * Off-thread pseudo: register two shared-value slots (hover, press) for a node by host
+ * globalId so the host writes them + wakes the UI worklet on a native flip — no React
+ * thread, no `pseudo` event, no listener fan-out. Also turns ON the host's per-node
+ * pseudo opt-in so its hitbox handlers actually run (they now write slots). Returns a
+ * dispose that unregisters and clears the opt-in. Pass -1 for an axis to leave it on the
+ * main-thread `pseudo` lane. Used by the Tamagui reanimated driver in place of `subscribe`.
+ */
+export function registerPseudoSlots(
+    globalId: number,
+    hoverSlot: number,
+    pressSlot: number,
+): () => void {
+    if (typeof __rngpui_registerPseudoSlots !== "function") return () => {};
+    setPseudoEvents(globalId, true);
+    __rngpui_registerPseudoSlots(JSON.stringify({ globalId, hoverSlot, pressSlot }));
+    return () => {
+        __rngpui_unregisterPseudoSlots?.(JSON.stringify({ globalId }));
+        setPseudoEvents(globalId, false);
+    };
+}
+
+/**
+ * Whether the host supports off-thread pseudo routing — i.e. the register host fn is
+ * installed. The Tamagui reanimated driver reads this to decide whether to take the
+ * slot-driven worklet path (true) or fall back to the main-thread emitter (false).
+ */
+export const supportsOffThreadPseudo = (): boolean =>
+    typeof __rngpui_registerPseudoSlots === "function";
+
+/**
  * The renderer platform driver. tamagui's `@tamagui/core` `setupPlatformDriver(driver)`
  * consumes this: when a driver with `pseudo` is present, createComponent skips wiring its own
  * hover/press React event handlers, opens the avoidReRenders gate for any component with
  * pseudo styles, and feeds this signal into its existing setStateShallow/emitter path so the
  * style update rides the animation driver (spring if styled, instant otherwise) with zero
  * React commits. More capabilities (measure, focus, scroll) can slot in over time.
+ *
+ * `registerPseudoSlots`/`offThreadPseudo` are the off-thread upgrade: an animation driver
+ * that can read shared-value slots inside its worklet (the reanimated driver) routes the
+ * hover/press trigger straight to the UI runtime via slots, bypassing `subscribe` entirely.
  */
 export const platformDriver = {
     pseudo: {
         subscribe(hostInstance: { id: number }, listener: PseudoListener): () => void {
             return registerPseudoListener(hostInstance.id, listener);
         },
+        offThreadPseudo: supportsOffThreadPseudo,
+        registerPseudoSlots,
     },
 };

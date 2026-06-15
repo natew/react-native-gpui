@@ -41,6 +41,7 @@
         "conformance:anim-overlay": "node scripts/anim-overlay-conformance.mjs",
         "conformance:reanimated": "node scripts/reanimated-conformance.mjs",
         "conformance:offthread-stall": "node scripts/offthread-stall-conformance.mjs",
+        "conformance:gpui-transition": "bun run scripts/gpui-transition-conformance.mjs",
         "conformance:dialog-reanimated": "bun run scripts/dialog-reanimated-conformance.mjs",
         "conformance:sustained-reanimated": "bun run scripts/sustained-reanimated-conformance.mjs",
         "prebuild:reanimated": "bun run scripts/prebuild-reanimated.mjs",

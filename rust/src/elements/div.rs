@@ -431,11 +431,11 @@ fn native_layout_animation_value(
     )
 }
 
-fn ease_out_cubic(t: f32) -> f32 {
+pub fn ease_out_cubic(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
-fn lerp(from: f32, to: f32, t: f32) -> f32 {
+pub fn lerp(from: f32, to: f32, t: f32) -> f32 {
     from + (to - from) * t
 }
 
@@ -2195,8 +2195,14 @@ impl Element for ReactDivElement {
                     && hover_slot >= 0
                     && press_slot >= 0
                 {
-                    crate::hermes::set_pseudo_slot_and_wake(hover_slot, if hovered { 1.0 } else { 0.0 });
-                    crate::hermes::set_pseudo_slot_and_wake(press_slot, if pressed { 1.0 } else { 0.0 });
+                    crate::hermes::set_pseudo_slot_and_wake(
+                        hover_slot,
+                        if hovered { 1.0 } else { 0.0 },
+                    );
+                    crate::hermes::set_pseudo_slot_and_wake(
+                        press_slot,
+                        if pressed { 1.0 } else { 0.0 },
+                    );
                 } else {
                     crate::bridge::pseudo(id, hovered, pressed);
                 }

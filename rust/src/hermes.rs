@@ -20,7 +20,6 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use flume::{Receiver, Sender};
-use once_cell::sync::Lazy;
 use serde_json::json;
 use tungstenite::Message;
 use tungstenite::stream::MaybeTlsStream;
@@ -176,88 +175,6 @@ fn sv_slots() -> *mut c_void {
 fn install_sv_slots(rt: *mut c_void) {
     let name = CString::new("__rngpui_svSlots").unwrap();
     unsafe { rng_hermes_install_shared_buffer(rt, name.as_ptr(), sv_slots(), SV_SLOTS_FLOATS * 8) };
-}
-
-// ── off-thread pseudo routing (plans/off-thread-pseudo-routing.md) ──────────
-// A node's hover/press flip normally emits a `pseudo` event onto the MAIN React
-// runtime (`bridge::pseudo`), where Tamagui re-derives the merged style. That
-// trigger waits behind any in-flight React commit. To take it fully off the
-// React thread, the Tamagui reanimated driver allocates two bool shared-value
-// slots per pseudo node (hover, press) and registers them here keyed by the host
-// globalId. On a native flip we write the slot CELL in `__rngpui_svSlots` and
-// then post a `svUpdate` wakeup to the UI runtime — the same path a peer SV write
-// uses — so the driver's `useAnimatedStyle` worklet re-runs on the UI thread and
-// merges base/hover/press off-thread. -1 means "no slot for this axis".
-static PSEUDO_SLOTS: Lazy<Mutex<HashMap<u64, (i64, i64)>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-/// Installed on the React runtime as `__rngpui_registerPseudoSlots`. The driver
-/// calls it at mount with JSON `{globalId, hoverSlot, pressSlot}` (slot ids are
-/// the shared-value `_id`s it allocated). Re-registering overwrites — a remounted
-/// node gets fresh slots.
-extern "C" fn host_register_pseudo_slots(_ud: *mut c_void, arg: *const c_char) {
-    #[derive(serde::Deserialize)]
-    struct Reg {
-        #[serde(rename = "globalId")]
-        global_id: u64,
-        #[serde(rename = "hoverSlot")]
-        hover_slot: i64,
-        #[serde(rename = "pressSlot")]
-        press_slot: i64,
-    }
-    if let Ok(reg) = serde_json::from_str::<Reg>(&arg_str(arg)) {
-        PSEUDO_SLOTS
-            .lock()
-            .unwrap()
-            .insert(reg.global_id, (reg.hover_slot, reg.press_slot));
-    }
-}
-
-/// Installed on the React runtime as `__rngpui_unregisterPseudoSlots`. Called on
-/// the driver's dispose (unmount) with JSON `{globalId}`; the freed slots fall back
-/// to the shared-value free-list on the JS side.
-extern "C" fn host_unregister_pseudo_slots(_ud: *mut c_void, arg: *const c_char) {
-    #[derive(serde::Deserialize)]
-    struct Unreg {
-        #[serde(rename = "globalId")]
-        global_id: u64,
-    }
-    if let Ok(u) = serde_json::from_str::<Unreg>(&arg_str(arg)) {
-        PSEUDO_SLOTS.lock().unwrap().remove(&u.global_id);
-    }
-}
-
-/// The flip site (`elements/div.rs`) asks: does this node route pseudo off-thread?
-/// `Some((hoverSlot, pressSlot))` if registered (-1 per axis = none), else `None`
-/// → keep the main-thread `bridge::pseudo` emit.
-pub fn pseudo_slots_for(global_id: u64) -> Option<(i64, i64)> {
-    PSEUDO_SLOTS.lock().unwrap().get(&global_id).copied()
-}
-
-/// Write a bool shared-value slot cell (0.0/1.0) in `__rngpui_svSlots` and wake the
-/// UI runtime's mapper for it. The cell is the source of truth for the worklet's
-/// read; the posted `svUpdate` is only the listener wakeup (the worklet reads
-/// `this.floats[slot]`, not the message payload — see worklet-runtime.ts
-/// `fireLocalIfChanged`), so writing the cell BEFORE posting is required. A flip
-/// that nets to no change in a turn correctly no-ops via `fireLocalIfChanged`.
-/// `slot < 4` is the reserved header and is rejected; an out-of-range slot is a no-op.
-pub fn set_pseudo_slot_and_wake(slot: i64, value: f64) {
-    // slots 0..3 are the header ([0]=magic, [1]=capacity, [2..3] reserved — see
-    // SV_SLOTS layout above); real slots start at 4.
-    const SV_SLOTS_HEADER: i64 = 4;
-    if slot < SV_SLOTS_HEADER || slot as usize >= SV_SLOTS_FLOATS {
-        return;
-    }
-    // bounds checked above: in [4, SV_SLOTS_FLOATS); the buffer is SV_SLOTS_FLOATS
-    // f64s installed in both runtimes, so this write is visible to the UI runtime's
-    // zero-copy view of the same region.
-    unsafe {
-        *(sv_slots() as *mut f64).add(slot as usize) = value;
-    }
-    post_ui(
-        "__rngpui_peerRecv",
-        json!({ "type": "svUpdate", "svId": slot, "value": value }).to_string(),
-    );
 }
 
 // ── timers (driven by the JS thread loop) ───────────────────────────────────
@@ -999,18 +916,6 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
             install_void(rt, "__rngpui_wsClose", host_ws_close, ud);
             install_void(rt, "__rngpui_pickPaths", host_pick_paths, ud);
             install_void(rt, "__rngpui_uiPost", host_ui_post, ud);
-            install_void(
-                rt,
-                "__rngpui_registerPseudoSlots",
-                host_register_pseudo_slots,
-                ud,
-            );
-            install_void(
-                rt,
-                "__rngpui_unregisterPseudoSlots",
-                host_unregister_pseudo_slots,
-                ud,
-            );
             install_num(rt, "__rngpui_now", host_now, ud);
             install_sv_slots(rt);
             mark("host fns installed");
@@ -1646,107 +1551,5 @@ mod tests {
                 "{event}"
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod offthread_pseudo_tests {
-    //! off-thread pseudo routing (plans/off-thread-pseudo-routing.md): the slot
-    //! registry + the slot-write/wake primitive the native flip site calls. These
-    //! guard the two correctness-critical invariants — the flip site sees the slots
-    //! a node registered (and -1 axes survive so it can fall back), and a slot write
-    //! can never clobber the shared-buffer header that both Hermes runtimes read.
-    use super::{
-        SV_SLOTS_FLOATS, host_register_pseudo_slots, host_unregister_pseudo_slots,
-        pseudo_slots_for, set_pseudo_slot_and_wake, sv_slots,
-    };
-    use std::ffi::CString;
-    use std::ptr;
-
-    fn register(global_id: u64, hover: i64, press: i64) {
-        let json = format!(r#"{{"globalId":{global_id},"hoverSlot":{hover},"pressSlot":{press}}}"#);
-        let c = CString::new(json).unwrap();
-        host_register_pseudo_slots(ptr::null_mut(), c.as_ptr());
-    }
-    fn unregister(global_id: u64) {
-        let c = CString::new(format!(r#"{{"globalId":{global_id}}}"#)).unwrap();
-        host_unregister_pseudo_slots(ptr::null_mut(), c.as_ptr());
-    }
-
-    #[test]
-    fn register_lookup_overwrite_unregister() {
-        // unique id so parallel tests don't collide on the shared PSEUDO_SLOTS map.
-        let id = 9_900_001u64;
-        assert_eq!(pseudo_slots_for(id), None, "unregistered node has no slots");
-        register(id, 10, 11);
-        assert_eq!(pseudo_slots_for(id), Some((10, 11)));
-        // a remounted node re-registers; the latest slots must win.
-        register(id, 20, 21);
-        assert_eq!(
-            pseudo_slots_for(id),
-            Some((20, 21)),
-            "re-register overwrites"
-        );
-        unregister(id);
-        assert_eq!(pseudo_slots_for(id), None, "unregister clears the entry");
-    }
-
-    #[test]
-    fn minus_one_axis_survives_for_flip_site_fallback() {
-        // a -1 axis (shared-value _id not assigned) must round-trip so the flip site
-        // (elements/div.rs) can see it and fall back to the main-thread emit instead
-        // of stranding that axis. defect-4 guard.
-        let id = 9_900_002u64;
-        register(id, 12, -1);
-        assert_eq!(pseudo_slots_for(id), Some((12, -1)));
-        unregister(id);
-    }
-
-    #[test]
-    fn set_slot_rejects_header_and_out_of_range() {
-        // slots [0,4) are the shared-buffer header (magic, capacity, reserved) read
-        // by BOTH runtimes — a write there corrupts the zero-copy ArrayBuffer. and an
-        // out-of-range slot must be a silent no-op, never an OOB write/panic.
-        let buf = sv_slots() as *const f64;
-        let magic = unsafe { *buf };
-        let cap = unsafe { *buf.add(1) };
-        for bad in [
-            0i64,
-            1,
-            2,
-            3,
-            -1,
-            -100,
-            SV_SLOTS_FLOATS as i64,
-            SV_SLOTS_FLOATS as i64 + 5,
-        ] {
-            set_pseudo_slot_and_wake(bad, 1.0);
-        }
-        assert_eq!(unsafe { *buf }, magic, "magic header must be untouched");
-        assert_eq!(
-            unsafe { *buf.add(1) },
-            cap,
-            "capacity header must be untouched"
-        );
-    }
-
-    #[test]
-    fn set_slot_writes_a_valid_cell() {
-        // a real slot (>=4, in range): the cell becomes the value the worklet reads.
-        // post_ui is a no-op without a UI runtime in tests, so this isolates the write.
-        let slot = 100i64; // in range, away from the header and the other tests' ids
-        let buf = sv_slots() as *const f64;
-        set_pseudo_slot_and_wake(slot, 1.0);
-        assert_eq!(
-            unsafe { *buf.add(slot as usize) },
-            1.0,
-            "flip-on writes 1.0"
-        );
-        set_pseudo_slot_and_wake(slot, 0.0);
-        assert_eq!(
-            unsafe { *buf.add(slot as usize) },
-            0.0,
-            "flip-off writes 0.0"
-        );
     }
 }

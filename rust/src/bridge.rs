@@ -152,13 +152,25 @@ pub fn pseudo(id: u64, hovered: bool, pressed: bool) {
     }));
 }
 
-pub fn scroll_event(id: u64, x: f32, y: f32) {
+pub fn scroll_event(
+    id: u64,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    content_width: f32,
+    content_height: f32,
+) {
     emit_value(json!({
         "type": "event",
         "id": id,
         "event": "scroll",
         "scrollX": x,
-        "scrollY": y
+        "scrollY": y,
+        "scrollWidth": width,
+        "scrollHeight": height,
+        "scrollContentWidth": content_width,
+        "scrollContentHeight": content_height
     }));
 }
 

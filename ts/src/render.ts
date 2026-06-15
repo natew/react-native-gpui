@@ -159,6 +159,12 @@ export function createRoot(options: RootOptions = {}): Root {
             pageY: e.pageY,
             locationX: e.locationX,
             locationY: e.locationY,
+            scrollX: e.scrollX,
+            scrollY: e.scrollY,
+            scrollWidth: e.scrollWidth,
+            scrollHeight: e.scrollHeight,
+            scrollContentWidth: e.scrollContentWidth,
+            scrollContentHeight: e.scrollContentHeight,
             layout: e.layout,
             cols: e.cols,
             rows: e.rows,
@@ -215,6 +221,10 @@ export function render(element: ReactElement, options?: RootOptions): Root {
     const root = createRoot(options);
     root.render(element);
     return root;
+}
+
+export function unstable_batchedUpdates<T>(fn: (arg?: T) => unknown, arg?: T): unknown {
+    return (Reconciler as { batchedUpdates(run: (value?: T) => unknown, value?: T): unknown }).batchedUpdates(fn, arg);
 }
 
 // ── AppRegistry (RN-familiar entry point) ───────────────────────────

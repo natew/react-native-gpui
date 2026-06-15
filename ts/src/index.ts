@@ -8,7 +8,16 @@ import "./raf";
 import "./hotModules";
 
 // render entry points
-export { createRoot, render, AppRegistry, type Root, type RootOptions, type DevtoolsOptions, type RunApplicationOptions } from "./render";
+export {
+    createRoot,
+    render,
+    AppRegistry,
+    unstable_batchedUpdates,
+    type Root,
+    type RootOptions,
+    type DevtoolsOptions,
+    type RunApplicationOptions,
+} from "./render";
 
 // components
 export {
@@ -21,6 +30,7 @@ export {
     SystemView,
     GhosttyTerminal,
     ScrollView,
+    RefreshControl,
     Pressable,
     TouchableOpacity,
     TouchableHighlight,
@@ -58,6 +68,7 @@ export type {
     GhosttyTerminalProps,
     ScrollViewHandle,
     ScrollViewProps,
+    RefreshControlProps,
     PressableProps,
     TouchableProps,
     ListGroupProps,

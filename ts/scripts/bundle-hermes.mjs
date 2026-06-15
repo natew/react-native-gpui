@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process'
 import { reanimatedBunPlugin } from './reanimated-bun-plugin.mjs'
 import { rngpuiHotUpdateAliasPlugin } from './hot-update-alias-plugin.mjs'
 import { createReactRefreshSwcTransform } from './react-refresh-swc.mjs'
+import { nativePackageExportsPlugin } from './native-package-exports-plugin.mjs'
 
 const root = resolve(import.meta.dirname, '..') // ts/
 const args = process.argv.slice(2).filter((a) => !a.startsWith('--'))
@@ -39,6 +40,7 @@ const result = await Bun.build({
   // wire real react-native-reanimated@4 + worklets for the embedded Hermes target:
   // worklet babel transform (content-gated) + native-seam redirect to ts/src/reanimated.
   plugins: [
+    nativePackageExportsPlugin({ root, name: 'rngpui native package exports' }),
     ...(hotUpdate ? [rngpuiHotUpdateAliasPlugin()] : []),
     ...(refreshPlugin ? [refreshPlugin] : []),
     reanimatedBunPlugin({ rngTsRoot: root }),

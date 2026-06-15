@@ -153,10 +153,7 @@ fn handle_trace_request(value: &Value) -> Option<Value> {
             });
             let keys = string_set(value, "keys");
             let native_keys = string_set(value, "nativeKeys");
-            let max_ms = value
-                .get("maxMs")
-                .and_then(Value::as_u64)
-                .unwrap_or(10_000);
+            let max_ms = value.get("maxMs").and_then(Value::as_u64).unwrap_or(10_000);
             Some(crate::anim_trace::start(ids, keys, native_keys, max_ms))
         }
         "traceStop" => Some(crate::anim_trace::stop()),

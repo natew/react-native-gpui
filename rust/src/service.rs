@@ -11,8 +11,8 @@ use std::rc::Rc;
 use gpui::{
     App, AppContext, Bounds, Context, Entity, InteractiveElement as _, IntoElement, KeyBinding,
     Menu, MenuItem, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, Styled, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, actions, point, px, size,
+    MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, Styled, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, actions, point, px, size,
 };
 use gpui_component::input::{Enter, InputEvent, InputState, Position};
 use gpui_component::theme::{Theme, ThemeMode};
@@ -3447,6 +3447,20 @@ fn main() {
                                 let target = inspector::scroll_container_at(&this.root, x, y);
                                 if let Some(id) = target {
                                     elements::scroll_by(id, dx, dy);
+                                    if let Some((width, height, content_width, content_height)) =
+                                        inspector::scroll_container_metrics(&this.root, id)
+                                    {
+                                        let (scroll_x, scroll_y) = elements::scroll_position(id);
+                                        crate::bridge::scroll_event(
+                                            id,
+                                            scroll_x,
+                                            scroll_y,
+                                            width,
+                                            height,
+                                            content_width,
+                                            content_height,
+                                        );
+                                    }
                                     cx.notify();
                                     let _ = reply.send(serde_json::json!({
                                         "ok": true,

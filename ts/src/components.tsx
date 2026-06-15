@@ -329,7 +329,17 @@ export interface ScrollViewProps extends ViewProps {
     showsHorizontalScrollIndicator?: boolean;
     onScroll?: (event: unknown) => void;
 }
-export interface ScrollViewHandle {
+export interface NativeHostHandle {
+    id?: number;
+    measure?: (callback: (x: number, y: number, width: number, height: number, pageX: number, pageY: number) => void) => void;
+    measureInWindow?: (callback: (x: number, y: number, width: number, height: number) => void) => void;
+    measureLayout?: (
+        relativeToNativeNode: unknown,
+        onSuccess: (left: number, top: number, width: number, height: number) => void,
+        onFail?: () => void,
+    ) => void;
+}
+export interface ScrollViewHandle extends NativeHostHandle {
     scrollTo: (options?: { x?: number; y?: number; animated?: boolean } | number) => void;
     scrollToEnd: (options?: { animated?: boolean }) => void;
 }
@@ -340,18 +350,37 @@ export const ScrollView = forwardRef<ScrollViewHandle, ScrollViewProps>(function
     children,
     ...rest
 }, ref) {
-    const host = useRef<{ id: number } | null>(null);
+    const host = useRef<NativeHostHandle | null>(null);
     useImperativeHandle(
         ref,
         () => ({
+            get id() {
+                return host.current?.id;
+            },
+            measure(callback) {
+                host.current?.measure?.(callback);
+            },
+            measureInWindow(callback) {
+                host.current?.measureInWindow?.(callback);
+            },
+            measureLayout(relativeToNativeNode, onSuccess, onFail) {
+                host.current?.measureLayout?.(relativeToNativeNode, onSuccess, onFail);
+            },
             scrollTo(options) {
-                if (!host.current) return;
+                const id = host.current?.id;
+                if (!id) return;
                 const y = typeof options === "number" ? options : options?.y;
                 const x = typeof options === "object" ? options.x : undefined;
-                sendCommand({ $cmd: "scrollTo", id: host.current.id, x, y });
+                sendCommand({
+                    $cmd: "scrollTo",
+                    id,
+                    ...(x === undefined ? {} : { x }),
+                    ...(y === undefined ? {} : { y }),
+                });
             },
             scrollToEnd() {
-                if (host.current) sendCommand({ $cmd: "scrollToEnd", id: host.current.id });
+                const id = host.current?.id;
+                if (id) sendCommand({ $cmd: "scrollToEnd", id });
             },
         }),
         [],
@@ -367,6 +396,21 @@ export const ScrollView = forwardRef<ScrollViewHandle, ScrollViewProps>(function
         ),
     );
 });
+
+export interface RefreshControlProps {
+    refreshing: boolean;
+    onRefresh?: () => void;
+    progressViewOffset?: number;
+    tintColor?: ColorValue;
+    title?: string;
+    titleColor?: ColorValue;
+    colors?: ColorValue[];
+    enabled?: boolean;
+    style?: StyleProp<ViewStyle>;
+}
+export function RefreshControl(_props: RefreshControlProps) {
+    return null;
+}
 
 // ── Pressable / Touchables / Button ─────────────────────────────────
 type PressableStyle = StyleProp<ViewStyle> | ((state: { pressed: boolean }) => StyleProp<ViewStyle>);

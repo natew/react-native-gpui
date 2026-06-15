@@ -125,6 +125,10 @@ export type BridgeEvent =
           locationY?: number;
           scrollX?: number;
           scrollY?: number;
+          scrollWidth?: number;
+          scrollHeight?: number;
+          scrollContentWidth?: number;
+          scrollContentHeight?: number;
           layout?: { x: number; y: number; width: number; height: number };
           /** GhosttyTerminal `terminalViewport` measure: grid cols/rows */
           cols?: number;

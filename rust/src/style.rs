@@ -686,7 +686,10 @@ fn parse_smoke(input: Option<&str>) -> Option<gpui::Background> {
     if parts.len() != 2 {
         return None;
     }
-    Some(gpui::smoke_background(parse_smoke_stop(&parts[0], 0.58)?, parse_smoke_stop(&parts[1], 0.34)?))
+    Some(gpui::smoke_background(
+        parse_smoke_stop(&parts[0], 0.58)?,
+        parse_smoke_stop(&parts[1], 0.34)?,
+    ))
 }
 
 fn parse_smoke_stop(seg: &str, default_percentage: f32) -> Option<gpui::LinearColorStop> {
@@ -695,7 +698,11 @@ fn parse_smoke_stop(seg: &str, default_percentage: f32) -> Option<gpui::LinearCo
         .trim()
         .split_whitespace()
         .skip(1)
-        .find_map(|token| token.strip_suffix('%').and_then(|pct| pct.parse::<f32>().ok()))
+        .find_map(|token| {
+            token
+                .strip_suffix('%')
+                .and_then(|pct| pct.parse::<f32>().ok())
+        })
         .map(|pct| (pct / 100.0).clamp(0.0, 1.0))
         .unwrap_or(default_percentage);
     Some(linear_color_stop(color, percentage))

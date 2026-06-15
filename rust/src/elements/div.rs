@@ -154,6 +154,11 @@ pub fn scroll_by(id: u64, dx: f32, dy: f32) {
     );
 }
 
+pub fn scroll_position(id: u64) -> (f32, f32) {
+    let offset = get_scroll(id);
+    (offset.x, offset.y)
+}
+
 pub fn scroll_to_end(id: u64) {
     SCROLL_TO_END.lock().unwrap().insert(id);
 }
@@ -1653,7 +1658,17 @@ impl Element for ReactDivElement {
                     if (next.x - cur.x).abs() > 0.01 || (next.y - cur.y).abs() > 0.01 {
                         set_scroll(id, next);
                         if on_scroll {
-                            crate::bridge::scroll_event(id, next.x, next.y);
+                            let width: f32 = bounds.size.width.into();
+                            let height: f32 = bounds.size.height.into();
+                            crate::bridge::scroll_event(
+                                id,
+                                next.x,
+                                next.y,
+                                width,
+                                height,
+                                width + max_scroll_x,
+                                height + max_scroll_y,
+                            );
                         }
                         window.refresh(); // on-demand: repaint to reflect the new offset
                         cx.stop_propagation();

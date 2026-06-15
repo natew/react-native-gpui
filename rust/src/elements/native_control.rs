@@ -22,7 +22,7 @@ use gpui::{
     LayoutId, Pixels, Window,
 };
 
-use crate::elements::{report_layout, ReactElement};
+use crate::elements::{ReactElement, report_layout};
 
 #[cfg(target_os = "macos")]
 use std::cell::RefCell;
@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 #[cfg(target_os = "macos")]
-use cocoa::base::{id, nil, NO, YES};
+use cocoa::base::{NO, YES, id, nil};
 #[cfg(target_os = "macos")]
 use cocoa::foundation::{NSPoint, NSRect, NSSize, NSString};
 #[cfg(target_os = "macos")]

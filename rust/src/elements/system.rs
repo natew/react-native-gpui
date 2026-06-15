@@ -28,7 +28,7 @@ use gpui::{
     LayoutId, Pixels, Window,
 };
 
-use crate::elements::{report_layout, ReactElement};
+use crate::elements::{ReactElement, report_layout};
 
 #[cfg(target_os = "macos")]
 use std::cell::RefCell;
@@ -48,7 +48,7 @@ use cocoa::appkit::{
     NSVisualEffectState,
 };
 #[cfg(target_os = "macos")]
-use cocoa::base::{id, nil, NO, YES};
+use cocoa::base::{NO, YES, id, nil};
 #[cfg(target_os = "macos")]
 use cocoa::foundation::{NSPoint, NSRect, NSSize};
 #[cfg(target_os = "macos")]
@@ -474,6 +474,7 @@ unsafe fn apply_visual_effect_mask_image(host: id, style: &SystemViewStyle) {
     let selector = Sel::register("setMaskImage:");
     let subviews: id = msg_send![host, subviews];
     let count: usize = msg_send![subviews, count];
+    let mut applied = 0usize;
     for index in 0..count {
         let child: id = msg_send![subviews, objectAtIndex: index];
         if child == nil {
@@ -482,7 +483,45 @@ unsafe fn apply_visual_effect_mask_image(host: id, style: &SystemViewStyle) {
         let responds: bool = msg_send![child, respondsToSelector: selector];
         if responds {
             let _: () = msg_send![child, setMaskImage: mask];
+            applied += 1;
         }
+    }
+
+    if std::env::var_os("RNGPUI_GLASS_DEBUG").is_some() {
+        let cls = if count > 0 {
+            let first: id = msg_send![subviews, objectAtIndex: 0usize];
+            if first != nil {
+                let ns: id = msg_send![first, className];
+                let utf8: *const std::os::raw::c_char = if ns != nil {
+                    msg_send![ns, UTF8String]
+                } else {
+                    std::ptr::null()
+                };
+                if utf8.is_null() {
+                    "<none>".to_string()
+                } else {
+                    std::ffi::CStr::from_ptr(utf8)
+                        .to_string_lossy()
+                        .into_owned()
+                }
+            } else {
+                "<nil>".to_string()
+            }
+        } else {
+            "<empty>".to_string()
+        };
+        eprintln!(
+            "[glassdbg] mask host={:.0}x{:.0} needs_mask={} top={:?} edge={:?} radius={:.1} subviews={} child0={} maskApplied={}",
+            bounds.size.width,
+            bounds.size.height,
+            needs_mask,
+            style.top_fade_start,
+            style.edge_fade,
+            style.corner_clip.radius,
+            count,
+            cls,
+            applied
+        );
     }
 
     if mask != nil {
@@ -864,86 +903,6 @@ unsafe fn apply_surface_style(id: u64, view: id, style: &SystemViewStyle) {
             });
         }
     }
-
-    unsafe {
-        apply_fade_mask(layer, style.edge_fade, style.top_fade_start);
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn apply_fade_mask(layer: id, edge_fade: Option<f32>, top_fade_start: Option<f32>) {
-    if layer == nil {
-        return;
-    }
-    if let Some(start) = top_fade_start {
-        unsafe {
-            apply_top_fade_mask(layer, f64::from(start.clamp(0.0, 1.0)));
-        }
-        return;
-    }
-    let Some(edge_fade) = edge_fade else {
-        let _: () = msg_send![layer, setMask: nil];
-        return;
-    };
-    let edge = f64::from(edge_fade.clamp(0.0, 0.5));
-    if edge <= 0.0 {
-        let _: () = msg_send![layer, setMask: nil];
-        return;
-    }
-
-    let mask: id = msg_send![class!(CAGradientLayer), layer];
-    let bounds: NSRect = msg_send![layer, bounds];
-    let _: () = msg_send![mask, setFrame: bounds];
-    let _: () = msg_send![mask, setStartPoint: NSPoint::new(0.0, 0.5)];
-    let _: () = msg_send![mask, setEndPoint: NSPoint::new(1.0, 0.5)];
-
-    let transparent: id = msg_send![class!(NSColor), colorWithSRGBRed: 1.0f64 green: 1.0f64 blue: 1.0f64 alpha: 0.0f64];
-    let opaque: id = msg_send![class!(NSColor), colorWithSRGBRed: 1.0f64 green: 1.0f64 blue: 1.0f64 alpha: 1.0f64];
-    let transparent_cg: id = msg_send![transparent, CGColor];
-    let opaque_cg: id = msg_send![opaque, CGColor];
-    let colors = [transparent_cg, opaque_cg, opaque_cg, transparent_cg];
-    let colors_array: id =
-        msg_send![class!(NSArray), arrayWithObjects: colors.as_ptr() count: colors.len()];
-
-    let left: id = msg_send![class!(NSNumber), numberWithDouble: edge];
-    let right: id = msg_send![class!(NSNumber), numberWithDouble: 1.0f64 - edge];
-    let zero: id = msg_send![class!(NSNumber), numberWithDouble: 0.0f64];
-    let one: id = msg_send![class!(NSNumber), numberWithDouble: 1.0f64];
-    let locations = [zero, left, right, one];
-    let locations_array: id =
-        msg_send![class!(NSArray), arrayWithObjects: locations.as_ptr() count: locations.len()];
-
-    let _: () = msg_send![mask, setColors: colors_array];
-    let _: () = msg_send![mask, setLocations: locations_array];
-    let _: () = msg_send![layer, setMask: mask];
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn apply_top_fade_mask(layer: id, start: f64) {
-    let mask: id = msg_send![class!(CAGradientLayer), layer];
-    let bounds: NSRect = msg_send![layer, bounds];
-    let _: () = msg_send![mask, setFrame: bounds];
-    let _: () = msg_send![mask, setStartPoint: NSPoint::new(0.5, 0.0)];
-    let _: () = msg_send![mask, setEndPoint: NSPoint::new(0.5, 1.0)];
-
-    let transparent: id = msg_send![class!(NSColor), colorWithSRGBRed: 1.0f64 green: 1.0f64 blue: 1.0f64 alpha: 0.0f64];
-    let opaque: id = msg_send![class!(NSColor), colorWithSRGBRed: 1.0f64 green: 1.0f64 blue: 1.0f64 alpha: 1.0f64];
-    let transparent_cg: id = msg_send![transparent, CGColor];
-    let opaque_cg: id = msg_send![opaque, CGColor];
-    let colors = [transparent_cg, opaque_cg, opaque_cg];
-    let colors_array: id =
-        msg_send![class!(NSArray), arrayWithObjects: colors.as_ptr() count: colors.len()];
-
-    let zero: id = msg_send![class!(NSNumber), numberWithDouble: 0.0f64];
-    let fade: id = msg_send![class!(NSNumber), numberWithDouble: start];
-    let one: id = msg_send![class!(NSNumber), numberWithDouble: 1.0f64];
-    let locations = [zero, fade, one];
-    let locations_array: id =
-        msg_send![class!(NSArray), arrayWithObjects: locations.as_ptr() count: locations.len()];
-
-    let _: () = msg_send![mask, setColors: colors_array];
-    let _: () = msg_send![mask, setLocations: locations_array];
-    let _: () = msg_send![layer, setMask: mask];
 }
 
 // Drive the shadow decor view from the resolved shadow. Like the webview decor, split

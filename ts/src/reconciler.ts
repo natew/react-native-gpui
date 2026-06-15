@@ -252,6 +252,10 @@ export function dispatchEvent(
         locationY?: number;
         scrollX?: number;
         scrollY?: number;
+        scrollWidth?: number;
+        scrollHeight?: number;
+        scrollContentWidth?: number;
+        scrollContentHeight?: number;
         layout?: unknown;
         cols?: number;
         rows?: number;
@@ -637,6 +641,10 @@ function createEvent(
         locationY?: number;
         scrollX?: number;
         scrollY?: number;
+        scrollWidth?: number;
+        scrollHeight?: number;
+        scrollContentWidth?: number;
+        scrollContentHeight?: number;
         layout?: unknown;
     },
 ) {
@@ -670,6 +678,14 @@ function createEvent(
             contentOffset: {
                 x: payload.scrollX ?? 0,
                 y: payload.scrollY ?? 0,
+            },
+            contentSize: {
+                width: payload.scrollContentWidth ?? 0,
+                height: payload.scrollContentHeight ?? 0,
+            },
+            layoutMeasurement: {
+                width: payload.scrollWidth ?? 0,
+                height: payload.scrollHeight ?? 0,
             },
         },
         locationX: payload.locationX ?? 0,

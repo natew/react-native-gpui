@@ -76,6 +76,10 @@ unsafe extern "C" {
 struct HostCall {
     func: &'static str,
     arg: String,
+    // when this call was enqueued, so the dispatcher can measure how long it waited
+    // behind other work on the single JS thread (RNGPUI_PSEUDO_TRACE reads this for
+    // hover/press feedback — the latency that grows under load).
+    posted_at: Instant,
 }
 enum JsCall {
     Call(HostCall),
@@ -90,7 +94,11 @@ static JS_CALLS: OnceLock<Sender<JsCall>> = OnceLock::new();
 
 pub fn post(func: &'static str, arg: String) {
     if let Some(tx) = JS_CALLS.get() {
-        let _ = tx.send(JsCall::Call(HostCall { func, arg }));
+        let _ = tx.send(JsCall::Call(HostCall {
+            func,
+            arg,
+            posted_at: Instant::now(),
+        }));
     }
 }
 
@@ -125,7 +133,11 @@ static UI_CALLS: OnceLock<Sender<JsCall>> = OnceLock::new();
 
 pub fn post_ui(func: &'static str, arg: String) {
     if let Some(tx) = UI_CALLS.get() {
-        let _ = tx.send(JsCall::Call(HostCall { func, arg }));
+        let _ = tx.send(JsCall::Call(HostCall {
+            func,
+            arg,
+            posted_at: Instant::now(),
+        }));
     }
 }
 
@@ -981,14 +993,27 @@ enum CKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QueueClass {
     DiscreteInput,
+    // native hover/press pseudo-state flips. Interactive PAINT feedback (Tamagui drives
+    // hoverStyle/pressStyle off these without a React commit) — it must land promptly, so
+    // it's dispatched right after discrete input and AHEAD of async completions. It used to
+    // fall in `Other`, i.e. behind every ws/fetch frame, which is why a hover sweep lagged
+    // under load (a busy terminal floods `AsyncCompletion`). Coalesced latest-wins per node.
+    Pseudo,
     AsyncCompletion,
     Other,
 }
 
 fn queue_class(func: &'static str, arg: &str) -> QueueClass {
-    if func == "__rngpui_onHostEvent" && is_discrete_input_event(arg) {
-        QueueClass::DiscreteInput
-    } else if func == "__rngpui_wsEvent"
+    if func == "__rngpui_onHostEvent" {
+        if is_discrete_input_event(arg) {
+            return QueueClass::DiscreteInput;
+        }
+        if is_pseudo_event(arg) {
+            return QueueClass::Pseudo;
+        }
+        return QueueClass::Other;
+    }
+    if func == "__rngpui_wsEvent"
         || func == "__rngpui_fetchDone"
         || func == "__rngpui_audioDone"
         || func == "__rngpui_audioLevel"
@@ -997,6 +1022,12 @@ fn queue_class(func: &'static str, arg: &str) -> QueueClass {
     } else {
         QueueClass::Other
     }
+}
+
+// cheap substring check, mirroring is_discrete_input_event — pseudo carries absolute
+// {hovered,pressed} so latest-wins coalescing is lossless.
+fn is_pseudo_event(arg: &str) -> bool {
+    arg.contains("\"type\":\"event\"") && arg.contains("\"event\":\"pseudo\"")
 }
 
 fn is_discrete_input_event(arg: &str) -> bool {
@@ -1078,36 +1109,17 @@ fn flush_events(rt: *mut c_void, events: &mut Vec<String>) {
 /// input always runs before async completions so a slow fetch/ws frame cannot jump ahead of
 /// a tap that native already accepted; async completions still run before coalesced layout /
 /// move / scroll noise.
-fn dispatch_coalesced(rt: *mut c_void, batch: Vec<HostCall>) {
-    if batch.len() == 1 {
-        call1(rt, batch[0].func, &batch[0].arg);
+/// Drop superseded high-frequency events IN PLACE, keeping only the LATEST per `CKey`
+/// (resize / per-node layout / move / scroll / pseudo). Survivor order is preserved.
+/// Discrete-input / async / unkeyed calls are never dropped. Each coalescable payload
+/// carries absolute state, so latest-wins is lossless.
+fn coalesce_latest(calls: &mut Vec<HostCall>) {
+    if calls.len() < 2 {
         return;
     }
-    let mut input_events = Vec::new();
-    let mut async_completions = Vec::new();
-    let mut batch_rest = Vec::new();
-    for call in batch {
-        match queue_class(call.func, &call.arg) {
-            QueueClass::DiscreteInput => input_events.push(call.arg),
-            QueueClass::AsyncCompletion => async_completions.push(call),
-            QueueClass::Other => batch_rest.push(call),
-        }
-    }
-    flush_events(rt, &mut input_events);
-    for call in async_completions {
-        call1(rt, call.func, &call.arg);
-    }
-    let batch = batch_rest;
-    if batch.is_empty() {
-        return;
-    }
-    if batch.len() == 1 {
-        call1(rt, batch[0].func, &batch[0].arg);
-        return;
-    }
-    let mut keep = vec![true; batch.len()];
     let mut last: HashMap<CKey, usize> = HashMap::new();
-    for (i, c) in batch.iter().enumerate() {
+    let mut keep = vec![true; calls.len()];
+    for (i, c) in calls.iter().enumerate() {
         if c.func != "__rngpui_onHostEvent" {
             continue;
         }
@@ -1117,14 +1129,74 @@ fn dispatch_coalesced(rt: *mut c_void, batch: Vec<HostCall>) {
             keep[prev] = false;
         }
     }
-    if std::env::var_os("RNGPUI_DEBUG_QUEUE").is_some() && batch.len() > 16 {
-        let kept = keep.iter().filter(|k| **k).count();
-        eprintln!("[hermes] coalesced batch {} -> {}", batch.len(), kept);
+    let mut i = 0;
+    calls.retain(|_| {
+        let k = keep[i];
+        i += 1;
+        k
+    });
+}
+
+/// Pure dispatch plan: bucket a batch by `QueueClass`, coalesce the floods, and return the
+/// calls in final dispatch ORDER. The order encodes interaction priority on the single JS
+/// thread — (1) discrete input (taps/keys the user just made; never reordered behind
+/// anything), then (2) pseudo feedback (hover/press paint, coalesced latest-per-node; must
+/// land promptly), then (3) async completions (ws / fetch / audio — bulk data, where a busy
+/// terminal lives), then (4) move/scroll/layout/resize noise (coalesced; observational).
+///
+/// Promoting (2) above (3) is the fix for the "hover lags under load" symptom: a flood of
+/// websocket frames (terminal output) no longer delays the hover highlight. Kept FFI-free so
+/// the ordering + coalescing is unit-testable.
+fn plan_dispatch(batch: Vec<HostCall>) -> Vec<HostCall> {
+    let mut input = Vec::new();
+    let mut pseudo = Vec::new();
+    let mut async_completions = Vec::new();
+    let mut rest = Vec::new();
+    for call in batch {
+        match queue_class(call.func, &call.arg) {
+            QueueClass::DiscreteInput => input.push(call),
+            QueueClass::Pseudo => pseudo.push(call),
+            QueueClass::AsyncCompletion => async_completions.push(call),
+            QueueClass::Other => rest.push(call),
+        }
     }
+    coalesce_latest(&mut pseudo);
+    coalesce_latest(&mut rest);
+    let mut plan = input;
+    plan.extend(pseudo);
+    plan.extend(async_completions);
+    plan.extend(rest);
+    plan
+}
+
+fn dispatch_coalesced(rt: *mut c_void, batch: Vec<HostCall>) {
+    // RNGPUI_PSEUDO_TRACE logs how long each hover/press flip waited in the JS-thread queue
+    // before dispatch, plus the batch size it landed in. On an idle machine `batch=1` and
+    // wait≈0 (pseudo dispatches immediately); under load it lands in a larger batch — the
+    // priority order (input → pseudo → async → noise) keeps that wait small instead of it
+    // sitting behind a flood of websocket/terminal frames.
+    let trace_pseudo = std::env::var_os("RNGPUI_PSEUDO_TRACE").is_some();
+    let raw_len = batch.len();
+    if raw_len == 1 {
+        if trace_pseudo && batch[0].func == "__rngpui_onHostEvent" && is_pseudo_event(&batch[0].arg)
+        {
+            let waited = batch[0].posted_at.elapsed().as_secs_f64() * 1000.0;
+            eprintln!("[pseudo-trace] dispatch wait={waited:.2}ms batch=1");
+        }
+        call1(rt, batch[0].func, &batch[0].arg);
+        return;
+    }
+    let plan = plan_dispatch(batch);
+    if std::env::var_os("RNGPUI_DEBUG_QUEUE").is_some() && raw_len > 16 {
+        eprintln!("[hermes] coalesced batch {raw_len} -> {}", plan.len());
+    }
+    // Execute the plan: consecutive `onHostEvent` calls ride one `__rngpui_onHostEventBatch`
+    // (a single React batchedUpdates); a non-event call breaks the run and fires inline.
     let mut events: Vec<String> = Vec::new();
-    for (i, c) in batch.into_iter().enumerate() {
-        if !keep[i] {
-            continue;
+    for c in plan {
+        if trace_pseudo && c.func == "__rngpui_onHostEvent" && is_pseudo_event(&c.arg) {
+            let waited = c.posted_at.elapsed().as_secs_f64() * 1000.0;
+            eprintln!("[pseudo-trace] dispatch wait={waited:.2}ms batch={raw_len}");
         }
         if c.func == "__rngpui_onHostEvent" {
             events.push(c.arg);
@@ -1267,7 +1339,30 @@ fn perf_batch_label(batch: &[JsCall]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CKey, QueueClass, coalesce_key, queue_class};
+    use super::{CKey, HostCall, QueueClass, coalesce_key, plan_dispatch, queue_class};
+    use std::time::Instant;
+
+    fn call(func: &'static str, arg: &str) -> HostCall {
+        HostCall {
+            func,
+            arg: arg.to_string(),
+            posted_at: Instant::now(),
+        }
+    }
+
+    // a short label for a planned call: the host event name, else the host fn.
+    fn label(c: &HostCall) -> String {
+        if c.func == "__rngpui_onHostEvent" {
+            if let Some(i) = c.arg.find("\"event\":\"") {
+                let rest = &c.arg[i + 9..];
+                if let Some(j) = rest.find('"') {
+                    return rest[..j].to_string();
+                }
+            }
+            return "event".to_string();
+        }
+        c.func.to_string()
+    }
 
     #[test]
     fn pseudo_events_coalesce_latest_wins_per_node() {
@@ -1284,10 +1379,94 @@ mod tests {
     }
 
     #[test]
-    fn pseudo_events_are_not_discrete_input() {
-        // the lane is renderer-driven, not a tap React must run before async — it coalesces.
+    fn pseudo_events_are_their_own_priority_class() {
+        // hover/press feedback is interactive paint: it gets its own class so it can be
+        // dispatched ahead of async completions (a busy terminal must not delay a highlight),
+        // while still coalescing latest-per-node. It is NOT discrete input (renderer-driven,
+        // not a tap) and NOT plain `Other` (which sits behind async).
         let arg = r#"{"type":"event","id":7,"event":"pseudo","hovered":true,"pressed":false}"#;
-        assert_eq!(queue_class("__rngpui_onHostEvent", arg), QueueClass::Other);
+        assert_eq!(queue_class("__rngpui_onHostEvent", arg), QueueClass::Pseudo);
+    }
+
+    #[test]
+    fn pseudo_feedback_dispatches_before_async_completions() {
+        // THE regression guard for "hover lags under load": a flood of websocket frames
+        // (terminal output) must not be dispatched ahead of a hover flip on the single JS
+        // thread. Build a batch where ws frames arrive before the pseudo flip; the plan must
+        // still place the pseudo first.
+        let batch = vec![
+            call("__rngpui_wsEvent", r#"{"event":"message","n":1}"#),
+            call("__rngpui_wsEvent", r#"{"event":"message","n":2}"#),
+            call("__rngpui_wsEvent", r#"{"event":"message","n":3}"#),
+            call(
+                "__rngpui_onHostEvent",
+                r#"{"type":"event","id":4,"event":"pseudo","hovered":true,"pressed":false}"#,
+            ),
+        ];
+        let plan: Vec<String> = plan_dispatch(batch).iter().map(label).collect();
+        assert_eq!(
+            plan,
+            vec![
+                "pseudo",
+                "__rngpui_wsEvent",
+                "__rngpui_wsEvent",
+                "__rngpui_wsEvent"
+            ],
+            "pseudo must be dispatched before any async completion"
+        );
+    }
+
+    #[test]
+    fn plan_dispatch_orders_by_interaction_priority() {
+        // discrete input → pseudo feedback → async completions → motion/layout noise.
+        let batch = vec![
+            call(
+                "__rngpui_onHostEvent",
+                r#"{"type":"event","id":1,"event":"mouseMove"}"#,
+            ),
+            call("__rngpui_wsEvent", r#"{"event":"message"}"#),
+            call(
+                "__rngpui_onHostEvent",
+                r#"{"type":"event","id":2,"event":"pseudo","hovered":true,"pressed":false}"#,
+            ),
+            call(
+                "__rngpui_onHostEvent",
+                r#"{"type":"event","id":3,"event":"mouseDown"}"#,
+            ),
+        ];
+        let plan: Vec<String> = plan_dispatch(batch).iter().map(label).collect();
+        assert_eq!(
+            plan,
+            vec!["mouseDown", "pseudo", "__rngpui_wsEvent", "mouseMove"]
+        );
+    }
+
+    #[test]
+    fn plan_dispatch_coalesces_pseudo_latest_per_node() {
+        // two flips of node 5 collapse to the latest; node 6 survives independently; the
+        // coalescing happens within the (promoted) pseudo lane, ahead of the ws frame.
+        let batch = vec![
+            call(
+                "__rngpui_onHostEvent",
+                r#"{"type":"event","id":5,"event":"pseudo","hovered":true,"pressed":false}"#,
+            ),
+            call(
+                "__rngpui_onHostEvent",
+                r#"{"type":"event","id":5,"event":"pseudo","hovered":false,"pressed":false}"#,
+            ),
+            call(
+                "__rngpui_onHostEvent",
+                r#"{"type":"event","id":6,"event":"pseudo","hovered":true,"pressed":false}"#,
+            ),
+            call("__rngpui_wsEvent", r#"{"event":"message"}"#),
+        ];
+        let plan = plan_dispatch(batch);
+        let labels: Vec<String> = plan.iter().map(label).collect();
+        assert_eq!(labels, vec!["pseudo", "pseudo", "__rngpui_wsEvent"]);
+        // the surviving node-5 flip is the LATEST (hovered:false), not the stale first one.
+        assert!(plan[0].arg.contains("\"id\":5"));
+        assert!(plan[0].arg.contains("\"hovered\":false"));
+        assert!(plan[1].arg.contains("\"id\":6"));
     }
 
     #[test]

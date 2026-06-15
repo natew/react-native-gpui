@@ -416,6 +416,45 @@ extern "C" fn host_set_node_style(ud: *mut c_void, arg: *const c_char) {
     }
 }
 
+// emitter fast path: a zero-commit (avoidReRenders) Tamagui driver pushes a resolved
+// target style + transition straight here instead of going through a React commit. The
+// arg is `{globalId, style: {<resolved target>}, transition: <_gpuiTransition descriptor>}`;
+// the native tween engine arms a from→target tween, ticked into the same overlay the
+// commit-detect path uses.
+extern "C" fn host_animate_node_style(ud: *mut c_void, arg: *const c_char) {
+    let ctx = ctx_ref(ud);
+    let s = arg_str(arg);
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) else {
+        eprintln!("[hermes] animateNodeStyle: bad json");
+        return;
+    };
+    let Some(global_id) = value.get("globalId").and_then(|v| v.as_u64()) else {
+        return;
+    };
+    let style = value
+        .get("style")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_else(serde_json::Map::new);
+    let transition = value
+        .get("transition")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_else(serde_json::Map::new);
+    if anim_trace() {
+        eprintln!(
+            "[anim-trace] animateNodeStyle id={} keys={}",
+            global_id,
+            style.keys().cloned().collect::<Vec<_>>().join(",")
+        );
+    }
+    let _ = ctx.tree_tx.send(crate::Incoming::AnimateNodeStyle {
+        global_id,
+        style,
+        transition,
+    });
+}
+
 extern "C" fn host_now(ud: *mut c_void, _arg: *const c_char) -> f64 {
     ctx_ref(ud).start.elapsed().as_secs_f64() * 1000.0
 }
@@ -940,6 +979,12 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
 
             install_void(rt, "__rngpui_applyTree", host_apply_tree, ud);
             install_void(rt, "__rngpui_setNodeStyle", host_set_node_style, ud);
+            install_void(
+                rt,
+                "__rngpui_animateNodeStyle",
+                host_animate_node_style,
+                ud,
+            );
             install_void(rt, "__rngpui_log", host_log, ud);
             install_void(rt, "__rngpui_exit", host_exit, ud);
             install_void(rt, "__rngpui_reloadApp", host_reload_app, ud);
@@ -1637,7 +1682,11 @@ mod offthread_pseudo_tests {
         assert_eq!(pseudo_slots_for(id), Some((10, 11)));
         // a remounted node re-registers; the latest slots must win.
         register(id, 20, 21);
-        assert_eq!(pseudo_slots_for(id), Some((20, 21)), "re-register overwrites");
+        assert_eq!(
+            pseudo_slots_for(id),
+            Some((20, 21)),
+            "re-register overwrites"
+        );
         unregister(id);
         assert_eq!(pseudo_slots_for(id), None, "unregister clears the entry");
     }
@@ -1674,7 +1723,11 @@ mod offthread_pseudo_tests {
             set_pseudo_slot_and_wake(bad, 1.0);
         }
         assert_eq!(unsafe { *buf }, magic, "magic header must be untouched");
-        assert_eq!(unsafe { *buf.add(1) }, cap, "capacity header must be untouched");
+        assert_eq!(
+            unsafe { *buf.add(1) },
+            cap,
+            "capacity header must be untouched"
+        );
     }
 
     #[test]
@@ -1684,8 +1737,16 @@ mod offthread_pseudo_tests {
         let slot = 100i64; // in range, away from the header and the other tests' ids
         let buf = sv_slots() as *const f64;
         set_pseudo_slot_and_wake(slot, 1.0);
-        assert_eq!(unsafe { *buf.add(slot as usize) }, 1.0, "flip-on writes 1.0");
+        assert_eq!(
+            unsafe { *buf.add(slot as usize) },
+            1.0,
+            "flip-on writes 1.0"
+        );
         set_pseudo_slot_and_wake(slot, 0.0);
-        assert_eq!(unsafe { *buf.add(slot as usize) }, 0.0, "flip-off writes 0.0");
+        assert_eq!(
+            unsafe { *buf.add(slot as usize) },
+            0.0,
+            "flip-off writes 0.0"
+        );
     }
 }

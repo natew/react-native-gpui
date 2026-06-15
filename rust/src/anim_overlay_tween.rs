@@ -237,6 +237,60 @@ fn expand_keys(keys: &[Value], style_json: &Map<String, Value>) -> Vec<String> {
         .collect()
 }
 
+/// the parsed `_gpuiTransition` descriptor (shape shared by `note_commit`'s committed
+/// style and the emitter path's `animate_to`). borrows from the descriptor map.
+struct TransitionDesc<'a> {
+    keys: Vec<String>,
+    bykey: Option<&'a Map<String, Value>>,
+    default: Option<&'a Value>,
+    delay: Duration,
+}
+
+/// parse a `_gpuiTransition` descriptor against the target style. `keys` is expanded
+/// (`["all"]` → animatable keys present in `target`). shared by both arming paths so the
+/// descriptor shape lives in one place.
+fn parse_transition<'a>(
+    transition: &'a Map<String, Value>,
+    target: &Map<String, Value>,
+) -> TransitionDesc<'a> {
+    let keys = transition
+        .get("keys")
+        .and_then(|v| v.as_array())
+        .map(|a| expand_keys(a, target))
+        .unwrap_or_default();
+    let bykey = transition.get("byKey").and_then(|v| v.as_object());
+    let default = transition.get("default");
+    let delay = Duration::from_secs_f64(
+        transition
+            .get("delay")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+            .max(0.0)
+            / 1000.0,
+    );
+    TransitionDesc {
+        keys,
+        bykey,
+        default,
+        delay,
+    }
+}
+
+/// the current interpolated value of an in-flight tween at `now` — used so an interrupted
+/// animation re-arms from where it actually is, not from its original `from`. before the
+/// delay this is the `from` value; after the duration it's the exact target.
+fn tween_current_value(tw: &Tween, key: &str, now: Instant) -> Option<Value> {
+    let elapsed = now.saturating_duration_since(tw.start);
+    if elapsed < tw.delay {
+        return Some(tw.from_json.clone());
+    }
+    let raw = (elapsed - tw.delay).as_secs_f32() / tw.duration.as_secs_f32();
+    if raw >= 1.0 {
+        return Some(tw.to_json.clone());
+    }
+    interpolate(&tw.from_json, &tw.to_json, key, ease(&tw.easing, raw))
+}
+
 /// detection entry, called once per committed node. diffs the committed animatable values
 /// against the prior commit and arms a tween for each changed key the transition names.
 /// returns true if any tween was armed. with no `_gpuiTransition` it just refreshes the
@@ -256,21 +310,12 @@ pub fn note_commit(global_id: u64, style_json: &Map<String, Value>) -> bool {
         return false;
     };
 
-    let keys = transition
-        .get("keys")
-        .and_then(|v| v.as_array())
-        .map(|a| expand_keys(a, style_json))
-        .unwrap_or_default();
-    let bykey = transition.get("byKey").and_then(|v| v.as_object());
-    let default = transition.get("default");
-    let delay = Duration::from_secs_f64(
-        transition
-            .get("delay")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0)
-            .max(0.0)
-            / 1000.0,
-    );
+    let TransitionDesc {
+        keys,
+        bykey,
+        default,
+        delay,
+    } = parse_transition(transition, style_json);
 
     let mut prev = PREV_APPLIED.lock().unwrap();
     let prev_entry = prev.entry(global_id).or_default();
@@ -317,6 +362,90 @@ pub fn note_commit(global_id: u64, style_json: &Map<String, Value>) -> bool {
     }
 
     armed
+}
+
+/// emitter entry — the analog of `note_commit` for a zero-commit (avoidReRenders) driver
+/// that pushes a resolved target style + transition straight to native instead of going
+/// through a React commit. `target` is the COMPLETE merged target style (not a delta);
+/// `transition` is the same `_gpuiTransition` descriptor shape. for each named key we arm
+/// a tween from the node's current value (a live tween's interpolated value if one is in
+/// flight, else `PREV_APPLIED`) toward the target. with no prior value the target is just
+/// recorded and snapped (nothing to animate from).
+pub fn animate_to(global_id: u64, target: &Map<String, Value>, transition: &Map<String, Value>) {
+    let TransitionDesc {
+        keys,
+        bykey,
+        default,
+        delay,
+    } = parse_transition(transition, target);
+
+    let now = Instant::now();
+    // keys that must be written to the overlay NOW (instant / snap). unlike the commit
+    // path, the emitter has NO React commit behind it — the overlay is the only way the
+    // new value reaches paint, so an instant key (duration 0, or no prior to animate
+    // from) must be written here or it would never show.
+    let mut snap: Map<String, Value> = Map::new();
+    {
+        let mut prev = PREV_APPLIED.lock().unwrap();
+        let prev_entry = prev.entry(global_id).or_default();
+        let mut tweens = GPUI_TWEENS.lock().unwrap();
+
+        for key in &keys {
+            let Some(to_val) = target.get(key) else {
+                continue;
+            };
+            let map_key = (global_id, key.clone());
+            // `from` = a live tween's CURRENT interpolated value (so an interrupted hover
+            // animates smoothly from where it is), else the last applied value.
+            let from_val = tweens
+                .get(&map_key)
+                .and_then(|tw| tween_current_value(tw, key, now))
+                .or_else(|| prev_entry.get(key).cloned());
+            prev_entry.insert(key.clone(), to_val.clone());
+
+            let Some(from_val) = from_val else {
+                // no prior value = nothing to animate from; snap straight to the target.
+                snap.insert(key.clone(), to_val.clone());
+                continue;
+            };
+            if from_val == *to_val {
+                continue;
+            }
+            let cfg = key_config(bykey.and_then(|m| m.get(key)), default, delay);
+            if cfg.duration.is_zero() {
+                // duration 0 → snap to target now; drop any in-flight tween for this key.
+                tweens.remove(&map_key);
+                snap.insert(key.clone(), to_val.clone());
+                continue;
+            }
+            // idempotent: an identical in-flight tween (same from/to/config) shouldn't restart.
+            if let Some(existing) = tweens.get(&map_key)
+                && existing.from_json == from_val
+                && existing.to_json == *to_val
+                && existing.duration == cfg.duration
+                && existing.delay == cfg.delay
+                && existing.easing == cfg.easing
+            {
+                continue;
+            }
+            tweens.insert(
+                map_key,
+                Tween {
+                    from_json: from_val,
+                    to_json: to_val.clone(),
+                    start: now,
+                    delay: cfg.delay,
+                    duration: cfg.duration,
+                    easing: cfg.easing,
+                },
+            );
+        }
+    }
+
+    // write instant/snap values straight to the overlay (locks released above first).
+    if !snap.is_empty() {
+        crate::anim_overlay::apply_ops(vec![(global_id, snap)]);
+    }
 }
 
 fn interpolate(from: &Value, to: &Value, key: &str, p: f32) -> Option<Value> {
@@ -502,6 +631,46 @@ mod tests {
                 .unwrap()
         ));
         assert!(!tweens_active());
+    }
+
+    #[test]
+    fn animate_to_arms_and_reinterrupts_from_live_value() {
+        let _g = TEST_LOCK.lock().unwrap();
+        reset();
+        let transition = json!({"keys": ["opacity"], "byKey": {}, "default": {"duration": 100}});
+        let transition = transition.as_object().unwrap();
+
+        // no prior value: first animate_to records the target and snaps (no tween).
+        animate_to(1, json!({"opacity": 1.0}).as_object().unwrap(), transition);
+        assert!(!tweens_active());
+
+        // with a prior value present, animate_to to a new target arms a tween 1.0 → 0.0.
+        animate_to(1, json!({"opacity": 0.0}).as_object().unwrap(), transition);
+        assert!(tweens_active());
+        let orig = {
+            let tweens = GPUI_TWEENS.lock().unwrap();
+            let tw = tweens.get(&(1, "opacity".to_string())).unwrap();
+            assert_eq!(tw.from_json.as_f64().unwrap(), 1.0);
+            assert_eq!(tw.to_json.as_f64().unwrap(), 0.0);
+            tw.from_json.clone()
+        };
+        let orig_from = orig.as_f64().unwrap();
+
+        // let the tween advance partway, then re-target mid-flight. the new tween's `from`
+        // must be the live interpolated value (strictly between original from and to), not
+        // the original `from` — proving the interruption resumes from where it is.
+        std::thread::sleep(Duration::from_millis(30));
+        animate_to(1, json!({"opacity": 0.5}).as_object().unwrap(), transition);
+        let new_from = {
+            let tweens = GPUI_TWEENS.lock().unwrap();
+            let tw = tweens.get(&(1, "opacity".to_string())).unwrap();
+            assert_eq!(tw.to_json.as_f64().unwrap(), 0.5);
+            tw.from_json.as_f64().unwrap()
+        };
+        assert!(
+            new_from < orig_from && new_from > 0.0,
+            "re-armed from live value {new_from}, not original from {orig_from} or target 0.0"
+        );
     }
 
     #[test]

@@ -1618,6 +1618,14 @@ pub(crate) enum Incoming {
     SetNodeStyle {
         ops: Vec<(u64, serde_json::Map<String, serde_json::Value>)>,
     },
+    /// emitter analog of `SetNodeStyle` for a zero-commit (avoidReRenders) driver: a
+    /// resolved target style + `_gpuiTransition` descriptor that the native tween engine
+    /// turns into a from→target tween, ticked into the same `anim_overlay` overlay.
+    AnimateNodeStyle {
+        global_id: u64,
+        style: serde_json::Map<String, serde_json::Value>,
+        transition: serde_json::Map<String, serde_json::Value>,
+    },
     Eval {
         id: u64,
         js: String,
@@ -3285,6 +3293,22 @@ fn main() {
                                     this.write_debug_dump(cx);
                                     cx.notify();
                                 }
+                            }
+                            Incoming::AnimateNodeStyle {
+                                global_id,
+                                style,
+                                transition,
+                            } => {
+                                // emitter fast path: arm a from→target tween natively (no
+                                // React commit), then lazy-arm the same tween driver the
+                                // Tree commit-detect path uses so it ticks to settle.
+                                crate::anim_overlay_tween::animate_to(
+                                    global_id,
+                                    &style,
+                                    &transition,
+                                );
+                                drive_gpui_tweens = crate::anim_overlay_tween::tweens_active();
+                                cx.notify();
                             }
                             Incoming::Eval { id, js } => {
                                 if let Some(view) = this.webviews.get(&id) {

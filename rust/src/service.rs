@@ -31,6 +31,7 @@ static APP_COMMAND_BINDING_SLOTS: Lazy<Mutex<HashSet<AppCommandBindingSlot>>> =
     Lazy::new(|| Mutex::new(HashSet::new()));
 
 mod anim_overlay;
+mod anim_overlay_tween;
 mod anim_trace;
 mod audio;
 #[cfg(target_os = "macos")]
@@ -346,6 +347,13 @@ fn parse_json_tree(
         .as_ref()
         .map(ElementStyle::from_json)
         .unwrap_or_default();
+    // declarative `_gpuiTransition` (the gpui CSS-transition driver): diff this commit's
+    // animatable values vs. the prior commit and arm any tweens. armed state lives in the
+    // tween module, so the Tree handler checks `tweens_active()` post-commit to lazy-arm
+    // the driver loop.
+    if let Some(serde_json::Value::Object(style_map)) = &style_json {
+        crate::anim_overlay_tween::note_commit(global_id, style_map);
+    }
     // opt-in renderer→JS pseudo lane: a node sets `pseudoEvents: true` (the tamagui
     // platform driver does this via the rngpui pseudo registry) to ask the host to emit a
     // coalesced `pseudo` event on each native hover/press flip. Opt-in so we don't spam an
@@ -1610,6 +1618,14 @@ pub(crate) enum Incoming {
     SetNodeStyle {
         ops: Vec<(u64, serde_json::Map<String, serde_json::Value>)>,
     },
+    /// emitter analog of `SetNodeStyle` for a zero-commit (avoidReRenders) driver: a
+    /// resolved target style + `_gpuiTransition` descriptor that the native tween engine
+    /// turns into a from→target tween, ticked into the same `anim_overlay` overlay.
+    AnimateNodeStyle {
+        global_id: u64,
+        style: serde_json::Map<String, serde_json::Value>,
+        transition: serde_json::Map<String, serde_json::Value>,
+    },
     Eval {
         id: u64,
         js: String,
@@ -2503,6 +2519,7 @@ fn main() {
         }
 
         let native_layout_driver_active = Arc::new(AtomicBool::new(false));
+        let gpui_tween_driver_active = Arc::new(AtomicBool::new(false));
 
         // Effects driver: animated procedural backgrounds (Background::Smoke) need the
         // window repainting every frame while one is on screen. A paint-chained
@@ -3242,6 +3259,7 @@ fn main() {
                     }
                     msg => {
                         let mut drive_native_layout_animation = false;
+                        let mut drive_gpui_tweens = false;
                         let applied = pump.update(cx, |this, cx| match msg {
                             Incoming::Tree(t) => {
                                 let next_root = fill_root(t);
@@ -3249,6 +3267,10 @@ fn main() {
                                 collect_node_ids(&next_root, &mut node_ids);
                                 bridge::retain_layout(&node_ids);
                                 crate::anim_overlay::retain(&node_ids);
+                                crate::anim_overlay_tween::retain(&node_ids);
+                                // `fill_root` (parse_json_tree → note_commit) just armed any
+                                // `_gpuiTransition` tweens this commit; lazy-arm the driver.
+                                drive_gpui_tweens = crate::anim_overlay_tween::tweens_active();
                                 crate::inspector::retain_sources(&node_ids);
                                 elements::retain_pointer_state(&node_ids);
                                 let mut native_layout_keys = HashSet::new();
@@ -3271,6 +3293,22 @@ fn main() {
                                     this.write_debug_dump(cx);
                                     cx.notify();
                                 }
+                            }
+                            Incoming::AnimateNodeStyle {
+                                global_id,
+                                style,
+                                transition,
+                            } => {
+                                // emitter fast path: arm a from→target tween natively (no
+                                // React commit), then lazy-arm the same tween driver the
+                                // Tree commit-detect path uses so it ticks to settle.
+                                crate::anim_overlay_tween::animate_to(
+                                    global_id,
+                                    &style,
+                                    &transition,
+                                );
+                                drive_gpui_tweens = crate::anim_overlay_tween::tweens_active();
+                                cx.notify();
                             }
                             Incoming::Eval { id, js } => {
                                 if let Some(view) = this.webviews.get(&id) {
@@ -3567,6 +3605,47 @@ fn main() {
                                     }
                                     active.store(false, Ordering::SeqCst);
                                     if !elements::native_layout_has_animations()
+                                        || active.swap(true, Ordering::SeqCst)
+                                    {
+                                        break;
+                                    }
+                                }
+                                active.store(false, Ordering::SeqCst);
+                            })
+                            .detach();
+                        }
+                        // declarative `_gpuiTransition` driver: ticks armed tweens into the
+                        // overlay until they settle. lazy-armed like the native-layout
+                        // driver so at most one runs; mirrors the smoke driver's timer loop.
+                        if drive_gpui_tweens
+                            && !gpui_tween_driver_active.swap(true, Ordering::SeqCst)
+                        {
+                            let pump = pump.clone();
+                            let active = gpui_tween_driver_active.clone();
+                            cx.spawn(async move |cx| {
+                                'driver: loop {
+                                    while crate::anim_overlay_tween::tweens_active() {
+                                        cx.background_executor()
+                                            .timer(Duration::from_millis(8))
+                                            .await;
+                                        crate::anim_overlay_tween::tick_tweens();
+                                        if pump.update(cx, |_this, cx| cx.notify()).is_err() {
+                                            break 'driver;
+                                        }
+                                        if window_handle
+                                            .update(cx, |_root, window, root_cx| {
+                                                root_cx.notify();
+                                                window.refresh();
+                                            })
+                                            .is_err()
+                                        {
+                                            break 'driver;
+                                        }
+                                    }
+                                    active.store(false, Ordering::SeqCst);
+                                    // re-check: a tween armed between the loop exit and the
+                                    // store would otherwise be left undriven.
+                                    if !crate::anim_overlay_tween::tweens_active()
                                         || active.swap(true, Ordering::SeqCst)
                                     {
                                         break;

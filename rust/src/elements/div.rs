@@ -436,11 +436,11 @@ fn native_layout_animation_value(
     )
 }
 
-fn ease_out_cubic(t: f32) -> f32 {
+pub fn ease_out_cubic(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
-fn lerp(from: f32, to: f32, t: f32) -> f32 {
+pub fn lerp(from: f32, to: f32, t: f32) -> f32 {
     from + (to - from) * t
 }
 

@@ -85,6 +85,27 @@ fn dump_node(el: &Arc<ReactElement>) -> Value {
     if let Some(v) = a.role.as_ref() {
         ax.insert("role".into(), json!(v));
     }
+    if let Some(v) = a.hint.as_ref() {
+        ax.insert("hint".into(), json!(v));
+    }
+    // state — emitted so screen-reader/test tooling can assert the selected agent,
+    // the active segmented option, the checkbox value, etc. plain-bool fields only
+    // surface when set (default false stays absent to keep the dump lean).
+    if let Some(v) = a.accessible {
+        ax.insert("accessible".into(), json!(v));
+    }
+    if a.selected {
+        ax.insert("selected".into(), json!(true));
+    }
+    if a.disabled {
+        ax.insert("disabled".into(), json!(true));
+    }
+    if let Some(v) = a.checked.as_ref() {
+        ax.insert("checked".into(), json!(v));
+    }
+    if let Some(v) = a.expanded {
+        ax.insert("expanded".into(), json!(v));
+    }
     if !ax.is_empty() {
         obj.insert("accessibility".into(), Value::Object(ax));
     }

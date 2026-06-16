@@ -745,6 +745,21 @@ function boolProp(props: Record<string, unknown>, ...names: string[]): boolean |
     return undefined;
 }
 
+// aria-* attributes arrive as either real booleans (RN-style props) or the
+// stringified "true"/"false" the DOM form uses (react-native-web's
+// createDOMProps rewrites accessibilityState → aria-checked/selected/disabled
+// before the tree reaches us). Read both so accessibility STATE survives the
+// same web↔native dual-path we already honor for label/role.
+function ariaBoolProp(props: Record<string, unknown>, ...names: string[]): boolean | undefined {
+    for (const name of names) {
+        const value = props[name];
+        if (typeof value === "boolean") return value;
+        if (value === "true") return true;
+        if (value === "false") return false;
+    }
+    return undefined;
+}
+
 function numberProp(props: Record<string, unknown>, ...names: string[]): number | undefined {
     for (const name of names) {
         const value = props[name];
@@ -801,10 +816,15 @@ function serializeAccessibility(inst: Instance, node: SerializedNode): Serialize
         nativeID,
         testID,
         propID,
-        disabled: boolProp(state, "disabled"),
-        selected: boolProp(state, "selected"),
-        checked: typeof state.checked === "boolean" || state.checked === "mixed" ? state.checked : undefined,
-        expanded: boolProp(state, "expanded"),
+        disabled: boolProp(state, "disabled") ?? ariaBoolProp(props, "aria-disabled"),
+        selected: boolProp(state, "selected") ?? ariaBoolProp(props, "aria-selected", "aria-pressed"),
+        checked:
+            typeof state.checked === "boolean" || state.checked === "mixed"
+                ? state.checked
+                : props["aria-checked"] === "mixed"
+                  ? "mixed"
+                  : ariaBoolProp(props, "aria-checked"),
+        expanded: boolProp(state, "expanded") ?? ariaBoolProp(props, "aria-expanded"),
     };
 
     if (!info.label && node.type === "text" && node.text) info.label = node.text;

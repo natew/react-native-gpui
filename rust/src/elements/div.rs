@@ -416,7 +416,10 @@ fn native_layout_animation_value(
     let elapsed = now.saturating_duration_since(animation.start);
     let raw_progress = elapsed.as_secs_f32() / animation.duration.as_secs_f32();
     let done = raw_progress >= 1.0;
-    let progress = ease_out_cubic(raw_progress.clamp(0.0, 1.0));
+    // ease-out-quart: snappier than cubic (faster initial ramp, tighter tail) so a pane
+    // reflow reads as immediate. local to native layout — does NOT touch the shared
+    // ease_out_cubic used by the overlay tween.
+    let progress = ease_out_quart(raw_progress.clamp(0.0, 1.0));
     (
         NativeLayoutOverride {
             width: animation
@@ -438,6 +441,13 @@ fn native_layout_animation_value(
 
 pub fn ease_out_cubic(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
+}
+
+/// snappier ease-out for native-layout pane reflows (steeper start, tighter settle than
+/// cubic). kept separate from `ease_out_cubic` so the shared overlay-tween easing is
+/// untouched.
+fn ease_out_quart(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(4)
 }
 
 pub fn lerp(from: f32, to: f32, t: f32) -> f32 {
@@ -2353,7 +2363,8 @@ mod tests {
     use super::{
         ACTIVE_MOUSE_TARGET, ActiveNativeResize, ActivePressDrag, NATIVE_LAYOUT_ANIMATIONS,
         NATIVE_LAYOUT_FRAMES, NATIVE_LAYOUT_OVERRIDES, NativeLayoutAnimation, NativeLayoutOverride,
-        RoundedOverflowClip, clear_native_layout_override, events_have_press_action,
+        RoundedOverflowClip, animate_native_layout_override, clear_native_layout_override,
+        events_have_press_action,
         finish_pointer_gesture, get_scroll, inner_corner_radius, native_layout_animation_value,
         native_layout_has_animations, native_layout_override, press_drag_should_activate,
         remember_native_layout_frame, rounded_clip_radii_for_bounds, scroll_to,
@@ -2651,6 +2662,59 @@ mod tests {
                 .contains_key("pane-complete")
         );
         clear_native_layout_override("pane-complete");
+    }
+
+    #[test]
+    fn animate_native_layout_resumes_from_live_value_on_interrupt() {
+        let _guard = native_layout_test_guard();
+        clear_native_layout_override("pane-interrupt");
+        // a collapse is in flight: width animating 200 -> 0. let it reach ~midway by
+        // arming it in the past, then read the live value.
+        NATIVE_LAYOUT_ANIMATIONS.lock().unwrap().insert(
+            "pane-interrupt".to_string(),
+            NativeLayoutAnimation {
+                from_width: Some(200.0),
+                to_width: Some(0.0),
+                from_height: None,
+                to_height: None,
+                from_x: Some(0.0),
+                to_x: Some(-200.0),
+                from_y: None,
+                to_y: None,
+                start: Instant::now() - Duration::from_millis(50),
+                duration: Duration::from_millis(120),
+            },
+        );
+        let live = native_layout_override("pane-interrupt");
+        let live_width = live.width.unwrap();
+        let live_x = live.x.unwrap();
+        assert!(
+            live_width < 200.0 && live_width > 0.0,
+            "collapse should be mid-flight, got width {live_width}"
+        );
+
+        // interrupt: re-arm an EXPAND back to 200. the new tween's `from` must be the live
+        // interpolated value (so it reverses smoothly), not a snapped 0 or the stale 200.
+        animate_native_layout_override("pane-interrupt", Some(200.0), None, Some(0.0), None, 150.0);
+        let armed = NATIVE_LAYOUT_ANIMATIONS
+            .lock()
+            .unwrap()
+            .get("pane-interrupt")
+            .copied()
+            .unwrap();
+        let from_width = armed.from_width.unwrap();
+        let from_x = armed.from_x.unwrap();
+        assert!(
+            (from_width - live_width).abs() < 1.0,
+            "expand must resume from live width {live_width}, armed from {from_width}"
+        );
+        assert!(
+            (from_x - live_x).abs() < 1.0,
+            "expand must resume from live x {live_x}, armed from {from_x}"
+        );
+        assert_eq!(armed.to_width, Some(200.0));
+        assert_eq!(armed.to_x, Some(0.0));
+        clear_native_layout_override("pane-interrupt");
     }
 
     #[test]

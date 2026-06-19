@@ -146,6 +146,13 @@ pub struct ReactElement {
     pub system_edge_fade: Option<f32>,
     /// optional vertical alpha fade start applied to the native `<SystemView>` surface.
     pub system_top_fade_start: Option<f32>,
+    /// in-app liquid-glass backdrop blur radius (logical-px Gaussian sigma) for a plain
+    /// `<View>`. Blurs the gpui content drawn behind this node before its own background
+    /// paints — unlike `<SystemView>`, which can only blur the desktop behind the window.
+    pub backdrop_blur_radius: Option<f32>,
+    /// tint color composited over the blurred backdrop (defaults to the node's own
+    /// background-color when only `backdropBlur` is set).
+    pub backdrop_tint: Option<Hsla>,
     /// text input value from react props.
     pub value: Option<String>,
     /// whether text input values render as password/secret text.

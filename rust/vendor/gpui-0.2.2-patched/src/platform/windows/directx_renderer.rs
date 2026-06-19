@@ -303,6 +303,8 @@ impl DirectXRenderer {
                     sprites,
                 } => self.draw_polychrome_sprites(texture_id, sprites),
                 PrimitiveBatch::Surfaces(surfaces) => self.draw_surfaces(surfaces),
+                // in-app backdrop blur is a mac-only metal feature; no-op elsewhere.
+                PrimitiveBatch::BackdropBlurs(_) => Ok(()),
             }.context(format!("scene too large: {} paths, {} shadows, {} quads, {} underlines, {} mono, {} poly, {} surfaces",
                     scene.paths.len(),
                     scene.shadows.len(),

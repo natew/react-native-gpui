@@ -21,6 +21,9 @@ let screenDims: ScaledSize = { width: 1180, height: 760, scale: 2, fontScale: 1 
 
 const listeners = new Set<ChangeHandler>();
 
+// RAF handle for debouncing resize events; undefined when no pending notification.
+let resizeTimer: ReturnType<typeof requestAnimationFrame> | null = null;
+
 export const Dimensions = {
     get(dim: "window" | "screen"): ScaledSize {
         return dim === "screen" ? screenDims : windowDims;
@@ -40,13 +43,25 @@ export const Dimensions = {
     },
 
     /** internal: called by the runtime when the window reports a new size.
-     *  Returns true if the size actually changed. */
+     *  Debounced to avoid rapid re-renders during OS-level window resize drag,
+     *  which can fire at 120Hz. Returns true if the size actually changed. */
     _setWindow(width: number, height: number): boolean {
         if (width === windowDims.width && height === windowDims.height) return false;
         windowDims = { ...windowDims, width, height };
         screenDims = { ...screenDims, width, height };
         const payload = { window: windowDims, screen: screenDims };
-        for (const cb of listeners) cb(payload);
+        // Debounce: coalesce rapid resize events (e.g., macOS window drag) into
+        // a single change notification at ~60fps. Without this the Dimensions
+        // 'change' listener fires on every native resize step, triggering a full
+        // React tree re-render and serialization for each — the dominant cost
+        // during window resize.
+        if (resizeTimer != null) {
+            cancelAnimationFrame(resizeTimer);
+        }
+        resizeTimer = requestAnimationFrame(() => {
+            resizeTimer = null;
+            for (const cb of listeners) cb(payload);
+        });
         return true;
     },
 };

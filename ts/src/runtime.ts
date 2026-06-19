@@ -54,6 +54,10 @@ export type SerializedNode = {
     systemEdgeFade?: number;
     /** `<SystemView>` vertical native alpha fade start, 0..1 from top to bottom */
     systemTopFadeStart?: number;
+    /** in-app liquid-glass backdrop blur radius (logical-px gaussian sigma) for a `<View>` */
+    backdropBlur?: number;
+    /** tint composited over the blurred backdrop, as a CSS color string */
+    backdropTint?: string;
     events?: string[];
     children?: SerializedNode[];
     /** inline styled runs for `<Text>` with nested `<Text>` children */

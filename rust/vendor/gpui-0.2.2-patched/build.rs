@@ -144,6 +144,8 @@ mod macos {
             "SurfaceInputIndex".into(),
             "SurfaceBounds".into(),
             "TransformationMatrix".into(),
+            "BackdropBlur".into(),
+            "BackdropBlurInputIndex".into(),
         ]);
         config.no_includes = true;
         config.enumeration.prefix_with_name = true;

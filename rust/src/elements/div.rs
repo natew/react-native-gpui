@@ -62,6 +62,7 @@ struct ActiveNativeResize {
     max: Option<f32>,
     start_position: f32,
     start_value: f32,
+    last_refresh: Instant,
 }
 
 #[derive(Clone, Debug)]
@@ -91,6 +92,12 @@ static HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()
 // pseudo flips without wiring mouseEnter/mouseLeave handlers.
 static PSEUDO_HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static PRESSED: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+// Hitbox cache for pseudo-enabled elements, used to re-evaluate hover after layout
+// changes (scroll, resize) without waiting for the next MouseMoveEvent — a stationary
+// mouse doesn't fire MouseMoveEvent, so scrolled-away elements would stay "hovered"
+// forever without this (the stuck-hover-in-scroll-list bug).
+static PSEUDO_HITBOXES: Lazy<Mutex<HashMap<u64, Hitbox>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 // RNGPUI_DRAG_TRACE=1 logs the live press-drag-sweep gate (mouse-down arming +
 // per-row cross-sweep activation) so a real scrub can be diagnosed — synth gates
@@ -269,6 +276,50 @@ pub fn retain_pointer_state(present: &HashSet<u64>) {
         .unwrap()
         .retain(|id| present.contains(id));
     PRESSED.lock().unwrap().retain(|id| present.contains(id));
+    PSEUDO_HITBOXES
+        .lock()
+        .unwrap()
+        .retain(|id| present.contains(id));
+}
+
+/// Re-evaluate pseudo hover after a layout change (scroll, resize) that may have
+/// moved elements out from under a stationary mouse. Without this, elements that
+/// were scrolled away keep their "hovered" pseudo state because `MouseMoveEvent`
+/// only fires on actual mouse movement, not on scroll — the stuck-hover-in-scroll
+/// bug. Called from the scroll container's wheel handler after the offset update.
+///
+/// Iterates every element that has a registered pseudo hitbox, checks whether the
+/// window's current mouse position is still inside that hitbox, and drops any
+/// stale entry. This is O(n) in the number of pseudo-enabled elements — the common
+/// case is the visible session rows + project picker menu (~dozens, not thousands).
+pub fn re_evaluate_pseudo_hover(window: &Window) {
+    let mut changed: Vec<(u64, bool)> = Vec::new();
+    {
+        let hitboxes = PSEUDO_HITBOXES.lock().unwrap();
+        let mut hover = PSEUDO_HOVER.lock().unwrap();
+        for (&id, hitbox) in hitboxes.iter() {
+            let was_hovered = hover.contains(&id);
+            let is_hovered = hitbox.is_hovered(window);
+            if was_hovered != is_hovered {
+                if is_hovered {
+                    hover.insert(id);
+                } else {
+                    hover.remove(&id);
+                }
+                changed.push((id, is_hovered));
+            }
+        }
+    }
+    for (id, hovered) in changed {
+        if !hovered {
+            // leaving the element also cancels an in-flight press on it.
+            let pressed = PRESSED.lock().unwrap().remove(&id);
+            crate::bridge::pseudo(id, false, false);
+        } else {
+            let pressed = PRESSED.lock().unwrap().contains(&id);
+            crate::bridge::pseudo(id, true, pressed);
+        }
+    }
 }
 
 pub fn retain_native_layout_keys(keys: &HashSet<String>) {
@@ -1708,6 +1759,7 @@ impl Element for ReactDivElement {
                         max: down_spec.max,
                         start_position: native_resize_position(down_spec.edge, ev.position),
                         start_value,
+                        last_refresh: Instant::now(),
                     });
                     cx.stop_propagation();
                 }
@@ -1720,7 +1772,19 @@ impl Element for ReactDivElement {
                 let active = ACTIVE_NATIVE_RESIZE.lock().unwrap().clone();
                 if let Some(active) = active.filter(|active| active.handle_id == id) {
                     if update_native_resize(&active, ev.position) {
-                        window.refresh();
+                        // Throttle refresh to ~60fps during resize: on high-refresh
+                        // displays (120Hz ProMotion) the MouseMoveEvent fires every
+                        // ~8ms, but repainting the full window tree at that rate
+                        // drops frames. A 16ms minimum interval caps render cost at
+                        // the display's typical refresh rate.
+                        let now = Instant::now();
+                        let min_frame = Duration::from_secs_f32(1.0 / 60.0);
+                        if now.saturating_duration_since(active.last_refresh) >= min_frame {
+                            window.refresh();
+                            if let Some(current) = ACTIVE_NATIVE_RESIZE.lock().unwrap().as_mut() {
+                                current.last_refresh = now;
+                            }
+                        }
                     }
                     cx.stop_propagation();
                 }
@@ -2208,6 +2272,34 @@ impl Element for ReactDivElement {
             let emit_pseudo = move |hovered: bool, pressed: bool| {
                 crate::bridge::pseudo(id, hovered, pressed);
             };
+            // remember this hitbox for hover re-evaluation after layout changes
+            // (scroll) — used by the scroll container's post-refresh drain.
+            PSEUDO_HITBOXES.lock().unwrap().insert(id, hitbox.clone());
+
+            // re-evaluate hover state on every paint: the element is at its final
+            // position (scroll offset applied in prepaint), but a stationary mouse
+            // won't fire MouseMoveEvent after a layout change (scroll), causing the
+            // old element's hover state to persist — the stuck-hover-in-scroll bug.
+            // The cost is one hitbox bounds-check per pseudo-enabled element per
+            // frame — negligible (~dozens of elements, simple rect test).
+            {
+                let inside = hitbox.is_hovered(window);
+                let mut hover = PSEUDO_HOVER.lock().unwrap();
+                if inside == hover.contains(&id) {
+                    // no change — avoid the bridge call and press-state lock.
+                } else if inside {
+                    hover.insert(id);
+                    drop(hover);
+                    let pressed = PRESSED.lock().unwrap().contains(&id);
+                    crate::bridge::pseudo(id, true, pressed);
+                } else {
+                    hover.remove(&id);
+                    drop(hover);
+                    let pressed = PRESSED.lock().unwrap().remove(&id);
+                    crate::bridge::pseudo(id, false, false);
+                }
+            }
+
             let move_hitbox = hitbox.clone();
             window.on_mouse_event(move |_ev: &MouseMoveEvent, phase, window, _cx| {
                 if phase != DispatchPhase::Bubble {
@@ -2324,8 +2416,25 @@ impl Element for ReactDivElement {
         let element_transform = transform_ops.and_then(|ops| {
             crate::style::transform_ops_matrix(&ops, bounds, window.scale_factor())
         });
+        // in-app liquid-glass backdrop blur: frost the gpui content already drawn behind
+        // this view before its own background quad paints over it. `backdropTint` is the
+        // glass material color composited over the blurred content; absent → blur only.
+        let backdrop_blur_radius = self.element.backdrop_blur_radius;
+        let backdrop_tint = self.element.backdrop_tint.unwrap_or(Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.0,
+            a: 0.0,
+        });
         window.with_element_transform(element_transform, |window| {
             window.with_element_opacity(element_opacity, |window| {
+                if let Some(radius) = backdrop_blur_radius {
+                    let corner_radii = style
+                        .corner_radii
+                        .to_pixels(window.rem_size())
+                        .clamp_radii_for_quad_size(bounds.size);
+                    window.paint_backdrop_blur(bounds, corner_radii, px(radius), backdrop_tint);
+                }
                 style.paint(bounds, window, cx, |window, cx| {
                     let _rounded_clip_guard = push_rounded_overflow_clip(rounded_clip);
                     if let Some(mask) = overflow_mask {

@@ -902,6 +902,8 @@ impl BladeRenderer {
                         }
                     }
                 }
+                // in-app backdrop blur is a mac-only metal feature; no-op elsewhere.
+                PrimitiveBatch::BackdropBlurs(_) => {}
             }
         }
         drop(pass);

@@ -849,6 +849,119 @@ fragment float4 path_sprite_fragment(
   return intermediate_texture.sample(intermediate_texture_sampler, input.texture_coords);
 }
 
+// --- in-app backdrop blur ---------------------------------------------------
+// Two separable gaussian passes frost the gpui content already drawn behind a glass
+// rect: backdrop_blur_h reads the drawable horizontally into a scratch target; then
+// backdrop_blur_composite reads scratch vertically, composites the glass tint over it,
+// and clips to the rounded rect. Both passes draw the blur's bounds as a screen quad and
+// map screen position -> input UV the way path_sprite does.
+
+// static cap on taps per side; the loop early-outs at 3*sigma so small sigmas are cheap.
+// sized to cover the full 3-sigma support of an iOS-like glass (sigma up to ~24 device px).
+constant int BACKDROP_BLUR_MAX_TAPS = 96;
+
+struct BackdropBlurVertexOutput {
+  float4 position [[position]];
+  float2 screen_position;
+  uint blur_id [[flat]];
+};
+
+vertex BackdropBlurVertexOutput backdrop_blur_h_vertex(
+  uint unit_vertex_id [[vertex_id]],
+  uint blur_id [[instance_id]],
+  constant float2 *unit_vertices [[buffer(BackdropBlurInputIndex_Vertices)]],
+  constant BackdropBlur *blurs [[buffer(BackdropBlurInputIndex_Blurs)]],
+  constant Size_DevicePixels *viewport_size [[buffer(BackdropBlurInputIndex_ViewportSize)]]
+) {
+  float2 unit_vertex = unit_vertices[unit_vertex_id];
+  BackdropBlur blur = blurs[blur_id];
+  float4 device_position = to_device_position(unit_vertex, blur.bounds, viewport_size);
+  float2 screen_position =
+      float2(blur.bounds.origin.x, blur.bounds.origin.y) +
+      unit_vertex * float2(blur.bounds.size.width, blur.bounds.size.height);
+  return BackdropBlurVertexOutput{device_position, screen_position, blur_id};
+}
+
+fragment float4 backdrop_blur_h_fragment(
+  BackdropBlurVertexOutput input [[stage_in]],
+  constant BackdropBlur *blurs [[buffer(BackdropBlurInputIndex_Blurs)]],
+  constant Size_DevicePixels *viewport_size [[buffer(BackdropBlurInputIndex_ViewportSize)]],
+  texture2d<float> input_texture [[texture(BackdropBlurInputIndex_InputTexture)]]
+) {
+  constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
+  BackdropBlur blur = blurs[input.blur_id];
+  float sigma = max(blur.blur_radius, 0.0001);
+  float2 viewport = float2((float)viewport_size->width, (float)viewport_size->height);
+
+  float4 accum = float4(0.0);
+  float weight_sum = 0.0;
+  for (int i = -BACKDROP_BLUR_MAX_TAPS; i <= BACKDROP_BLUR_MAX_TAPS; i++) {
+    if (abs((float)i) > 3.0 * sigma) {
+      continue;
+    }
+    float w = gaussian((float)i, sigma);
+    float2 sample_pos = input.screen_position + float2((float)i, 0.0);
+    float2 uv = sample_pos / viewport;
+    accum += input_texture.sample(s, uv) * w;
+    weight_sum += w;
+  }
+  return accum / max(weight_sum, 0.0001);
+}
+
+vertex BackdropBlurVertexOutput backdrop_blur_composite_vertex(
+  uint unit_vertex_id [[vertex_id]],
+  uint blur_id [[instance_id]],
+  constant float2 *unit_vertices [[buffer(BackdropBlurInputIndex_Vertices)]],
+  constant BackdropBlur *blurs [[buffer(BackdropBlurInputIndex_Blurs)]],
+  constant Size_DevicePixels *viewport_size [[buffer(BackdropBlurInputIndex_ViewportSize)]]
+) {
+  float2 unit_vertex = unit_vertices[unit_vertex_id];
+  BackdropBlur blur = blurs[blur_id];
+  float4 device_position = to_device_position(unit_vertex, blur.bounds, viewport_size);
+  float2 screen_position =
+      float2(blur.bounds.origin.x, blur.bounds.origin.y) +
+      unit_vertex * float2(blur.bounds.size.width, blur.bounds.size.height);
+  return BackdropBlurVertexOutput{device_position, screen_position, blur_id};
+}
+
+fragment float4 backdrop_blur_composite_fragment(
+  BackdropBlurVertexOutput input [[stage_in]],
+  constant BackdropBlur *blurs [[buffer(BackdropBlurInputIndex_Blurs)]],
+  constant Size_DevicePixels *viewport_size [[buffer(BackdropBlurInputIndex_ViewportSize)]],
+  texture2d<float> scratch_texture [[texture(BackdropBlurInputIndex_InputTexture)]]
+) {
+  constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
+  BackdropBlur blur = blurs[input.blur_id];
+  float sigma = max(blur.blur_radius, 0.0001);
+  float2 viewport = float2((float)viewport_size->width, (float)viewport_size->height);
+
+  // vertical gaussian over the horizontally-blurred scratch -> a separable 2D gaussian.
+  float4 accum = float4(0.0);
+  float weight_sum = 0.0;
+  for (int i = -BACKDROP_BLUR_MAX_TAPS; i <= BACKDROP_BLUR_MAX_TAPS; i++) {
+    if (abs((float)i) > 3.0 * sigma) {
+      continue;
+    }
+    float w = gaussian((float)i, sigma);
+    float2 sample_pos = input.screen_position + float2(0.0, (float)i);
+    float2 uv = sample_pos / viewport;
+    accum += scratch_texture.sample(s, uv) * w;
+    weight_sum += w;
+  }
+  float4 blurred = accum / max(weight_sum, 0.0001);
+  blurred.a = 1.0;
+
+  // composite the glass tint over the blurred backdrop.
+  float4 tint = hsla_to_rgba(blur.tint);
+  float4 color = over(blurred, tint);
+
+  // rounded-rect AA: clip the output alpha to the glass shape so its edge composites
+  // cleanly over the untouched drawable.
+  float distance = quad_sdf(input.screen_position, blur.bounds, blur.corner_radii);
+  color.a *= saturate(0.5 - distance);
+  return color;
+}
+
 struct SurfaceVertexOutput {
   float4 position [[position]];
   float2 texture_position;

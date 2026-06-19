@@ -296,6 +296,17 @@ fn parse_json_tree(
         .get("systemTopFadeStart")
         .and_then(|v| v.as_f64())
         .map(|v| (v as f32).clamp(0.0, 1.0));
+    // in-app liquid-glass backdrop blur for a plain `<View>`: a numeric logical-px
+    // Gaussian sigma plus an optional tint composited over the blurred content.
+    let backdrop_blur_radius = obj
+        .get("backdropBlur")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32)
+        .filter(|v| *v > 0.0);
+    let backdrop_tint = obj
+        .get("backdropTint")
+        .and_then(|v| v.as_str())
+        .and_then(crate::style::parse_css_color);
     let value = obj
         .get("value")
         .and_then(|v| v.as_str())
@@ -423,6 +434,8 @@ fn parse_json_tree(
         system_shadow,
         system_edge_fade,
         system_top_fade_start,
+        backdrop_blur_radius,
+        backdrop_tint,
         value,
         secure_text_entry,
         editable,
@@ -1540,6 +1553,8 @@ fn fallback_root() -> Arc<ReactElement> {
         system_shadow: None,
         system_edge_fade: None,
         system_top_fade_start: None,
+        backdrop_blur_radius: None,
+        backdrop_tint: None,
         value: None,
         secure_text_entry: false,
         editable: true,

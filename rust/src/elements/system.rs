@@ -1346,6 +1346,8 @@ mod tests {
             system_shadow: shadow,
             system_edge_fade: None,
             system_top_fade_start: None,
+            backdrop_blur_radius: None,
+            backdrop_tint: None,
             value: None,
             secure_text_entry: false,
             editable: true,

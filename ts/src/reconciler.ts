@@ -1036,6 +1036,14 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
 
     if (Object.keys(style).length) node.style = style;
     if (pseudoEventIds.has(inst.id)) node.pseudoEvents = true;
+    // in-app liquid-glass backdrop blur for a plain <View>: a logical-px gaussian sigma
+    // plus an optional tint composited over the blurred content (the desktop <Glass>).
+    const backdropBlur = numberProp(props, "backdropBlur");
+    if (backdropBlur && backdropBlur > 0) node.backdropBlur = backdropBlur;
+    if (props.backdropTint != null) {
+        const backdropTint = cssColorString(resolveColorValue(props.backdropTint));
+        if (backdropTint) node.backdropTint = backdropTint;
+    }
     const nativeLayoutKey = stringProp(props, "nativeLayoutKey");
     if (nativeLayoutKey) node.nativeLayoutKey = nativeLayoutKey;
     const nativeResize = normalizeNativeResize(props.nativeResize);

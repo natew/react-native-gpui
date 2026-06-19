@@ -2,7 +2,8 @@
 use crate::Inspector;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Capslock,
+    AsyncWindowContext, AvailableSpace, BackdropBlur, Background, BorderStyle, Bounds, BoxShadow,
+    Capslock,
     Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
     DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
     FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
@@ -2925,6 +2926,36 @@ impl Window {
             border_widths: quad.border_widths.scale(scale_factor),
             border_style: quad.border_style,
             transformation: self.element_transform,
+        });
+    }
+
+    /// Paint a real in-app backdrop blur: blurs the gpui content already drawn behind
+    /// `bounds` (everything at a lower draw order), composites `tint` over it, and clips
+    /// to the rounded rect. This is true liquid glass — it frosts the in-app Metal content
+    /// behind the element, which `<SystemView>`'s `NSVisualEffectView` cannot (that only
+    /// blurs the desktop behind the window). `blur_radius` is a logical-pixel Gaussian sigma.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_backdrop_blur(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        blur_radius: Pixels,
+        tint: Hsla,
+    ) {
+        self.invalidator.debug_assert_paint();
+
+        let scale_factor = self.scale_factor();
+        let content_mask = self.content_mask();
+        let opacity = self.element_opacity();
+        self.next_frame.scene.insert_primitive(BackdropBlur {
+            order: 0,
+            pad: 0,
+            bounds: bounds.scale(scale_factor),
+            content_mask: content_mask.scale(scale_factor),
+            corner_radii: corner_radii.scale(scale_factor),
+            tint: tint.opacity(opacity),
+            blur_radius: blur_radius.scale(scale_factor),
         });
     }
 

@@ -342,6 +342,13 @@ export interface NativeHostHandle {
 export interface ScrollViewHandle extends NativeHostHandle {
     scrollTo: (options?: { x?: number; y?: number; animated?: boolean } | number) => void;
     scrollToEnd: (options?: { animated?: boolean }) => void;
+    // RN's scroll-ref accessors. reanimated's findHostInstance fast path probes
+    // getNativeScrollRef()/getScrollableNode() before falling back to the throwing
+    // findHostInstance_DEPRECATED shim, so createAnimatedComponent(ScrollView) (and
+    // useAnimatedScrollHandler) need these to resolve to the inner host node — which
+    // carries __nativeTag/__internalInstanceHandle/_viewConfig (see reconciler).
+    getNativeScrollRef: () => NativeHostHandle | null;
+    getScrollableNode: () => NativeHostHandle | null;
 }
 export const ScrollView = forwardRef<ScrollViewHandle, ScrollViewProps>(function ScrollView({
     style,
@@ -381,6 +388,15 @@ export const ScrollView = forwardRef<ScrollViewHandle, ScrollViewProps>(function
             scrollToEnd() {
                 const id = host.current?.id;
                 if (id) sendCommand({ $cmd: "scrollToEnd", id });
+            },
+            // the inner host node IS the scrollable node here (the reconciler tags
+            // every instance), so both RN accessors return it. without these,
+            // reanimated can't find the host instance and throws on mount.
+            getNativeScrollRef() {
+                return host.current;
+            },
+            getScrollableNode() {
+                return host.current;
             },
         }),
         [],

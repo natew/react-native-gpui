@@ -500,7 +500,7 @@ unsafe fn apply_visual_effect_mask_image(host: id, style: &SystemViewStyle) {
                 if utf8.is_null() {
                     "<none>".to_string()
                 } else {
-                    std::ffi::CStr::from_ptr(utf8)
+                    unsafe { std::ffi::CStr::from_ptr(utf8) }
                         .to_string_lossy()
                         .into_owned()
                 }

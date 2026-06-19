@@ -279,7 +279,7 @@ pub fn retain_pointer_state(present: &HashSet<u64>) {
     PSEUDO_HITBOXES
         .lock()
         .unwrap()
-        .retain(|id| present.contains(id));
+        .retain(|id, _| present.contains(id));
 }
 
 /// Re-evaluate pseudo hover after a layout change (scroll, resize) that may have
@@ -313,7 +313,7 @@ pub fn re_evaluate_pseudo_hover(window: &Window) {
     for (id, hovered) in changed {
         if !hovered {
             // leaving the element also cancels an in-flight press on it.
-            let pressed = PRESSED.lock().unwrap().remove(&id);
+            PRESSED.lock().unwrap().remove(&id);
             crate::bridge::pseudo(id, false, false);
         } else {
             let pressed = PRESSED.lock().unwrap().contains(&id);
@@ -1731,6 +1731,10 @@ impl Element for ReactDivElement {
                                 height + max_scroll_y,
                             );
                         }
+                        // scrolling moves elements under a stationary mouse, so
+                        // re-evaluate pseudo hover before repainting — otherwise
+                        // scrolled-away elements keep a stale :hover state.
+                        re_evaluate_pseudo_hover(window);
                         window.refresh(); // on-demand: repaint to reflect the new offset
                         cx.stop_propagation();
                     }
@@ -2295,7 +2299,7 @@ impl Element for ReactDivElement {
                 } else {
                     hover.remove(&id);
                     drop(hover);
-                    let pressed = PRESSED.lock().unwrap().remove(&id);
+                    PRESSED.lock().unwrap().remove(&id);
                     crate::bridge::pseudo(id, false, false);
                 }
             }

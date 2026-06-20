@@ -1688,6 +1688,8 @@ pub(crate) enum Incoming {
     RequestAttention {
         critical: bool,
     },
+    /// open a new native window by spawning a new process of the same binary.
+    OpenWindow,
     DebugDump {
         reply: flume::Sender<serde_json::Value>,
     },
@@ -1856,6 +1858,7 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
             "requestAttention" => Some(Incoming::RequestAttention {
                 critical: v.get("critical").and_then(|x| x.as_bool()).unwrap_or(false),
             }),
+            "openWindow" => Some(Incoming::OpenWindow),
             _ => None,
         };
     }
@@ -3272,6 +3275,21 @@ fn main() {
                     Incoming::RequestAttention { critical } => {
                         dock::request_attention(critical);
                     }
+                    Incoming::OpenWindow => {
+                        // spawn a new process of the same binary to create a new window.
+                        // on macOS this launches a second instance with its own Hermes +
+                        // GPUI window; the two windows run independently.
+                        #[cfg(target_os = "macos")]
+                        {
+                            if let Ok(exe) = std::env::current_exe() {
+                                let _ = std::process::Command::new(exe)
+                                    .stdin(std::process::Stdio::null())
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .spawn();
+                            }
+                        }
+                    }
                     msg => {
                         let mut drive_native_layout_animation = false;
                         let mut drive_gpui_tweens = false;
@@ -3561,7 +3579,8 @@ fn main() {
                             | Incoming::DebugWebviewCopyProof { .. }
                             | Incoming::AppCommands(_)
                             | Incoming::DockBadge { .. }
-                            | Incoming::RequestAttention { .. } => unreachable!(),
+                            | Incoming::RequestAttention { .. }
+                            | Incoming::OpenWindow => unreachable!(),
                         });
                         if applied.is_err() {
                             break; // view dropped

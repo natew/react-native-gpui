@@ -158,6 +158,7 @@ export {
     AppCommands,
     Dock,
     NativeLayout,
+    NativeWindow,
     type AppCommandBinding,
     type AppCommandConfig,
     type AppCommandMenu,

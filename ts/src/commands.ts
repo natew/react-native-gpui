@@ -41,6 +41,7 @@ export type Command =
     | { $cmd: "blurInput"; id: number }
     | { $cmd: "dockBadge"; label: string }
     | { $cmd: "requestAttention"; critical?: boolean }
+    | { $cmd: "openWindow" }
     | ({ $cmd: "appCommands" } & AppCommandConfig);
 
 let sink: ((cmd: Command) => void) | null = null;
@@ -116,6 +117,14 @@ export const Dock = {
     // dock bounce. macOS only fires it when the app is not the active app.
     requestAttention(critical = false) {
         sendCommand({ $cmd: "requestAttention", critical });
+    },
+};
+
+// open a new native window (macOS/GPUI: spawns a new process of the same app).
+// on platforms without native multi-window, this is a no-op.
+export const NativeWindow = {
+    open() {
+        sendCommand({ $cmd: "openWindow" });
     },
 };
 

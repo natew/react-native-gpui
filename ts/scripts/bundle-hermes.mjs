@@ -5,7 +5,7 @@
 //   bun scripts/bundle-hermes.mjs [entry] [out.js] [--bytecode]
 //
 // Bun is used only as the dev bundler here; the output runs under Hermes.
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { reanimatedBunPlugin } from './reanimated-bun-plugin.mjs'
@@ -59,6 +59,27 @@ const code = await result.outputs.find((o) => o.kind === 'entry-point').text()
 await Bun.write(outJs, code)
 console.log(`[bundle-hermes] ${entry}`)
 console.log(`[bundle-hermes] wrote ${outJs} (${(code.length / 1024).toFixed(0)} KB, NODE_ENV=${mode})`)
+
+// Async-generator downlevel: hermesc rejects `async function*`. Zero's b-tree + scan
+// layer uses them; transform before bytecode compilation. Safe no-op otherwise.
+if (wantBytecode) {
+  try {
+    const { transformAsync } = await import('@babel/core')
+    const raw = readFileSync(outJs, 'utf8')
+    const result = await transformAsync(raw, {
+      filename: outJs,
+      plugins: [require.resolve('@babel/plugin-transform-async-generator-functions')],
+      sourceMaps: false,
+      compact: false,
+    })
+    if (result?.code) {
+      writeFileSync(outJs, result.code, 'utf8')
+      console.log('[bundle-hermes] async-generator downlevel applied')
+    }
+  } catch (err) {
+    console.error('[bundle-hermes] async-generator downlevel failed (non-fatal):', err.message)
+  }
+}
 
 if (wantBytecode) {
   const hermesc = process.env.HERMESC || '/Users/n8/github/hermes/build/bin/hermesc'

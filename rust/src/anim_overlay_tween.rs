@@ -10,6 +10,16 @@
 //!
 //! Pruning mirrors the overlay discipline: a Tree commit drops tween + prev-value state
 //! for ids no longer present so a removed node can't keep ticking.
+//!
+//! Future wire-shape idea (not a dep — just a refactor candidate): the `gpui-animation`
+//! crate (chi11321) models transitions as `transition_when(state, …)` with a `Transition`
+//! trait + priority resolution. If we ever expose more transition intent from JS, a
+//! `(predicate, priority, easing)` triple is a nicer wire shape than the current
+//! per-(node,key) `Tween` records — JS would declare "when state X, animate these keys at
+//! priority N with easing E," and the resolver picks the winning transition per key
+//! instead of us tracking individual tweens. Not adopting the crate (its API targets
+//! hand-authored gpui element trees, which we don't have — our tree is reconciled from
+//! React), just noting the API model is worth stealing if this driver gets a v2.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;

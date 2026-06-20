@@ -202,12 +202,20 @@
     });
   };
 
-  // shared bytes→base64 (used by fetch binary bodies). reuses the btoa table below.
+  // shared bytes→base64 (used by fetch binary bodies + binary WS frames). reuses the btoa
+  // table below.
   g.__rngpui_bytesToBase64 = function (input) {
     var bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
     var bin = '';
     for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
     return g.btoa(bin);
+  };
+  // base64→Uint8Array (inbound binary WS frames). atob yields a binary string.
+  g.__rngpui_base64ToBytes = function (b64) {
+    var bin = g.atob(String(b64));
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i) & 0xff;
+    return bytes;
   };
   g.__rngpui_fetchDone = function (jsonStr) {
     var r = JSON.parse(jsonStr);
@@ -281,6 +289,9 @@
     this._id = wsSeq++;
     this.url = String(url);
     this.readyState = 0; // CONNECTING
+    // 'arraybuffer' | 'blob' — what an inbound binary frame is delivered as. Hermes has no
+    // Blob, so we hand back an ArrayBuffer regardless; default matches the browser default.
+    this.binaryType = 'blob';
     this.onopen = null; this.onmessage = null; this.onclose = null; this.onerror = null;
     this._listeners = { open: [], message: [], close: [], error: [] };
     wsConns[this._id] = this;
@@ -299,7 +310,17 @@
   };
   WS.prototype.send = function (data) {
     if (this.readyState !== 1) return;
-    g.__rngpui_wsSend(JSON.stringify([this._id, typeof data === 'string' ? data : String(data)]));
+    // binary frames (ArrayBuffer / typed-array / DataView) must NOT be String()'d — that
+    // yields "[object ArrayBuffer]" and corrupts the payload. base64-encode the bytes and
+    // flag the frame so the Rust side decodes + sends a real binary frame.
+    if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+      var bytes = data instanceof ArrayBuffer
+        ? new Uint8Array(data)
+        : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      g.__rngpui_wsSend(JSON.stringify([this._id, g.__rngpui_bytesToBase64(bytes), true]));
+    } else {
+      g.__rngpui_wsSend(JSON.stringify([this._id, String(data), false]));
+    }
   };
   WS.prototype.close = function () {
     if (this.readyState === 3 || this.readyState === 2) return;
@@ -312,7 +333,13 @@
     var ws = wsConns[e.id];
     if (!ws) return;
     if (e.type === 'open') { ws.readyState = 1; ws._emit('open', { type: 'open' }); }
-    else if (e.type === 'message') { ws._emit('message', { type: 'message', data: e.data }); }
+    else if (e.type === 'message') {
+      // an inbound binary frame arrives base64-encoded (Rust ws_thread encodes it); decode
+      // to an ArrayBuffer so the consumer sees real bytes, not a base64 string. (binaryType
+      // 'blob' has no Blob in Hermes, so we deliver an ArrayBuffer in both modes.)
+      var data = e.binary ? g.__rngpui_base64ToBytes(e.data).buffer : e.data;
+      ws._emit('message', { type: 'message', data: data });
+    }
     else if (e.type === 'close') {
       ws.readyState = 3; delete wsConns[e.id];
       ws._emit('close', { type: 'close', code: e.code || 1000, reason: e.reason || '', wasClean: (e.code || 1000) === 1000 });
@@ -430,5 +457,86 @@
     USP.prototype.forEach = function (cb, t) { this._p.forEach(function (p) { cb.call(t, p[1], p[0], this); }, this); };
     USP.prototype.toString = function () { return this._p.map(function (p) { return encodeURIComponent(p[0]) + '=' + encodeURIComponent(p[1]); }).join('&'); };
     g.URLSearchParams = USP;
+  }
+
+  // URL — Hermes ships no URL. The @rocicorp/zero client + on-zero http-pull transport
+  // parse and MUTATE URLs (read .origin/.protocol/.host/.hostname/.port/.pathname/.search/
+  // .searchParams/.href/.toString; assign .protocol to rewrite ws→http). This covers the
+  // forms they use: absolute http(s)/ws(s) URLs and `new URL(absPathOrAbsURL, base)`.
+  // Not a full WHATWG parser (no relative-path resolution, userinfo, default-port elision),
+  // which neither library needs. searchParams is live-bound to .search.
+  if (typeof g.URL === 'undefined') {
+    var SPECIAL_PORT = { 'http:': '80', 'https:': '443', 'ws:': '80', 'wss:': '443', 'ftp:': '21' };
+    function parseAbsolute(input) {
+      // scheme://host[:port][/path][?query][#hash]
+      var m = /^([a-zA-Z][a-zA-Z0-9+.-]*:)\/\/([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/.exec(input);
+      if (!m) throw new TypeError('Invalid URL: ' + input);
+      var protocol = m[1].toLowerCase();
+      var authority = m[2];
+      var pathname = m[3] || '/';
+      var search = m[4] || '';
+      var hash = m[5] || '';
+      var hostname = authority, port = '';
+      var colon = authority.lastIndexOf(':');
+      // guard against IPv6 (has multiple colons inside [...]) — keep simple: only split a
+      // trailing :digits.
+      var pm = /^(.*):(\d+)$/.exec(authority);
+      if (pm) { hostname = pm[1]; port = pm[2]; }
+      if (pathname === '') pathname = '/';
+      return { protocol: protocol, hostname: hostname, port: port, pathname: pathname, search: search, hash: hash };
+    }
+    function URLImpl(input, base) {
+      input = String(input);
+      var parts;
+      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(input)) {
+        parts = parseAbsolute(input);
+      } else if (base != null) {
+        var b = parseAbsolute(String(base));
+        if (input.charAt(0) === '/') {
+          // absolute-path reference against base origin (the only relative form zero uses)
+          var pm2 = /^([^?#]*)(\?[^#]*)?(#.*)?$/.exec(input);
+          parts = { protocol: b.protocol, hostname: b.hostname, port: b.port, pathname: pm2[1] || '/', search: pm2[2] || '', hash: pm2[3] || '' };
+        } else {
+          throw new TypeError('rngpui URL polyfill: only absolute-path relative refs are supported: ' + input);
+        }
+      } else {
+        throw new TypeError('Invalid URL (no base): ' + input);
+      }
+      this._protocol = parts.protocol;
+      this._hostname = parts.hostname;
+      this._port = parts.port;
+      this._pathname = parts.pathname;
+      this._hash = parts.hash;
+      this.searchParams = new g.URLSearchParams(parts.search);
+    }
+    function portSuffix(u) {
+      // omit the port when it's the scheme's default (WHATWG origin/host semantics).
+      if (!u._port) return '';
+      if (SPECIAL_PORT[u._protocol] === u._port) return '';
+      return ':' + u._port;
+    }
+    Object.defineProperties(URLImpl.prototype, {
+      protocol: {
+        get: function () { return this._protocol; },
+        set: function (v) { v = String(v); this._protocol = v.charAt(v.length - 1) === ':' ? v.toLowerCase() : v.toLowerCase() + ':'; },
+      },
+      hostname: { get: function () { return this._hostname; }, set: function (v) { this._hostname = String(v); } },
+      port: { get: function () { return this._port; }, set: function (v) { this._port = v == null ? '' : String(v); } },
+      host: { get: function () { return this._hostname + portSuffix(this); }, set: function (v) { var pm = /^(.*):(\d+)$/.exec(String(v)); if (pm) { this._hostname = pm[1]; this._port = pm[2]; } else { this._hostname = String(v); this._port = ''; } } },
+      pathname: { get: function () { return this._pathname; }, set: function (v) { v = String(v); this._pathname = v.charAt(0) === '/' ? v : '/' + v; } },
+      search: {
+        get: function () { var s = this.searchParams.toString(); return s ? '?' + s : ''; },
+        set: function (v) { this.searchParams = new g.URLSearchParams(String(v)); },
+      },
+      hash: { get: function () { return this._hash; }, set: function (v) { v = String(v); this._hash = v === '' ? '' : (v.charAt(0) === '#' ? v : '#' + v); } },
+      origin: { get: function () { return this._protocol + '//' + this._hostname + portSuffix(this); } },
+      href: {
+        get: function () { return this.origin + this._pathname + this.search + this._hash; },
+        set: function (v) { URLImpl.call(this, v); },
+      },
+    });
+    URLImpl.prototype.toString = function () { return this.href; };
+    URLImpl.prototype.toJSON = function () { return this.href; };
+    g.URL = URLImpl;
   }
 })();

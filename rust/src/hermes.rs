@@ -595,6 +595,10 @@ extern "C" fn host_audio(_ud: *mut c_void, arg: *const c_char) {
 // ── WebSocket (tungstenite; one worker thread per connection) ────────────────
 enum WsCmd {
     Send(String),
+    // binary frame: the JS shim base64-encodes the ArrayBuffer/Uint8Array body so the
+    // bytes survive the string bridge intact (a plain `String(data)` corrupted them to
+    // "[object ArrayBuffer]"). decoded back to bytes here and sent as a real binary frame.
+    SendBinary(Vec<u8>),
     Close,
 }
 static WS_REGISTRY: OnceLock<Mutex<HashMap<u64, Sender<WsCmd>>>> = OnceLock::new();
@@ -640,6 +644,9 @@ fn ws_thread(id: u64, url: String, cmd_rx: Receiver<WsCmd>) {
             match cmd_rx.try_recv() {
                 Ok(WsCmd::Send(t)) => {
                     let _ = socket.send(Message::Text(t));
+                }
+                Ok(WsCmd::SendBinary(b)) => {
+                    let _ = socket.send(Message::Binary(b));
                 }
                 Ok(WsCmd::Close) => {
                     let _ = socket.close(None);
@@ -718,10 +725,22 @@ extern "C" fn host_ws_open(_ud: *mut c_void, arg: *const c_char) {
 }
 
 extern "C" fn host_ws_send(_ud: *mut c_void, arg: *const c_char) {
-    if let Ok((id, data)) = serde_json::from_str::<(u64, String)>(&arg_str(arg))
+    // protocol: [id, data, isBinary]. for a text frame `data` is the string as-is; for a
+    // binary frame `data` is base64 (the JS shim encoded the ArrayBuffer/Uint8Array), which
+    // we decode back to the original bytes here so a real binary frame goes on the wire.
+    if let Ok((id, data, is_binary)) = serde_json::from_str::<(u64, String, bool)>(&arg_str(arg))
         && let Some(tx) = ws_registry().lock().unwrap().get(&id)
     {
-        let _ = tx.send(WsCmd::Send(data));
+        if is_binary {
+            match base64::engine::general_purpose::STANDARD.decode(&data) {
+                Ok(bytes) => {
+                    let _ = tx.send(WsCmd::SendBinary(bytes));
+                }
+                Err(e) => eprintln!("[hermes] ws send: bad binary base64: {e}"),
+            }
+        } else {
+            let _ = tx.send(WsCmd::Send(data));
+        }
     }
 }
 

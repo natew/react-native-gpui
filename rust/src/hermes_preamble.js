@@ -285,7 +285,7 @@
   // WebSocket — one Rust worker per connection; events arrive via __rngpui_wsEvent.
   var wsSeq = 1;
   var wsConns = Object.create(null);
-  function WS(url) {
+  function WS(url, protocols) {
     this._id = wsSeq++;
     this.url = String(url);
     this.readyState = 0; // CONNECTING
@@ -295,7 +295,14 @@
     this.onopen = null; this.onmessage = null; this.onclose = null; this.onerror = null;
     this._listeners = { open: [], message: [], close: [], error: [] };
     wsConns[this._id] = this;
-    g.__rngpui_wsOpen(JSON.stringify({ id: this._id, url: this.url }));
+    // Browsers accept either a single string or an array of strings for the
+    // second WS arg, and send them as the Sec-WebSocket-Protocol header.
+    // Zero uses this to smuggle its auth token, so the host worker MUST
+    // forward the list — see ws_thread in hermes.rs.
+    var protoList = null;
+    if (typeof protocols === 'string') protoList = [protocols];
+    else if (Array.isArray(protocols)) protoList = protocols.map(String);
+    g.__rngpui_wsOpen(JSON.stringify({ id: this._id, url: this.url, protocols: protoList }));
   }
   WS.CONNECTING = 0; WS.OPEN = 1; WS.CLOSING = 2; WS.CLOSED = 3;
   WS.prototype.addEventListener = function (type, cb) { if (this._listeners[type]) this._listeners[type].push(cb); };

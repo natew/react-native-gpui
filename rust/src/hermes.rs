@@ -618,8 +618,37 @@ fn ws_set_nonblocking(stream: &mut MaybeTlsStream<TcpStream>) {
     }
 }
 
-fn ws_thread(id: u64, url: String, cmd_rx: Receiver<WsCmd>) {
-    let mut socket = match tungstenite::connect(&url) {
+/// Build a tungstenite handshake request, optionally injecting
+/// `Sec-WebSocket-Protocol` so Hermes-land WebSocket users can pass
+/// subprotocols (e.g. `@rocicorp/zero` smuggles its auth token there).
+fn build_ws_request(
+    url: &str,
+    protocols: Option<&[String]>,
+) -> Result<tungstenite::handshake::client::Request, tungstenite::Error> {
+    use tungstenite::client::IntoClientRequest;
+    let mut req = url.into_client_request()?;
+    if let Some(list) = protocols
+        && !list.is_empty()
+        && let Ok(value) =
+            tungstenite::http::HeaderValue::from_str(&list.join(", "))
+    {
+        req.headers_mut()
+            .insert("sec-websocket-protocol", value);
+    }
+    Ok(req)
+}
+
+fn ws_thread(
+    id: u64,
+    url: String,
+    protocols: Option<Vec<String>>,
+    cmd_rx: Receiver<WsCmd>,
+) {
+    let connect_result = match build_ws_request(&url, protocols.as_deref()) {
+        Ok(req) => tungstenite::connect(req),
+        Err(e) => Err(e),
+    };
+    let mut socket = match connect_result {
         Ok((s, _resp)) => s,
         Err(e) => {
             ws_registry().lock().unwrap().remove(&id);
@@ -714,13 +743,15 @@ fn ws_thread(id: u64, url: String, cmd_rx: Receiver<WsCmd>) {
 struct WsOpenReq {
     id: u64,
     url: String,
+    #[serde(default)]
+    protocols: Option<Vec<String>>,
 }
 
 extern "C" fn host_ws_open(_ud: *mut c_void, arg: *const c_char) {
     if let Ok(req) = serde_json::from_str::<WsOpenReq>(&arg_str(arg)) {
         let (tx, rx) = flume::unbounded::<WsCmd>();
         ws_registry().lock().unwrap().insert(req.id, tx);
-        std::thread::spawn(move || ws_thread(req.id, req.url, rx));
+        std::thread::spawn(move || ws_thread(req.id, req.url, req.protocols, rx));
     }
 }
 

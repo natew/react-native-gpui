@@ -215,3 +215,14 @@ export { startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type Se
 // renderer platform driver — tamagui's @tamagui/core setupPlatformDriver(platformDriver)
 // consumes this for renderer-owned pseudo (hover/press) states. See platform-driver.ts.
 export { platformDriver, registerPseudoListener, type PseudoState, type PseudoListener } from "./platform-driver";
+
+// no-op stubs for native modules that some libraries expect from
+// react-native (TurboModule etc.). On desktop these have no real
+// counterpart — they exist to satisfy import resolution so e.g.
+// expo-clipboard can bundle even when its native code is never called.
+export const TurboModuleRegistry = {
+    get: <T>(_name: string): T | null => null,
+    getEnforcing: <T>(_name: string): T => {
+        throw new Error(`TurboModule "${_name}" not available on desktop`)
+    },
+}

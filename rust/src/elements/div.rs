@@ -127,6 +127,13 @@ pub struct DivPrepaintState {
     hitbox: Option<Hitbox>,
     max_scroll_x: f32,
     max_scroll_y: f32,
+    // child indices a scroll container windowed out this frame: their laid-out
+    // bounds fell outside the viewport (+ one screen of overscan each side), so
+    // prepaint skipped them and paint must skip the exact same set. `None` for
+    // non-scroll divs (paint everything, unchanged). This is the scroll-fps win:
+    // a long list otherwise prepaints + paints every row on every wheel tick, and
+    // gpui has no partial repaint, so the whole off-screen subtree is pure waste.
+    culled: Option<HashSet<usize>>,
 }
 
 fn get_scroll(id: u64) -> ScrollOffset {
@@ -1610,11 +1617,13 @@ impl Element for ReactDivElement {
 
         let mut max_scroll_x = 0.0;
         let mut max_scroll_y = 0.0;
+        let mut culled: Option<HashSet<usize>> = None;
         if !bounds_have_drawable_area(bounds) {
             return DivPrepaintState {
                 hitbox,
                 max_scroll_x,
                 max_scroll_y,
+                culled,
             };
         }
         if scroll {
@@ -1637,12 +1646,33 @@ impl Element for ReactDivElement {
                 }
             };
             set_scroll(self.element.global_id, off);
+            // viewport in content space (pre-offset child bounds live here) plus one
+            // screen of overscan on every side, so a fast fling never out-runs the
+            // window and pops in blank. layout_bounds is the taffy result, unaffected
+            // by the element offset we push below, so we compare it against the shifted
+            // viewport rather than shifting every child.
+            let w = bounds.size.width;
+            let h = bounds.size.height;
+            let ox = bounds.origin.x + px(off.x);
+            let oy = bounds.origin.y + px(off.y);
+            let (vx0, vy0, vx1, vy1) = (ox - w, oy - h, ox + w + w, oy + h + h);
+            let mut skipped: HashSet<usize> = HashSet::new();
             let order = self.stacked_child_indices();
             window.with_element_offset(point(px(-off.x), px(-off.y)), |window| {
                 for index in order.iter() {
-                    self.children[index].element.prepaint(window, cx);
+                    let b = window.layout_bounds(request_layout[index]);
+                    let visible =
+                        b.right() > vx0 && b.left() < vx1 && b.bottom() > vy0 && b.top() < vy1;
+                    if visible {
+                        self.children[index].element.prepaint(window, cx);
+                    } else {
+                        skipped.insert(index);
+                    }
                 }
             });
+            if !skipped.is_empty() {
+                culled = Some(skipped);
+            }
         } else {
             let order = self.stacked_child_indices();
             for index in order.iter() {
@@ -1654,6 +1684,7 @@ impl Element for ReactDivElement {
             hitbox,
             max_scroll_x,
             max_scroll_y,
+            culled,
         }
     }
 
@@ -2441,14 +2472,24 @@ impl Element for ReactDivElement {
                 }
                 style.paint(bounds, window, cx, |window, cx| {
                     let _rounded_clip_guard = push_rounded_overflow_clip(rounded_clip);
+                    // a scroll container's off-screen children were never prepainted
+                    // this frame (see DivPrepaintState::culled); painting them now would
+                    // hit gpui's "paint without prepaint" assert, so skip the same set.
+                    let culled = prepaint.culled.as_ref();
                     if let Some(mask) = overflow_mask {
                         window.with_content_mask(Some(mask), |window| {
                             for index in order.iter() {
+                                if culled.is_some_and(|c| c.contains(&index)) {
+                                    continue;
+                                }
                                 self.children[index].element.paint(window, cx);
                             }
                         });
                     } else {
                         for index in order.iter() {
+                            if culled.is_some_and(|c| c.contains(&index)) {
+                                continue;
+                            }
                             self.children[index].element.paint(window, cx);
                         }
                     }
@@ -2911,6 +2952,7 @@ mod tests {
             max: Some(420.0),
             start_position: 100.0,
             start_value: 250.0,
+            last_refresh: Instant::now(),
         };
 
         assert!(update_native_resize(
@@ -2934,6 +2976,7 @@ mod tests {
             max: Some(460.0),
             start_position: 100.0,
             start_value: 300.0,
+            last_refresh: Instant::now(),
         };
 
         assert!(update_native_resize(

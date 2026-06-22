@@ -2578,6 +2578,47 @@ fn main() {
             .detach();
         }
 
+        // Scroll spring driver: trackpad rubber-band overscroll springs back to the
+        // edge once input goes idle, but rngpui renders on-demand — nothing repaints
+        // after the last wheel event. Mirror the effects driver: tick ~125Hz while a
+        // container is overscrolling/springing (prepaint advances the spring each
+        // frame and clears the bounce when it settles), idle on a cheap ~30Hz poll
+        // otherwise. Self-sustaining like the smoke driver, so it survives a dropped
+        // frame the way a paint-chained request_animation_frame would not.
+        {
+            let pump = pump.clone();
+            let window_handle = window_handle;
+            cx.spawn(async move |cx| {
+                loop {
+                    if elements::scroll_bounce_active() {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(8))
+                            .await;
+                        if pump.update(cx, |_this, cx| cx.notify()).is_err() {
+                            break;
+                        }
+                        if window_handle
+                            .update(cx, |_root, window, root_cx| {
+                                root_cx.notify();
+                                window.refresh();
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    } else {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(33))
+                            .await;
+                        if pump.update(cx, |_this, _cx| ()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            })
+            .detach();
+        }
+
         // Foreground pump: apply each message on the main thread. A new tree re-renders
         // (cx.notify); a webview command runs straight against the live wry view (which
         // must be driven from the main thread). Both arrive on the same ordered channel.

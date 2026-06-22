@@ -173,117 +173,6 @@ pub fn scroll_position(id: u64) -> (f32, f32) {
     (offset.x, offset.y)
 }
 
-// Trackpad rubber-band overscroll. A scroll container dragged past its edge shows a
-// resisted overshoot — resistance rises with distance and hits zero at one viewport,
-// so it can't be pushed further — then springs back to the edge once input goes idle
-// (finger lifted / momentum spent). A mouse wheel (ScrollDelta::Lines) hard-clamps
-// with no bounce — exactly like native macOS, where only the trackpad rubber-bands.
-// GPUI paints to one Metal surface with no movable NSViews, so there is no native
-// NSScrollView to delegate this to; this is the feel-alike reimplementation (Zed does
-// the same for its own lists).
-struct BounceState {
-    last_input: Instant,
-    springing: bool,
-}
-// containers currently outside their scroll range (overscrolling or springing back).
-// absence == "normal", and prepaint clamps to range as before. non-empty keeps the
-// scroll driver in service.rs ticking the window so the spring runs to completion.
-static SCROLL_BOUNCE: Lazy<Mutex<HashMap<u64, BounceState>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-// input must be quiet this long before an overscrolled container starts springing
-// back — longer than the ~8-16ms gap between live trackpad/momentum events so we
-// never spring mid-gesture.
-const BOUNCE_IDLE: Duration = Duration::from_millis(80);
-// per-frame spring stiffness at the driver's ~125Hz tick (~250ms settle, no overshoot
-// — native rubber-band return decelerates into the edge, it doesn't bounce past).
-const BOUNCE_SPRING_K: f32 = 0.22;
-// safety valve: a container that overscrolls then unmounts mid-bounce would never get
-// another prepaint to settle + clear it, leaving the driver ticking forever. A live
-// hold refreshes last_input each event and a spring settles in ~330ms — both far under
-// this, so only an orphaned entry is ever pruned.
-const BOUNCE_TTL: Duration = Duration::from_secs(2);
-
-pub fn scroll_bounce_active() -> bool {
-    let mut bounce = SCROLL_BOUNCE.lock().unwrap();
-    bounce.retain(|_, s| s.last_input.elapsed() < BOUNCE_TTL);
-    !bounce.is_empty()
-}
-
-/// One axis of a trackpad scroll with rubber-band overscroll. `cur` is the current
-/// (possibly out-of-range) displayed offset; returns the new displayed offset,
-/// resisted and bounded to ~one viewport past either edge. Returning toward the
-/// range is unresisted (snappy); only pushing further out resists.
-fn overscroll_axis(cur: f32, delta: f32, max: f32, dim: f32) -> f32 {
-    let raw = cur - delta;
-    if max <= 0.0 {
-        return 0.0; // not scrollable on this axis — no bounce
-    }
-    if raw >= 0.0 && raw <= max {
-        return raw;
-    }
-    let (edge, over_now) = if raw < 0.0 {
-        (0.0, (-cur).max(0.0))
-    } else {
-        (max, (cur - max).max(0.0))
-    };
-    if (raw - edge).abs() <= over_now {
-        return raw; // moving back toward range: unresisted
-    }
-    let resist = 1.0 - (over_now / dim).min(1.0);
-    let stepped = cur - delta * resist;
-    if edge == 0.0 {
-        stepped.max(-dim)
-    } else {
-        stepped.min(max + dim)
-    }
-}
-
-/// Mark that live input touched an overscrolling container this frame: cancels any
-/// in-flight spring and resets the idle clock.
-fn bounce_note_input(id: u64) {
-    SCROLL_BOUNCE.lock().unwrap().insert(
-        id,
-        BounceState {
-            last_input: Instant::now(),
-            springing: false,
-        },
-    );
-}
-fn bounce_clear(id: u64) {
-    SCROLL_BOUNCE.lock().unwrap().remove(&id);
-}
-
-/// Resolve a scroll container's offset for this frame: spring an active rubber-band
-/// overscroll back toward its edge, hold it while the gesture/momentum is still live,
-/// or clamp to range when there's no bounce in flight (which also re-clamps a stale
-/// offset after content shrinks).
-fn advance_scroll_offset(id: u64, cur: ScrollOffset, max_x: f32, max_y: f32) -> ScrollOffset {
-    let mut bounce = SCROLL_BOUNCE.lock().unwrap();
-    let Some(state) = bounce.get_mut(&id) else {
-        return ScrollOffset {
-            x: cur.x.clamp(0.0, max_x),
-            y: cur.y.clamp(0.0, max_y),
-        };
-    };
-    if !state.springing && state.last_input.elapsed() >= BOUNCE_IDLE {
-        state.springing = true;
-    }
-    if !state.springing {
-        return cur; // holding the overscroll while input is still live
-    }
-    let tx = cur.x.clamp(0.0, max_x);
-    let ty = cur.y.clamp(0.0, max_y);
-    let nx = cur.x + (tx - cur.x) * BOUNCE_SPRING_K;
-    let ny = cur.y + (ty - cur.y) * BOUNCE_SPRING_K;
-    if (nx - tx).abs() < 0.5 && (ny - ty).abs() < 0.5 {
-        bounce.remove(&id);
-        ScrollOffset { x: tx, y: ty }
-    } else {
-        ScrollOffset { x: nx, y: ny }
-    }
-}
-
 pub fn scroll_to_end(id: u64) {
     SCROLL_TO_END.lock().unwrap().insert(id);
 }
@@ -1744,19 +1633,19 @@ impl Element for ReactDivElement {
                 Self::content_size(request_layout, window, bounds.left(), bounds.top());
             max_scroll_x = (content_w - bounds.size.width).max(px(0.0)).into();
             max_scroll_y = (content_h - bounds.size.height).max(px(0.0)).into();
-            let id = self.element.global_id;
-            let current = get_scroll(id);
-            let off = if take_scroll_to_end(id) {
-                bounce_clear(id);
+            let current = get_scroll(self.element.global_id);
+            let off = if take_scroll_to_end(self.element.global_id) {
                 ScrollOffset {
                     x: current.x.clamp(0.0, max_scroll_x),
                     y: max_scroll_y,
                 }
             } else {
-                // pass through / spring an active overscroll, else clamp to range.
-                advance_scroll_offset(id, current, max_scroll_x, max_scroll_y)
+                ScrollOffset {
+                    x: current.x.clamp(0.0, max_scroll_x),
+                    y: current.y.clamp(0.0, max_scroll_y),
+                }
             };
-            set_scroll(id, off);
+            set_scroll(self.element.global_id, off);
             // viewport in content space (pre-offset child bounds live here) plus one
             // screen of overscan on every side, so a fast fling never out-runs the
             // window and pops in blank. layout_bounds is the taffy result, unaffected
@@ -1845,10 +1734,6 @@ impl Element for ReactDivElement {
                         .as_ref()
                         .is_some_and(|hitbox| hitbox.should_handle_scroll(window))
                 {
-                    // trackpad reports precise pixel deltas and gets rubber-band
-                    // overscroll; a mouse wheel reports lines and hard-clamps with no
-                    // bounce, matching native macOS (only the trackpad rubber-bands).
-                    let trackpad = matches!(ev.delta, ScrollDelta::Pixels(_));
                     let dy: f32 = match ev.delta {
                         ScrollDelta::Lines(p) => p.y * 32.0,
                         ScrollDelta::Pixels(p) => p.y.into(),
@@ -1858,32 +1743,12 @@ impl Element for ReactDivElement {
                         ScrollDelta::Pixels(p) => p.x.into(),
                     };
                     let cur = get_scroll(id);
-                    let next = if trackpad {
-                        let dim_x: f32 = bounds.size.width.into();
-                        let dim_y: f32 = bounds.size.height.into();
-                        ScrollOffset {
-                            x: overscroll_axis(cur.x, dx, max_scroll_x, dim_x),
-                            y: overscroll_axis(cur.y, dy, max_scroll_y, dim_y),
-                        }
-                    } else {
-                        ScrollOffset {
-                            x: (cur.x - dx).clamp(0.0, max_scroll_x),
-                            y: (cur.y - dy).clamp(0.0, max_scroll_y),
-                        }
+                    let next = ScrollOffset {
+                        x: (cur.x - dx).clamp(0.0, max_scroll_x),
+                        y: (cur.y - dy).clamp(0.0, max_scroll_y),
                     };
                     if (next.x - cur.x).abs() > 0.01 || (next.y - cur.y).abs() > 0.01 {
                         set_scroll(id, next);
-                        // an out-of-range result is a live overscroll the spring driver
-                        // must bounce back; any in-range result (incl. mouse wheel) ends it.
-                        let oob = next.x < -0.5
-                            || next.x > max_scroll_x + 0.5
-                            || next.y < -0.5
-                            || next.y > max_scroll_y + 0.5;
-                        if trackpad && oob {
-                            bounce_note_input(id);
-                        } else {
-                            bounce_clear(id);
-                        }
                         if on_scroll {
                             let width: f32 = bounds.size.width.into();
                             let height: f32 = bounds.size.height.into();
@@ -2667,63 +2532,6 @@ mod tests {
 
     fn native_layout_test_guard() -> MutexGuard<'static, ()> {
         NATIVE_LAYOUT_TEST_LOCK.lock().unwrap()
-    }
-
-    #[test]
-    fn overscroll_axis_passes_through_in_range_and_resists_past_edges() {
-        let (max, dim) = (1000.0, 500.0);
-        // in range: unresisted, exactly cur - delta
-        assert_eq!(super::overscroll_axis(200.0, 50.0, max, dim), 150.0);
-        // first step past the top edge (from rest) moves the full delta
-        assert_eq!(super::overscroll_axis(0.0, 30.0, max, dim), -30.0);
-        // deeper past the top resists — less than the full delta, never more
-        let deep = super::overscroll_axis(-100.0, 100.0, max, dim);
-        assert!(deep < -100.0 && deep > -200.0, "resisted, not full: {deep}");
-        // can never be pushed more than one viewport past the edge
-        let pinned = super::overscroll_axis(-dim, 100_000.0, max, dim);
-        assert!((pinned + dim).abs() < 0.01, "pinned at -dim: {pinned}");
-        // past the bottom edge mirrors the top (delta < 0 scrolls down past max)
-        assert_eq!(super::overscroll_axis(max, -30.0, max, dim), max + 30.0);
-    }
-
-    #[test]
-    fn overscroll_axis_returns_unresisted_and_ignores_unscrollable_axis() {
-        let (max, dim) = (1000.0, 500.0);
-        // returning toward the range from an overscroll is full-speed (snappy)
-        assert_eq!(super::overscroll_axis(-100.0, -80.0, max, dim), -20.0);
-        // a non-scrollable axis (content fits, max == 0) never bounces
-        assert_eq!(super::overscroll_axis(0.0, 50.0, 0.0, dim), 0.0);
-        assert_eq!(super::overscroll_axis(0.0, -50.0, 0.0, dim), 0.0);
-    }
-
-    #[test]
-    fn advance_scroll_offset_clamps_without_bounce_and_springs_to_edge() {
-        let id = 987_654_321u64;
-        super::SCROLL_BOUNCE.lock().unwrap().remove(&id);
-
-        // no bounce in flight: a stale out-of-range offset is clamped back to range
-        let clamped =
-            super::advance_scroll_offset(id, super::ScrollOffset { x: -50.0, y: 2000.0 }, 300.0, 1000.0);
-        assert_eq!((clamped.x, clamped.y), (0.0, 1000.0));
-        assert!(!super::SCROLL_BOUNCE.lock().unwrap().contains_key(&id));
-
-        // a springing bounce eases toward the edge each frame and clears when settled
-        super::SCROLL_BOUNCE.lock().unwrap().insert(
-            id,
-            super::BounceState {
-                last_input: Instant::now(),
-                springing: true,
-            },
-        );
-        let mut off = super::ScrollOffset { x: 0.0, y: -120.0 };
-        let mut frames = 0;
-        while super::SCROLL_BOUNCE.lock().unwrap().contains_key(&id) {
-            off = super::advance_scroll_offset(id, off, 300.0, 1000.0);
-            frames += 1;
-            assert!(frames < 500, "spring never settled");
-        }
-        assert!(off.y.abs() < 0.5, "settled at edge: {}", off.y);
-        assert!(frames > 1 && frames < 100, "settled in a sane frame count: {frames}");
     }
 
     #[test]

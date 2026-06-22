@@ -1766,6 +1766,17 @@ impl Element for ReactDivElement {
                         // re-evaluate pseudo hover before repainting — otherwise
                         // scrolled-away elements keep a stale :hover state.
                         re_evaluate_pseudo_hover(window);
+                        // deliberately a FULL-layout repaint, not the retained-layout
+                        // reuse fast path (`set_paint_only_frame`). Reuse was tried on
+                        // scroll and is a net REGRESSION at ControlRoom node counts: it
+                        // still rebuilds the whole element tree AND runs every text
+                        // measure AND copies every node's bounds — only the flexbox solve
+                        // is skipped, and at these counts the solve is cheaper than that
+                        // bookkeeping. Worse, the bookkeeping scales with TOTAL nodes, so
+                        // scroll (whole tree reprocessed every wheel tick) felt slower
+                        // than a window resize (which vetoes reuse → full layout). Measured
+                        // ~1000 nodes: reuse p50 3.26/p95 4.52ms vs full 2.87/3.37ms. Do
+                        // not re-arm reuse here.
                         window.refresh(); // on-demand: repaint to reflect the new offset
                         cx.stop_propagation();
                     }

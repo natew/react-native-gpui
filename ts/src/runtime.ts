@@ -122,6 +122,8 @@ export type BridgeEvent =
           ctrlKey?: boolean;
           altKey?: boolean;
           metaKey?: boolean;
+          button?: number;
+          buttons?: number;
           pressDrag?: boolean;
           pageX?: number;
           pageY?: number;

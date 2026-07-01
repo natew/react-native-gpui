@@ -183,6 +183,8 @@ export interface GestureResponderEvent {
         ctrlKey?: boolean;
         altKey?: boolean;
         metaKey?: boolean;
+        button?: number;
+        buttons?: number;
         pressDrag?: boolean;
     };
 }
@@ -192,6 +194,8 @@ export interface MouseResponderEvent extends GestureResponderEvent {
     ctrlKey?: boolean;
     metaKey?: boolean;
     shiftKey?: boolean;
+    button?: number;
+    buttons?: number;
     pressDrag?: boolean;
     preventDefault?: () => void;
     stopPropagation?: () => void;
@@ -265,6 +269,7 @@ export interface ViewProps extends AccessibilityProps, ViewStyle {
     children?: ReactNode;
     style?: StyleProp<ViewStyle>;
     onClick?: (event: MouseResponderEvent) => void;
+    onContextMenu?: (event: MouseResponderEvent) => void;
     onMouseDown?: (event: MouseResponderEvent) => void;
     onMouseUp?: (event: MouseResponderEvent) => void;
     onMouseEnter?: (event: MouseResponderEvent) => void;

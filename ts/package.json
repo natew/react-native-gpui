@@ -51,6 +51,7 @@
         "conformance:transform": "bun run scripts/check-transform-conformance.mjs",
         "conformance:opacity-ramp": "bun run scripts/check-opacity-ramp-conformance.mjs",
         "conformance:diagnostics": "node scripts/diagnostics-conformance.mjs",
+        "conformance:context-menu": "node scripts/context-menu-conformance.mjs",
         "conformance:file-picker": "bun run scripts/file-picker-conformance.ts",
         "conformance:display-none": "bun run scripts/display-none-conformance.ts",
         "conformance:inspector": "node scripts/inspector-conformance.mjs",

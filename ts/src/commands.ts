@@ -12,6 +12,19 @@ export type AppCommandMenuItem =
     | { kind: "separator" }
     | { kind: "submenu"; label: string; items: AppCommandMenuItem[] };
 
+export type NativeMenuCommandItem =
+    | {
+          kind: "action";
+          id: string;
+          label: string;
+          disabled?: boolean;
+          checked?: boolean;
+          destructive?: boolean;
+      }
+    | { kind: "label"; label: string }
+    | { kind: "separator" }
+    | { kind: "submenu"; label: string; disabled?: boolean; items: NativeMenuCommandItem[] };
+
 export type AppCommandMenu = {
     label: string;
     items: AppCommandMenuItem[];
@@ -42,11 +55,21 @@ export type Command =
     | { $cmd: "dockBadge"; label: string }
     | { $cmd: "requestAttention"; critical?: boolean }
     | { $cmd: "openWindow" }
+    | {
+          $cmd: "nativeContextMenu";
+          x: number;
+          y: number;
+          items: NativeMenuCommandItem[];
+          closeId?: string;
+      }
+    | { $cmd: "clipboardWrite"; text: string }
     | ({ $cmd: "appCommands" } & AppCommandConfig);
 
 let sink: ((cmd: Command) => void) | null = null;
 let lastAppCommandConfig = "";
 const appCommandListeners = new Set<(id: string) => void>();
+const nativeMenuCallbacks = new Map<string, () => void>();
+let nextNativeMenuCallbackId = 1;
 
 export function setCommandSink(fn: (cmd: Command) => void) {
     sink = fn;
@@ -125,6 +148,45 @@ export const Dock = {
 export const NativeWindow = {
     open() {
         sendCommand({ $cmd: "openWindow" });
+    },
+};
+
+export const NativeClipboard = {
+    setString(text: string) {
+        sendCommand({ $cmd: "clipboardWrite", text });
+    },
+};
+
+export const NativeMenus = {
+    showContextMenu({
+        x,
+        y,
+        items,
+        closeId,
+    }: {
+        x: number;
+        y: number;
+        items: NativeMenuCommandItem[];
+        closeId?: string;
+    }) {
+        sendCommand({ $cmd: "nativeContextMenu", x, y, items, closeId });
+    },
+
+    registerCallback(callback: () => void) {
+        const id = `native-menu:${nextNativeMenuCallbackId++}`;
+        nativeMenuCallbacks.set(id, callback);
+        return id;
+    },
+
+    unregisterCallback(id: string) {
+        nativeMenuCallbacks.delete(id);
+    },
+
+    _emit(id: string) {
+        const callback = nativeMenuCallbacks.get(id);
+        if (!callback) return false;
+        callback();
+        return true;
     },
 };
 

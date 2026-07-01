@@ -145,6 +145,7 @@ type MeasureInWindowCallback = (x: number, y: number, width: number, height: num
 // ── event registry (id → { event: handler }) ────────────────────────
 const PROP_TO_EVENT: Record<string, string> = {
     onClick: "click",
+    onContextMenu: "contextMenu",
     onMouseDown: "mouseDown",
     onMouseUp: "mouseUp",
     onMouseEnter: "mouseEnter",
@@ -245,6 +246,8 @@ export function dispatchEvent(
         ctrlKey?: boolean;
         altKey?: boolean;
         metaKey?: boolean;
+        button?: number;
+        buttons?: number;
         pressDrag?: boolean;
         pageX?: number;
         pageY?: number;
@@ -634,6 +637,8 @@ function createEvent(
         ctrlKey?: boolean;
         altKey?: boolean;
         metaKey?: boolean;
+        button?: number;
+        buttons?: number;
         pressDrag?: boolean;
         pageX?: number;
         pageY?: number;
@@ -653,8 +658,8 @@ function createEvent(
     const eventObject: any = {
         type,
         altKey: !!payload.altKey,
-        button: 0,
-        buttons: 0,
+        button: payload.button ?? 0,
+        buttons: payload.buttons ?? 0,
         cancelable: true,
         ctrlKey: !!payload.ctrlKey,
         currentTarget: {},
@@ -669,6 +674,8 @@ function createEvent(
             ctrlKey: !!payload.ctrlKey,
             altKey: !!payload.altKey,
             metaKey: !!payload.metaKey,
+            button: payload.button ?? 0,
+            buttons: payload.buttons ?? 0,
             pressDrag: !!payload.pressDrag,
             layout: payload.layout,
             locationX: payload.locationX ?? 0,

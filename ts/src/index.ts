@@ -157,13 +157,17 @@ export { Animated, AnimatedValue, Easing } from "./Animated";
 export {
     AppCommands,
     Dock,
+    NativeClipboard,
     NativeLayout,
+    NativeMenus,
     NativeWindow,
     type AppCommandBinding,
     type AppCommandConfig,
     type AppCommandMenu,
     type AppCommandMenuItem,
+    type NativeMenuCommandItem,
 } from "./commands";
+export { setupTamaguiNativeMenus } from "./native-menu";
 export {
     KeyboardNavigationProvider,
     useKeyboardNavigation,

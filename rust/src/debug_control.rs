@@ -188,6 +188,11 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
             y: number(value, "y")?,
             reply,
         }),
+        "realcontext" => Ok(Incoming::DebugRealContext {
+            x: number(value, "x")?,
+            y: number(value, "y")?,
+            reply,
+        }),
         "realdown" => Ok(Incoming::DebugRealDown {
             x: number(value, "x")?,
             y: number(value, "y")?,

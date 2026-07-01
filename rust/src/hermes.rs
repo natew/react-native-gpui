@@ -629,21 +629,14 @@ fn build_ws_request(
     let mut req = url.into_client_request()?;
     if let Some(list) = protocols
         && !list.is_empty()
-        && let Ok(value) =
-            tungstenite::http::HeaderValue::from_str(&list.join(", "))
+        && let Ok(value) = tungstenite::http::HeaderValue::from_str(&list.join(", "))
     {
-        req.headers_mut()
-            .insert("sec-websocket-protocol", value);
+        req.headers_mut().insert("sec-websocket-protocol", value);
     }
     Ok(req)
 }
 
-fn ws_thread(
-    id: u64,
-    url: String,
-    protocols: Option<Vec<String>>,
-    cmd_rx: Receiver<WsCmd>,
-) {
+fn ws_thread(id: u64, url: String, protocols: Option<Vec<String>>, cmd_rx: Receiver<WsCmd>) {
     let connect_result = match build_ws_request(&url, protocols.as_deref()) {
         Ok(req) => tungstenite::connect(req),
         Err(e) => Err(e),

@@ -54,6 +54,7 @@ export interface TextInputProps extends AccessibilityProps {
     onChangeText?: (text: string) => void;
     onChange?: (event: { nativeEvent: { text: string } }) => void;
     onClick?: (event: MouseResponderEvent) => void;
+    onContextMenu?: (event: MouseResponderEvent) => void;
     onMouseDown?: (event: MouseResponderEvent) => void;
     onMouseUp?: (event: MouseResponderEvent) => void;
     onMouseEnter?: (event: MouseResponderEvent) => void;

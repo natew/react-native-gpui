@@ -195,6 +195,7 @@ pub struct ReactElement {
 /// Event names that make a node claim a hitbox (pointer/press input of any kind).
 pub const POINTER_EVENTS: &[&str] = &[
     "click",
+    "contextMenu",
     "mouseDown",
     "mouseUp",
     "mouseEnter",

@@ -616,6 +616,44 @@ fn emit_mouse_if(
     );
 }
 
+fn mouse_button_code(button: MouseButton) -> (i32, i32) {
+    match button {
+        MouseButton::Left => (0, 1),
+        MouseButton::Right => (2, 2),
+        MouseButton::Middle => (1, 4),
+        MouseButton::Navigate(_) => (0, 0),
+    }
+}
+
+fn emit_mouse_button_if(
+    id: u64,
+    enabled: bool,
+    name: &str,
+    button: MouseButton,
+    position: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    modifiers: Modifiers,
+) {
+    if !enabled {
+        return;
+    }
+    let (button, buttons) = mouse_button_code(button);
+    crate::bridge::mouse_event_with_button(
+        id,
+        name,
+        position.x.into(),
+        position.y.into(),
+        (position.x - bounds.origin.x).into(),
+        (position.y - bounds.origin.y).into(),
+        modifiers.shift,
+        modifiers.control,
+        modifiers.alt,
+        modifiers.platform,
+        button,
+        buttons,
+    );
+}
+
 fn emit_press_drag_mouse_if(
     id: u64,
     enabled: bool,
@@ -1851,6 +1889,7 @@ impl Element for ReactDivElement {
         // pointer events: emit react native press and desktop mouse events to js. bounds-gated; bubbling.
         let id = self.element.global_id;
         let click = self.element.listens("click");
+        let context_menu = self.element.listens("contextMenu");
         let mouse_down = self.element.listens("mouseDown");
         let mouse_up = self.element.listens("mouseUp");
         let mouse_enter = self.element.listens("mouseEnter");
@@ -1883,6 +1922,7 @@ impl Element for ReactDivElement {
         let press_group = self.element.native_list_group.clone();
         let event_names = self.element.events.clone();
         let tracks_pointer = click
+            || context_menu
             || mouse_down
             || mouse_up
             || mouse_enter
@@ -1913,6 +1953,26 @@ impl Element for ReactDivElement {
             || press_out;
         if tracks_pointer {
             if let Some(hitbox) = prepaint.hitbox.clone() {
+                if context_menu {
+                    let event_bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
+                    let layout_bounds = bounds;
+                    window.on_mouse_event(move |ev: &MouseDownEvent, phase, _window, _cx| {
+                        if phase == DispatchPhase::Bubble
+                            && ev.button == MouseButton::Right
+                            && event_bounds.contains(&ev.position)
+                        {
+                            emit_mouse_button_if(
+                                id,
+                                true,
+                                "contextMenu",
+                                ev.button,
+                                ev.position,
+                                layout_bounds,
+                                ev.modifiers,
+                            );
+                        }
+                    });
+                }
                 if mouse_down
                     || pointer_down
                     || touch_start
@@ -2529,11 +2589,10 @@ mod tests {
         ACTIVE_MOUSE_TARGET, ActiveNativeResize, ActivePressDrag, NATIVE_LAYOUT_ANIMATIONS,
         NATIVE_LAYOUT_FRAMES, NATIVE_LAYOUT_OVERRIDES, NativeLayoutAnimation, NativeLayoutOverride,
         RoundedOverflowClip, animate_native_layout_override, clear_native_layout_override,
-        events_have_press_action,
-        finish_pointer_gesture, get_scroll, inner_corner_radius, native_layout_animation_value,
-        native_layout_has_animations, native_layout_override, press_drag_should_activate,
-        remember_native_layout_frame, rounded_clip_radii_for_bounds, scroll_to,
-        set_native_layout_override, stacked_child_indices_for,
+        events_have_press_action, finish_pointer_gesture, get_scroll, inner_corner_radius,
+        native_layout_animation_value, native_layout_has_animations, native_layout_override,
+        press_drag_should_activate, remember_native_layout_frame, rounded_clip_radii_for_bounds,
+        scroll_to, set_native_layout_override, stacked_child_indices_for,
         target_receives_captured_pointer_event, target_receives_pointer_up_event,
         update_native_resize,
     };

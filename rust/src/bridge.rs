@@ -82,9 +82,29 @@ pub fn mouse_event(
     alt_key: bool,
     meta_key: bool,
 ) {
+    mouse_event_with_button(
+        id, name, page_x, page_y, location_x, location_y, shift_key, ctrl_key, alt_key, meta_key,
+        0, 1,
+    );
+}
+
+pub fn mouse_event_with_button(
+    id: u64,
+    name: &str,
+    page_x: f32,
+    page_y: f32,
+    location_x: f32,
+    location_y: f32,
+    shift_key: bool,
+    ctrl_key: bool,
+    alt_key: bool,
+    meta_key: bool,
+    button: i32,
+    buttons: i32,
+) {
     mouse_event_inner(
         id, name, page_x, page_y, location_x, location_y, shift_key, ctrl_key, alt_key, meta_key,
-        false,
+        false, button, buttons,
     );
 }
 
@@ -102,7 +122,7 @@ pub fn press_drag_mouse_event(
 ) {
     mouse_event_inner(
         id, name, page_x, page_y, location_x, location_y, shift_key, ctrl_key, alt_key, meta_key,
-        true,
+        true, 0, 1,
     );
 }
 
@@ -118,11 +138,15 @@ fn mouse_event_inner(
     alt_key: bool,
     meta_key: bool,
     press_drag: bool,
+    button: i32,
+    buttons: i32,
 ) {
     let mut event = json!({
         "type": "event",
         "id": id,
         "event": name,
+        "button": button,
+        "buttons": buttons,
         "pageX": page_x,
         "pageY": page_y,
         "locationX": location_x,

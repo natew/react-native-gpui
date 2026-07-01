@@ -51,6 +51,7 @@ mod icons;
 mod inspector;
 #[cfg(target_os = "macos")]
 mod liquid_glass;
+mod native_menu;
 mod selection;
 mod style;
 
@@ -1679,6 +1680,10 @@ pub(crate) enum Incoming {
         id: u64,
     },
     BlurInput,
+    NativeContextMenu(native_menu::NativeContextMenu),
+    ClipboardWrite {
+        text: String,
+    },
     AppCommands(AppCommandConfig),
     /// set (or clear, with an empty label) the macOS dock tile badge.
     DockBadge {
@@ -1704,6 +1709,11 @@ pub(crate) enum Incoming {
     /// directly), this exercises gpui's real event loop, so it catches a frozen/occluded
     /// hitbox that `tap` is structurally blind to.
     DebugRealTap {
+        x: f32,
+        y: f32,
+        reply: flume::Sender<serde_json::Value>,
+    },
+    DebugRealContext {
         x: f32,
         y: f32,
         reply: flume::Sender<serde_json::Value>,
@@ -1845,6 +1855,16 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
             }
             "focusInput" => id.map(|id| Incoming::FocusInput { id }),
             "blurInput" => Some(Incoming::BlurInput),
+            "nativeContextMenu" => serde_json::from_value(v.clone())
+                .ok()
+                .map(Incoming::NativeContextMenu),
+            "clipboardWrite" => Some(Incoming::ClipboardWrite {
+                text: v
+                    .get("text")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            }),
             "appCommands" => serde_json::from_value(v.clone())
                 .ok()
                 .map(Incoming::AppCommands),
@@ -2718,6 +2738,46 @@ fn main() {
                             Err(_) => break,
                         }
                     }
+                    Incoming::DebugRealContext { x, y, reply } => {
+                        let result = window_handle.update(cx, |_root, window, cx| {
+                            let position = gpui::point(px(x), px(y));
+                            let before = crate::bridge::events_emitted_count();
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::MouseMove(MouseMoveEvent {
+                                    position,
+                                    pressed_button: None,
+                                    modifiers: gpui::Modifiers::default(),
+                                }),
+                                cx,
+                            );
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::MouseDown(MouseDownEvent {
+                                    button: MouseButton::Right,
+                                    position,
+                                    modifiers: gpui::Modifiers::default(),
+                                    click_count: 1,
+                                    first_mouse: false,
+                                }),
+                                cx,
+                            );
+                            crate::bridge::events_emitted_count().saturating_sub(before)
+                        });
+                        match result {
+                            Ok(emitted) => {
+                                let _ = reply.send(serde_json::json!({
+                                    "ok": true,
+                                    "type": "realcontext",
+                                    "x": x,
+                                    "y": y,
+                                    "handlerFired": emitted > 0,
+                                    "eventsEmitted": emitted,
+                                }));
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     Incoming::DebugRealUp { x, y, reply } => {
                         DEBUG_LEFT_HELD.store(false, Ordering::Relaxed);
                         let result = window_handle.update(cx, |_root, window, cx| {
@@ -3269,6 +3329,24 @@ fn main() {
                             break;
                         }
                     }
+                    Incoming::NativeContextMenu(menu) => {
+                        if window_handle
+                            .update(cx, |_root, window, _cx| native_menu::show(window, menu))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Incoming::ClipboardWrite { text } => {
+                        if cx
+                            .update(|cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     Incoming::DockBadge { label } => {
                         dock::set_badge(&label);
                     }
@@ -3569,6 +3647,7 @@ fn main() {
                             | Incoming::DebugRealKey { .. }
                             | Incoming::DebugDispatchAction { .. }
                             | Incoming::DebugRealTap { .. }
+                            | Incoming::DebugRealContext { .. }
                             | Incoming::DebugRealDown { .. }
                             | Incoming::DebugRealUp { .. }
                             | Incoming::DebugRealMove { .. }
@@ -3577,6 +3656,8 @@ fn main() {
                             | Incoming::DebugResize { .. }
                             | Incoming::DebugNativeScrollAt { .. }
                             | Incoming::DebugWebviewCopyProof { .. }
+                            | Incoming::NativeContextMenu(_)
+                            | Incoming::ClipboardWrite { .. }
                             | Incoming::AppCommands(_)
                             | Incoming::DockBadge { .. }
                             | Incoming::RequestAttention { .. }
@@ -3819,6 +3900,14 @@ mod tests {
         match parse_incoming(&json!({ "$cmd": "requestAttention" })) {
             Some(Incoming::RequestAttention { critical }) => assert!(!critical),
             _ => panic!("expected requestAttention command"),
+        }
+    }
+
+    #[test]
+    fn parses_clipboard_write_command() {
+        match parse_incoming(&json!({ "$cmd": "clipboardWrite", "text": "ab-session" })) {
+            Some(Incoming::ClipboardWrite { text }) => assert_eq!(text, "ab-session"),
+            _ => panic!("expected clipboardWrite command"),
         }
     }
 

@@ -12,7 +12,7 @@ import { toWireDelta } from "./wire-delta";
 // coalesced event batches (resize/layout/scroll floods) dispatch inside one React update so
 // a window resize produces one re-render per batch instead of one per event.
 setEventBatcher((run) => (Reconciler as { batchedUpdates(fn: (a: unknown) => void, a?: unknown): void }).batchedUpdates(run));
-import { AppCommands, setCommandSink } from "./commands";
+import { AppCommands, NativeMenus, setCommandSink } from "./commands";
 import { Dimensions } from "./Dimensions";
 import { applyNativeColorScheme, setAppearanceUpdateSink } from "./colors";
 import { dispatchPseudo } from "./platform-driver";
@@ -128,6 +128,7 @@ export function createRoot(options: RootOptions = {}): Root {
             return;
         }
         if (e.type === "command") {
+            if (NativeMenus._emit(e.id)) return;
             AppCommands._emit(e.id);
             return;
         }
@@ -154,6 +155,8 @@ export function createRoot(options: RootOptions = {}): Root {
             ctrlKey: e.ctrlKey,
             altKey: e.altKey,
             metaKey: e.metaKey,
+            button: e.button,
+            buttons: e.buttons,
             pressDrag: e.pressDrag,
             pageX: e.pageX,
             pageY: e.pageY,

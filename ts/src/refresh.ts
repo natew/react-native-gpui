@@ -1,7 +1,6 @@
 import * as React from "react";
 
 declare const __DEV__: boolean | undefined;
-declare const require: (id: string) => unknown;
 
 type RefreshGlobal = typeof globalThis & {
     $RefreshReg$?: (type: unknown, id: string) => void;
@@ -19,12 +18,17 @@ const isDev =
     typeof __DEV__ !== "undefined"
         ? __DEV__ === true
         : typeof process !== "undefined" && process.env?.NODE_ENV === "development";
+const refreshRuntimeModule = "react-refresh/runtime";
 let installed = false;
 
 export function installRefreshRuntime() {
     if (!isDev || installed) return;
+    const runtimeRequire = (0, eval)("typeof require === 'function' ? require : undefined") as
+        | ((id: string) => unknown)
+        | undefined;
+    const RefreshRuntime = runtimeRequire?.(refreshRuntimeModule);
+    if (!RefreshRuntime) return;
     installed = true;
-    const RefreshRuntime = require("react-refresh/runtime");
     const runtime = RefreshRuntime as unknown as {
         injectIntoGlobalHook(globalObject: typeof globalThis): void;
         register(type: unknown, id: string): void;

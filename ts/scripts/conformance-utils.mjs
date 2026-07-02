@@ -1,9 +1,11 @@
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 
 export const cuaDriver =
     process.env.CUA_DRIVER ||
-    (existsSync("/Users/n8/.local/bin/cua-driver") ? "/Users/n8/.local/bin/cua-driver" : "cua-driver");
+    (existsSync(join(homedir(), ".local/bin/cua-driver")) ? join(homedir(), ".local/bin/cua-driver") : "cua-driver");
 
 export function conformanceEnv(extra = {}) {
     return {

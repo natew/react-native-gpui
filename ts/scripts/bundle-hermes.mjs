@@ -5,8 +5,9 @@
 //   bun scripts/bundle-hermes.mjs [entry] [out.js] [--bytecode]
 //
 // Bun is used only as the dev bundler here; the output runs under Hermes.
+import { homedir } from "node:os";
 import { readFileSync, writeFileSync } from 'node:fs'
-import { dirname, resolve, sep } from 'node:path'
+import { dirname, resolve, sep, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { reanimatedBunPlugin } from './reanimated-bun-plugin.mjs'
 import { rngpuiHotUpdateAliasPlugin } from './hot-update-alias-plugin.mjs'
@@ -82,7 +83,7 @@ if (wantBytecode) {
 }
 
 if (wantBytecode) {
-  const hermesc = process.env.HERMESC || '/Users/n8/github/hermes/build/bin/hermesc'
+  const hermesc = process.env.HERMESC || join(homedir(), 'github', 'hermes', 'build', 'bin', 'hermesc')
   const outHbc = outJs.replace(/\.js$/, '.hbc')
   const r = spawnSync(hermesc, ['-emit-binary', '-O', '-out', outHbc, outJs], { stdio: 'inherit' })
   if (r.status !== 0) {

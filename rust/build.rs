@@ -6,7 +6,10 @@
 use std::path::PathBuf;
 
 fn main() {
-    let hermes = std::env::var("HERMES_ROOT").unwrap_or_else(|_| "/Users/n8/github/hermes".into());
+    let hermes = std::env::var("HERMES_ROOT").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{home}/github/hermes")
+    });
     let hermes = PathBuf::from(hermes);
     let api = hermes.join("API");
     let jsi = api.join("jsi");

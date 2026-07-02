@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
@@ -14,7 +15,7 @@ copyFileSync(serviceSource, serviceTarget);
 
 const linkedDylibs = linkedLibraries(serviceTarget);
 const needsHermes = linkedDylibs.some((line) => line.includes("libhermesvm"));
-const hermesDylib = join(process.env.HERMES_ROOT || "/Users/n8/github/hermes", "build", "lib", "libhermesvm.dylib");
+const hermesDylib = join(process.env.HERMES_ROOT || join(homedir(), "github", "hermes"), "build", "lib", "libhermesvm.dylib");
 if (needsHermes) {
     if (!existsSync(hermesDylib)) {
         throw new Error(`rngpui-service links libhermesvm, but libhermesvm.dylib was not found at ${hermesDylib}`);

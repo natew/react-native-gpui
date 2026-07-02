@@ -2102,7 +2102,7 @@ mod tests {
 
         let mut child = spawn_editor(
             script.to_str().unwrap(),
-            "/Users/n8/agentbus/gui/interface/agentbus/RightPanel.tsx:42:7",
+            "/Users/dev/app/gui/interface/agentbus/RightPanel.tsx:42:7",
         )
         .expect("spawn editor");
         child.wait().unwrap();
@@ -2111,7 +2111,7 @@ mod tests {
         // an unknown basename → bare file path, so the editor received exactly the file.
         assert_eq!(
             recorded.trim(),
-            "/Users/n8/agentbus/gui/interface/agentbus/RightPanel.tsx"
+            "/Users/dev/app/gui/interface/agentbus/RightPanel.tsx"
         );
         let _ = std::fs::remove_file(&script);
         let _ = std::fs::remove_file(&marker);
@@ -2144,7 +2144,7 @@ mod tests {
 
         let mut child = spawn_editor(
             script.to_str().unwrap(),
-            "/Users/n8/agentbus/gui/interface/agentbus/RightPanel.tsx:42:7",
+            "/Users/dev/app/gui/interface/agentbus/RightPanel.tsx:42:7",
         )
         .expect("spawn editor");
         child.wait().unwrap();
@@ -2152,7 +2152,7 @@ mod tests {
         let recorded = std::fs::read_to_string(&marker).unwrap();
         assert_eq!(
             recorded,
-            "-g\n/Users/n8/agentbus/gui/interface/agentbus/RightPanel.tsx:42:7\n"
+            "-g\n/Users/dev/app/gui/interface/agentbus/RightPanel.tsx:42:7\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2329,7 +2329,7 @@ mod tests {
     #[test]
     fn source_label_shows_basename_and_line() {
         assert_eq!(
-            source_label("/Users/n8/agentbus/gui/interface/RightPanel.tsx:42:7"),
+            source_label("/Users/dev/app/gui/interface/RightPanel.tsx:42:7"),
             "RightPanel.tsx:42"
         );
         assert_eq!(source_label("/a/App.tsx"), "App.tsx");

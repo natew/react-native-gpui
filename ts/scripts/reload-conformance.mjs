@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { homedir } from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -116,7 +117,7 @@ function serviceBinary() {
 
 function stageServiceDylibs(binary) {
     const releaseDir = dirname(binary);
-    const hermesRoot = resolve(process.env.HERMES_ROOT || "/Users/n8/github/hermes");
+    const hermesRoot = resolve(process.env.HERMES_ROOT || join(homedir(), "github", "hermes"));
     const hermesDylib = resolve(hermesRoot, "build", "lib", "libhermesvm.dylib");
     const stagedHermes = join(releaseDir, "libhermesvm.dylib");
     if (!existsSync(stagedHermes)) {

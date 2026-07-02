@@ -15,6 +15,7 @@
 //   3. Run offscreen, poll RNGPUI_DUMP_TREE for the dialog-content style ramp, assert a
 //      real spring ramp + setNodeStyle-dominated fast path.
 
+import { homedir } from "node:os";
 import { spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
@@ -25,7 +26,7 @@ import { reanimatedBunPlugin } from './reanimated-bun-plugin.mjs'
 const here = dirname(fileURLToPath(import.meta.url))
 const tsRoot = resolve(here, '..')
 const repoRoot = resolve(tsRoot, '..')
-const guiRoot = resolve(process.env.RNGPUI_GUI_ROOT || '/Users/n8/agentbus/gui')
+const guiRoot = resolve(process.env.RNGPUI_GUI_ROOT || join(homedir(), 'agentbus', 'gui'))
 const rngEntry = resolve(tsRoot, 'src/index.ts')
 const fixture = resolve(
   process.env.RNGPUI_DIALOG_FIXTURE || resolve(guiRoot, 'native-shell/dialog-reanimated-conformance.tsx'),
@@ -151,7 +152,7 @@ if (!result.success) {
 const code = await result.outputs.find((o) => o.kind === 'entry-point').text()
 await Bun.write(outJs, code)
 
-const hermesc = process.env.HERMESC || '/Users/n8/github/hermes/build/bin/hermesc'
+const hermesc = process.env.HERMESC || join(homedir(), 'github', 'hermes', 'build', 'bin', 'hermesc')
 const hbc = spawnSync(hermesc, ['-emit-binary', '-O', '-out', outHbc, outJs], { encoding: 'utf8' })
 if (hbc.status !== 0) {
   process.stderr.write(hbc.stderr || '')

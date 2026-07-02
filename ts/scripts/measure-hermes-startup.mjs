@@ -4,6 +4,7 @@
 //
 //   node scripts/measure-hermes-startup.mjs <binary> <bundle.js|.hbc> [runs]
 //   node scripts/measure-hermes-startup.mjs <binary> <bundle.js|.hbc> --runs 8 --max-ms 200
+import { homedir } from "node:os";
 import { spawn } from 'node:child_process'
 import { copyFileSync, existsSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -106,7 +107,7 @@ if (maxMs > 0) {
 
 function stageServiceDylibs(binary) {
   const releaseDir = dirname(resolve(binary))
-  const hermesRoot = resolve(process.env.HERMES_ROOT || '/Users/n8/github/hermes')
+  const hermesRoot = resolve(process.env.HERMES_ROOT || join(homedir(), 'github', 'hermes'))
   const hermesDylib = resolve(hermesRoot, 'build', 'lib', 'libhermesvm.dylib')
   const stagedHermes = join(releaseDir, 'libhermesvm.dylib')
   if (!existsSync(stagedHermes)) {

@@ -20,7 +20,8 @@
     "dist",
     "native",
     "scripts",
-    "README.md"
+    "README.md",
+    "THIRD-PARTY-LICENSES"
   ],
   "scripts": {
     "build": "npm run build:rust && npm run build:native && npm run build:ts",

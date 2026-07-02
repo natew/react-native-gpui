@@ -43,7 +43,7 @@ It lives on branch **`single-process-hermes`** (tip **`158e0c0`**) in worktree
 
 **HARD external dependency (not in any repo):** Hermes is built from source at
 **`~/github/hermes/build`** — `lib/libhermesvm.dylib` (linked) + `bin/hermesc` (bytecode
-compiler). `rust/build.rs` finds it via `HERMES_ROOT` (default `/Users/n8/github/hermes`). If
+compiler). `rust/build.rs` finds it via `HERMES_ROOT` (default `~/github/hermes`). If
 that dir is gone, rebuild: `git clone --depth 1 https://github.com/facebook/hermes && cmake -S
 hermes -B hermes/build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build hermes/build
 --target hermesc libhermesvm`. (ninja required: `brew install ninja`.)

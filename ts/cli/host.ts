@@ -6,6 +6,7 @@
 // Bun is used as a compiler only. The app runtime is always the Rust service with
 // embedded Hermes, and debug commands go over RNGPUI_CONTROL_SOCKET.
 
+import { homedir } from "node:os";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createConnection } from "node:net";
 import {
@@ -201,7 +202,7 @@ function stageServiceDylibs(binary: string) {
     if (existsSync(join(releaseDir, "libhermesvm.dylib")) && findDylibs(releaseDir, "libghostty-vt").length > 0) {
         return;
     }
-    const hermesRoot = resolve(process.env.HERMES_ROOT || "/Users/n8/github/hermes");
+    const hermesRoot = resolve(process.env.HERMES_ROOT || join(homedir(), "github", "hermes"));
     const hermesDylib = resolve(hermesRoot, "build", "lib", "libhermesvm.dylib");
     if (!existsSync(hermesDylib)) throw new Error(`libhermesvm.dylib not found: ${hermesDylib}`);
     copyFileSync(hermesDylib, join(releaseDir, "libhermesvm.dylib"));

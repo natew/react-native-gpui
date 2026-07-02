@@ -1,6 +1,6 @@
 {
   "name": "react-native-gpui",
-  "version": "0.1.30",
+  "version": "0.0.1",
   "description": "Write React Native components, render them natively with GPUI (Zed's GPU UI framework).",
   "type": "module",
   "main": "dist/index.js",
@@ -80,7 +80,7 @@
     "conformance:hot-reload-cli": "node scripts/hot-reload-cli-conformance.mjs",
     "conformance:startup": "node scripts/startup-conformance.mjs",
     "prepublishOnly": "npm run build",
-    "release": "node scripts/release.mjs"
+    "release": "bun scripts/release.ts"
   },
   "os": [
     "darwin"

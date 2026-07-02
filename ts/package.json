@@ -1,122 +1,129 @@
 {
-    "name": "react-native-gpui",
-    "version": "0.1.30",
-    "description": "Write React Native components, render them natively with GPUI (Zed's GPU UI framework).",
-    "type": "module",
-    "main": "dist/index.js",
-    "module": "dist/index.js",
-    "types": "dist/index.d.ts",
-    "exports": {
-        ".": {
-            "types": "./dist/index.d.ts",
-            "import": "./dist/index.js"
-        }
-    },
-    "bin": {
-        "rngpui": "./cli/bin.ts"
-    },
-    "files": [
-        "cli",
-        "dist",
-        "native",
-        "scripts",
-        "README.md"
-    ],
-    "scripts": {
-        "build": "npm run build:rust && npm run build:native && npm run build:ts",
-        "build:rust": "cd ../rust && PATH=/opt/homebrew/opt/zig@0.15/bin:$PATH cargo build --release --bin rngpui-service",
-        "build:native": "node scripts/build-native.mjs",
-        "build:clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-        "build:types": "tsc --emitDeclarationOnly",
-        "build:bundle": "bun build src/index.ts --outfile dist/index.js --target node --format esm --external react --external react/jsx-runtime --external react/jsx-dev-runtime && bun scripts/build-ui-runtime.mjs --force",
-        "build:ts": "npm run build:clean && npm run build:types && npm run build:bundle",
-        "typecheck": "tsc --noEmit",
-        "test": "bun run scripts/test-suite.mjs",
-        "test:animated-driver": "bun run scripts/animated-driver-unit.mjs",
-        "test:keyboard-navigation": "bun run scripts/keyboard-navigation-unit.mjs",
-        "test:surfaces": "bun run scripts/surfaces-unit.mjs",
-        "kitchen": "node scripts/run-hermes-example.mjs examples/kitchen-sink.tsx --interactive",
-        "conformance:animation": "node scripts/run-hermes-example.mjs examples/animation-conformance.tsx --timeout-ms 8000",
-        "conformance:animation:diff": "bun run scripts/animation-frame-diff.mjs",
-        "conformance:anim-overlay": "node scripts/anim-overlay-conformance.mjs",
-        "conformance:reanimated": "node scripts/reanimated-conformance.mjs",
-        "conformance:offthread-stall": "node scripts/offthread-stall-conformance.mjs",
-        "conformance:dialog-reanimated": "bun run scripts/dialog-reanimated-conformance.mjs",
-        "conformance:sustained-reanimated": "bun run scripts/sustained-reanimated-conformance.mjs",
-        "prebuild:reanimated": "bun run scripts/prebuild-reanimated.mjs",
-        "conformance:webview:render": "bun run scripts/webview-render-conformance.mjs",
-        "conformance:webview:overlay": "bun run scripts/webview-overlay-conformance.mjs",
-        "conformance:card-corner-shadow": "bun run scripts/card-corner-shadow-conformance.mjs",
-        "conformance:opacity": "bun run scripts/check-opacity-conformance.mjs",
-        "conformance:transform": "bun run scripts/check-transform-conformance.mjs",
-        "conformance:opacity-ramp": "bun run scripts/check-opacity-ramp-conformance.mjs",
-        "conformance:diagnostics": "node scripts/diagnostics-conformance.mjs",
-        "conformance:context-menu": "node scripts/context-menu-conformance.mjs",
-        "conformance:file-picker": "bun run scripts/file-picker-conformance.ts",
-        "conformance:display-none": "bun run scripts/display-none-conformance.ts",
-        "conformance:inspector": "node scripts/inspector-conformance.mjs",
-        "conformance:input": "node scripts/input-conformance-driver.mjs",
-        "conformance:input:manual": "node scripts/run-hermes-example.mjs examples/input-conformance.tsx --interactive",
-        "conformance:list-group": "node scripts/list-group-conformance-driver.mjs",
-        "conformance:measure": "RNGPUI_NO_ACTIVATE=1 RNGPUI_TEST_MODE=1 node scripts/run-hermes-example.mjs examples/measure-conformance.tsx --timeout-ms 8000",
-        "conformance:native-layout": "RNGPUI_NO_ACTIVATE=1 RNGPUI_TEST_MODE=1 node scripts/run-hermes-example.mjs examples/native-layout-conformance.tsx --timeout-ms 8000",
-        "conformance:native-layout-animation": "RNGPUI_NO_ACTIVATE=1 RNGPUI_TEST_MODE=1 node scripts/run-hermes-example.mjs examples/native-layout-animation-conformance.tsx --timeout-ms 8000",
-        "conformance:portal": "node scripts/run-hermes-example.mjs examples/portal-conformance.tsx --interactive",
-        "conformance:raf-pacing": "RNGPUI_NO_ACTIVATE=1 RNGPUI_TEST_MODE=1 node scripts/run-hermes-example.mjs examples/raf-pacing-conformance.tsx --timeout-ms 15000",
-        "conformance:rounded-overflow": "bun run scripts/rounded-overflow-conformance.mjs",
-        "conformance:text-lines": "bun run scripts/text-lines-conformance.mjs",
-        "conformance:watch-reload": "node scripts/watch-reload-conformance.mjs",
-        "pixel-diff": "bun run scripts/pixel-diff.mjs",
-        "pixel-sample": "bun run scripts/pixel-sample.mjs",
-        "png-grid": "bun run scripts/png-grid.mjs",
-        "test:pixel": "bun run scripts/pixel.test.mjs",
-        "superconductor": "node scripts/run-hermes-example.mjs examples/superconductor.tsx --interactive",
-        "rngpui": "bun run cli/bin.ts",
-        "conformance:describe": "node scripts/describe-conformance.mjs",
-        "conformance:drive": "node scripts/drive-conformance.mjs",
-        "conformance:reload": "node scripts/reload-conformance.mjs",
-        "conformance:hot-reload": "node scripts/hot-reload-conformance.mjs",
-        "conformance:hot-reload-cli": "node scripts/hot-reload-cli-conformance.mjs",
-        "conformance:startup": "node scripts/startup-conformance.mjs",
-        "prepublishOnly": "npm run build"
-    },
-    "os": [
-        "darwin"
-    ],
-    "cpu": [
-        "arm64"
-    ],
-    "keywords": [
-        "react-native",
-        "gpui",
-        "zed",
-        "rust",
-        "desktop",
-        "macos",
-        "react-reconciler"
-    ],
-    "license": "MIT",
-    "peerDependencies": {
-        "react": ">=19.0.0"
-    },
-    "dependencies": {
-        "@swc/core": "1.15.40",
-        "react-refresh": "0.14.2",
-        "react-reconciler": "^0.31.0"
-    },
-    "devDependencies": {
-        "@babel/core": "^7.26.0",
-        "@babel/plugin-syntax-jsx": "^7.25.9",
-        "@babel/plugin-transform-async-generator-functions": "^7.26.0",
-        "@babel/plugin-transform-flow-strip-types": "^7.26.0",
-        "@babel/preset-typescript": "^7.26.0",
-        "@types/node": "25.9.1",
-        "@types/react": "^19.0.0",
-        "@types/react-reconciler": "^0.31.0",
-        "esbuild": "^0.25.0",
-        "react": "^19.0.0",
-        "react-native-reanimated": "4.3.0",
-        "react-native-worklets": "0.8.1",
-        "typescript": "^5.7.0"
+  "name": "react-native-gpui",
+  "version": "0.1.30",
+  "description": "Write React Native components, render them natively with GPUI (Zed's GPU UI framework).",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     }
+  },
+  "bin": {
+    "rngpui": "./cli/bin.ts"
+  },
+  "files": [
+    "cli",
+    "dist",
+    "native",
+    "scripts",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "npm run build:rust && npm run build:native && npm run build:ts",
+    "build:rust": "cd ../rust && PATH=/opt/homebrew/opt/zig@0.15/bin:$PATH cargo build --release --bin rngpui-service",
+    "build:native": "node scripts/build-native.mjs",
+    "build:clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build:types": "tsc --emitDeclarationOnly",
+    "build:bundle": "bun build src/index.ts --outfile dist/index.js --target node --format esm --external react --external react/jsx-runtime --external react/jsx-dev-runtime && bun scripts/build-ui-runtime.mjs --force",
+    "build:ts": "npm run build:clean && npm run build:types && npm run build:bundle",
+    "typecheck": "tsc --noEmit",
+    "test": "bun run scripts/test-suite.mjs",
+    "test:animated-driver": "bun run scripts/animated-driver-unit.mjs",
+    "test:keyboard-navigation": "bun run scripts/keyboard-navigation-unit.mjs",
+    "test:surfaces": "bun run scripts/surfaces-unit.mjs",
+    "kitchen": "node scripts/run-hermes-example.mjs examples/kitchen-sink.tsx --interactive",
+    "conformance:animation": "node scripts/run-hermes-example.mjs examples/animation-conformance.tsx --timeout-ms 8000",
+    "conformance:animation:diff": "bun run scripts/animation-frame-diff.mjs",
+    "conformance:anim-overlay": "node scripts/anim-overlay-conformance.mjs",
+    "conformance:reanimated": "node scripts/reanimated-conformance.mjs",
+    "conformance:offthread-stall": "node scripts/offthread-stall-conformance.mjs",
+    "conformance:dialog-reanimated": "bun run scripts/dialog-reanimated-conformance.mjs",
+    "conformance:sustained-reanimated": "bun run scripts/sustained-reanimated-conformance.mjs",
+    "prebuild:reanimated": "bun run scripts/prebuild-reanimated.mjs",
+    "conformance:webview:render": "bun run scripts/webview-render-conformance.mjs",
+    "conformance:webview:overlay": "bun run scripts/webview-overlay-conformance.mjs",
+    "conformance:card-corner-shadow": "bun run scripts/card-corner-shadow-conformance.mjs",
+    "conformance:opacity": "bun run scripts/check-opacity-conformance.mjs",
+    "conformance:transform": "bun run scripts/check-transform-conformance.mjs",
+    "conformance:opacity-ramp": "bun run scripts/check-opacity-ramp-conformance.mjs",
+    "conformance:diagnostics": "node scripts/diagnostics-conformance.mjs",
+    "conformance:context-menu": "node scripts/context-menu-conformance.mjs",
+    "conformance:file-picker": "bun run scripts/file-picker-conformance.ts",
+    "conformance:display-none": "bun run scripts/display-none-conformance.ts",
+    "conformance:inspector": "node scripts/inspector-conformance.mjs",
+    "conformance:input": "node scripts/input-conformance-driver.mjs",
+    "conformance:input:manual": "node scripts/run-hermes-example.mjs examples/input-conformance.tsx --interactive",
+    "conformance:list-group": "node scripts/list-group-conformance-driver.mjs",
+    "conformance:measure": "RNGPUI_NO_ACTIVATE=1 RNGPUI_TEST_MODE=1 node scripts/run-hermes-example.mjs examples/measure-conformance.tsx --timeout-ms 8000",
+    "conformance:native-layout": "RNGPUI_NO_ACTIVATE=1 RNGPUI_TEST_MODE=1 node scripts/run-hermes-example.mjs examples/native-layout-conformance.tsx --timeout-ms 8000",
+    "conformance:native-layout-animation": "RNGPUI_NO_ACTIVATE=1 RNGPUI_TEST_MODE=1 node scripts/run-hermes-example.mjs examples/native-layout-animation-conformance.tsx --timeout-ms 8000",
+    "conformance:portal": "node scripts/run-hermes-example.mjs examples/portal-conformance.tsx --interactive",
+    "conformance:raf-pacing": "RNGPUI_NO_ACTIVATE=1 RNGPUI_TEST_MODE=1 node scripts/run-hermes-example.mjs examples/raf-pacing-conformance.tsx --timeout-ms 15000",
+    "conformance:rounded-overflow": "bun run scripts/rounded-overflow-conformance.mjs",
+    "conformance:text-lines": "bun run scripts/text-lines-conformance.mjs",
+    "conformance:watch-reload": "node scripts/watch-reload-conformance.mjs",
+    "pixel-diff": "bun run scripts/pixel-diff.mjs",
+    "pixel-sample": "bun run scripts/pixel-sample.mjs",
+    "png-grid": "bun run scripts/png-grid.mjs",
+    "test:pixel": "bun run scripts/pixel.test.mjs",
+    "superconductor": "node scripts/run-hermes-example.mjs examples/superconductor.tsx --interactive",
+    "rngpui": "bun run cli/bin.ts",
+    "conformance:describe": "node scripts/describe-conformance.mjs",
+    "conformance:drive": "node scripts/drive-conformance.mjs",
+    "conformance:reload": "node scripts/reload-conformance.mjs",
+    "conformance:hot-reload": "node scripts/hot-reload-conformance.mjs",
+    "conformance:hot-reload-cli": "node scripts/hot-reload-cli-conformance.mjs",
+    "conformance:startup": "node scripts/startup-conformance.mjs",
+    "prepublishOnly": "npm run build",
+    "release": "node scripts/release.mjs"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "keywords": [
+    "react-native",
+    "gpui",
+    "zed",
+    "rust",
+    "desktop",
+    "macos",
+    "react-reconciler"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "react": ">=19.0.0"
+  },
+  "dependencies": {
+    "@swc/core": "1.15.40",
+    "react-refresh": "0.14.2",
+    "react-reconciler": "^0.31.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.26.0",
+    "@babel/plugin-syntax-jsx": "^7.25.9",
+    "@babel/plugin-transform-async-generator-functions": "^7.26.0",
+    "@babel/plugin-transform-flow-strip-types": "^7.26.0",
+    "@babel/preset-typescript": "^7.26.0",
+    "@types/node": "25.9.1",
+    "@types/react": "^19.0.0",
+    "@types/react-reconciler": "^0.31.0",
+    "esbuild": "^0.25.0",
+    "react": "^19.0.0",
+    "react-native-reanimated": "4.3.0",
+    "react-native-worklets": "0.8.1",
+    "typescript": "^5.7.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/natew/react-native-gpui.git"
+  },
+  "homepage": "https://github.com/natew/react-native-gpui",
+  "bugs": "https://github.com/natew/react-native-gpui/issues"
 }

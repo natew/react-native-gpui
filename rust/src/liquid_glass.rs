@@ -396,6 +396,26 @@ fn raw_ns_view(window: &mut Window) -> Option<id> {
 /// CAMetalLayer). Used by the RNGPUI_CAPTURE_PNG path to read full-opacity
 /// content via CARenderer. Returns the raw pointer as usize so it can be moved
 /// across the `'static` capture task boundary.
+// Recompute the macOS window shadow from current content. For a NON-opaque
+// window AppKit derives the shadow from the content's alpha at the moment the
+// window server computes it; at startup that happens BEFORE the Metal layer has
+// painted anything (alpha 0 everywhere), so the glass window shows no shadow
+// until something (a resize) forces a recompute. Call this after the first
+// painted frames to give the recompute real content to trace. Idempotent and
+// cheap; harmless when the shadow is already correct or disabled.
+pub fn invalidate_window_shadow(window: &mut Window) {
+    let Some(ns_view) = raw_ns_view(window) else {
+        return;
+    };
+    unsafe {
+        let ns_window: id = msg_send![ns_view, window];
+        if ns_window == nil {
+            return;
+        }
+        let _: () = msg_send![ns_window, invalidateShadow];
+    }
+}
+
 pub fn gpui_ns_view_ptr(window: &mut Window) -> Option<usize> {
     raw_ns_view(window).map(|view| view as usize)
 }

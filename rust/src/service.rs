@@ -3177,6 +3177,33 @@ fn main() {
             })
             .expect("open window");
         startup_mark("window opened (GPUI/Metal init)");
+        // macOS transparent-window shadow: AppKit traces the shadow from content
+        // alpha, and at startup it computes it before the first Metal paint — so
+        // the glass window has NO shadow until a resize forces a recompute (real
+        // bug: "main-area shadow missing on startup until resize"). Nudge the
+        // recompute a few times across the first moments so it lands after the
+        // first painted frame even on a slow cold start. invalidateShadow is
+        // idempotent and cheap.
+        #[cfg(target_os = "macos")]
+        {
+            let window_handle = window_handle;
+            cx.spawn(async move |cx| {
+                for delay_ms in [100u64, 300, 700, 1500] {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(delay_ms))
+                        .await;
+                    if window_handle
+                        .update(cx, |_root, window, _cx| {
+                            liquid_glass::invalidate_window_shadow(window);
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         // bring the app to the front so keystrokes reach the focused input
         // (skipped in background mode so it doesn't pop over your work).
         if !background {

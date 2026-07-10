@@ -18,7 +18,8 @@ export interface Instance {
     // ── serialization memo ──
     // parent backlink + dirty flag let us cache each node's SerializedNode and
     // only recompute the ones that actually changed (see markSerializeDirty /
-    // serialize). `cached === undefined` means "no valid cache".
+    // serialize). A dirty node may retain its previous cache so serialization can
+    // reuse that exact object when React supplied new props with identical output.
     parent: Instance | null;
     dirty: boolean;
     cached: SerializedNode | undefined;
@@ -129,9 +130,34 @@ function markSerializeDirty(node: Instance | TextInstance | null) {
         }
         if (cur.dirty) return;
         cur.dirty = true;
-        cur.cached = undefined;
         cur = cur.parent;
     }
+}
+
+// serialized nodes contain JSON-compatible values only. React still calls
+// commitUpdate for common no-op shapes such as a fresh inline style object or a
+// fresh callback with the same event name. Reuse the previous cached object when
+// the resulting wire node is identical, allowing that equality to collapse all
+// the way through its ancestors and into a tiny delta ref.
+function sameSerializedValue(a: unknown, b: unknown): boolean {
+    if (Object.is(a, b)) return true;
+    if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
+    if (Array.isArray(a) || Array.isArray(b)) {
+        if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i++) {
+            if (!sameSerializedValue(a[i], b[i])) return false;
+        }
+        return true;
+    }
+    const aRecord = a as Record<string, unknown>;
+    const bRecord = b as Record<string, unknown>;
+    const aKeys = Object.keys(aRecord);
+    if (aKeys.length !== Object.keys(bRecord).length) return false;
+    for (const key of aKeys) {
+        if (!Object.prototype.hasOwnProperty.call(bRecord, key)) return false;
+        if (!sameSerializedValue(aRecord[key], bRecord[key])) return false;
+    }
+    return true;
 }
 
 function markSerializeDirtyById(id: number) {
@@ -933,6 +959,7 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
         return inst.cached;
     }
     if (SERIALIZE_TRACE) serMiss++;
+    const previousCached = inst.cached;
 
     const props = inst.props;
     const listGroup = stringProp(props, "nativeListGroup") ?? inheritedListGroup;
@@ -1090,10 +1117,10 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
     if (inst.hasPortal) {
         inst.cached = undefined;
     } else {
-        inst.cached = node;
+        inst.cached = previousCached && sameSerializedValue(node, previousCached) ? previousCached : node;
         inst.cachedListGroup = inheritedListGroup;
     }
-    return node;
+    return inst.cached ?? node;
 }
 
 function normalizeNativeResize(value: unknown): SerializedNode["nativeResize"] | undefined {

@@ -1,5 +1,9 @@
 import type { SerializedNode } from "./runtime";
 
+const sourceFileIds = new Map<string, number>();
+const announcedSourceFileIds = new Set<number>();
+let nextSourceId = 1;
+
 // Delta wire. The reconciler memoizes serialization — an unchanged subtree re-emits the
 // SAME SerializedNode object, and any change dirties the node AND its ancestors
 // (markSerializeDirty). So a node whose object the host already holds means its whole
@@ -10,9 +14,36 @@ import type { SerializedNode } from "./runtime";
 // (per root); membership tests the CURRENT cached object, so a changed node (new object)
 // is never a false ref. The root is always a fresh object, so it's always sent in full.
 export function toWireDelta(node: SerializedNode, sent: WeakSet<SerializedNode>): SerializedNode {
+    const sources: Record<string, string> = {};
+    const wire = toWireDeltaInner(node, sent, sources);
+    return Object.keys(sources).length > 0 ? { ...wire, sources } : wire;
+}
+
+function toWireDeltaInner(
+    node: SerializedNode,
+    sent: WeakSet<SerializedNode>,
+    sources: Record<string, string>,
+): SerializedNode {
     if (sent.has(node)) return { globalId: node.globalId, ref: true };
     sent.add(node);
+    const source = node.source;
     const kids = node.children;
-    if (!kids || kids.length === 0) return node;
-    return { ...node, children: kids.map((k) => toWireDelta(k, sent)) };
+    let wire = kids?.length ? { ...node, children: kids.map((kid) => toWireDeltaInner(kid, sent, sources)) } : node;
+    if (source) {
+        const match = /^(.*):(\d+):(\d+)$/.exec(source);
+        if (!match) throw new Error(`invalid rngsSource location: ${source}`);
+        const [, file, line, column] = match;
+        let sourceFileId = sourceFileIds.get(file);
+        if (sourceFileId === undefined) {
+            sourceFileId = nextSourceId++;
+            sourceFileIds.set(file, sourceFileId);
+        }
+        if (!announcedSourceFileIds.has(sourceFileId)) {
+            announcedSourceFileIds.add(sourceFileId);
+            sources[String(sourceFileId)] = file;
+        }
+        const { source: _source, ...withoutSource } = wire;
+        wire = { ...withoutSource, sourceId: [sourceFileId, Number(line), Number(column)] };
+    }
+    return wire;
 }

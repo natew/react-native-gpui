@@ -204,6 +204,8 @@ const RN_WEBVIEW_SHIM: &str = "window.ReactNativeWebView={postMessage:function(d
 thread_local! {
     static PRIOR_TREE_INDEX: RefCell<HashMap<u64, Arc<ReactElement>>> =
         RefCell::new(HashMap::new());
+    static SOURCE_FILES: RefCell<HashMap<u64, String>> =
+        RefCell::new(HashMap::new());
 }
 
 // Walk a reconstructed tree (including reused subtrees) into a globalId -> Arc index
@@ -240,15 +242,23 @@ fn parse_json_tree(
         .get("globalId")
         .and_then(|v| v.as_u64())
         .unwrap_or_else(next_id);
-    // stamp this node's authored JSX source into the inspector side-table — set at bundle
-    // time by the babel source-location plugin and carried through the reconciler as
-    // `source`. Kept off ReactElement so it doesn't touch the shared struct.
-    if let Some(source) = obj
-        .get("source")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    {
-        crate::inspector::remember_source(global_id, source);
+    // source file paths are announced once per process and nodes carry only
+    // [file id, line, column]. keep the resolved location off ReactElement so
+    // inspector metadata doesn't inflate the render tree or repeated deltas.
+    if let Some(source_id) = obj.get("sourceId").and_then(|v| v.as_array()) {
+        let file_id = source_id.first().and_then(|v| v.as_u64());
+        let line = source_id.get(1).and_then(|v| v.as_u64());
+        let column = source_id.get(2).and_then(|v| v.as_u64());
+        if let (Some(file_id), Some(line), Some(column)) = (file_id, line, column) {
+            SOURCE_FILES.with(|sources| {
+                if let Some(file) = sources.borrow().get(&file_id) {
+                    crate::inspector::remember_source(
+                        global_id,
+                        &format!("{file}:{line}:{column}"),
+                    );
+                }
+            });
+        }
     }
     // `text` is overloaded by node type: text content, input placeholder, svg icon
     // name, or webview html — whichever the serializer set.
@@ -1881,6 +1891,16 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
             "openWindow" => Some(Incoming::OpenWindow),
             _ => None,
         };
+    }
+    if let Some(definitions) = v.get("sources").and_then(|value| value.as_object()) {
+        SOURCE_FILES.with(|sources| {
+            let mut sources = sources.borrow_mut();
+            for (id, source) in definitions {
+                if let (Ok(id), Some(source)) = (id.parse::<u64>(), source.as_str()) {
+                    sources.insert(id, source.to_string());
+                }
+            }
+        });
     }
     // a tree (full or delta) arrives here once per React commit. resolve any `ref` nodes
     // against the prior commit's index, then rebuild the index from the reconstructed
@@ -4072,6 +4092,34 @@ mod tests {
         } else {
             panic!("expected tree");
         }
+    }
+
+    #[test]
+    fn resolves_interned_sources_across_tree_updates() {
+        let source = "/workspace/src/RepeatedRow.tsx:42:9";
+        let first_id = 9_900_001;
+        let second_id = 9_900_002;
+
+        tree_of(parse_incoming(&json!({
+            "globalId": 9_900_000,
+            "type": "div",
+            "sources": { "77": "/workspace/src/RepeatedRow.tsx" },
+            "children": [{ "globalId": first_id, "type": "div", "sourceId": [77, 42, 9] }]
+        })));
+        assert_eq!(
+            crate::inspector::source_for(first_id).as_deref(),
+            Some(source)
+        );
+
+        tree_of(parse_incoming(&json!({
+            "globalId": 9_900_000,
+            "type": "div",
+            "children": [{ "globalId": second_id, "type": "div", "sourceId": [77, 42, 9] }]
+        })));
+        assert_eq!(
+            crate::inspector::source_for(second_id).as_deref(),
+            Some(source)
+        );
     }
 
     fn app_command_binding(id: &str, key: &str, context: Option<&str>) -> AppCommandBinding {

@@ -75,5 +75,35 @@ const sent = new WeakSet();
     check("ref carries only globalId+ref", isRef(ref) && Object.keys(ref).sort().join(",") === "globalId,ref");
 }
 
+// --- authored source locations are interned once across repeated nodes ----------
+{
+    const s = new WeakSet();
+    const source = "/workspace/src/RepeatedRow.tsx:42:9";
+    const root = {
+        globalId: 100,
+        type: "div",
+        children: [
+            { globalId: 101, type: "div", source },
+            { globalId: 102, type: "div", source },
+        ],
+    };
+    const wire = toWireDelta(root, s);
+    const encoded = JSON.stringify(wire);
+    check(
+        "repeated source file is defined once",
+        Object.values(wire.sources ?? {}).filter((value) => value === "/workspace/src/RepeatedRow.tsx").length === 1 &&
+            encoded.split("/workspace/src/RepeatedRow.tsx").length - 1 === 1,
+    );
+    check(
+        "repeated nodes carry the same compact source id",
+        wire.children[0].source === undefined &&
+            JSON.stringify(wire.children[0].sourceId) === JSON.stringify(wire.children[1].sourceId) &&
+            Array.isArray(wire.children[0].sourceId),
+    );
+
+    const next = toWireDelta({ globalId: 103, type: "div", source }, s);
+    check("known source is not announced again", next.sources === undefined && next.source === undefined);
+}
+
 console.log(failed ? "WIRE_DELTA_UNIT_FAIL" : "WIRE_DELTA_UNIT_OK");
 process.exit(failed ? 1 : 0);

@@ -22,9 +22,12 @@ export type SerializedNode = {
      * routed by the pseudo registry (platform-driver.ts) to a renderer-platform driver
      * (tamagui). Set imperatively via `platformDriver.pseudo.subscribe`, not a React prop. */
     pseudoEvents?: boolean;
-    /** authored JSX source location ("<abs-path>:<line>:<col>"), stamped at bundle time by
-     * the babel source-location plugin; the native inspector reads it for open-in-editor. */
+    /** internal authored JSX source location. toWireDelta interns this before transport. */
     source?: string;
+    /** compact wire tuple: [source-file id, line, column]. */
+    sourceId?: [number, number, number];
+    /** root-only source-file definitions first referenced by this tree update. */
+    sources?: Record<string, string>;
     accessibility?: SerializedAccessibility;
     text?: string;
     numberOfLines?: number;

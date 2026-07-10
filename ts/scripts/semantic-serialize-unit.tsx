@@ -18,6 +18,19 @@ const { Text, View } = await import("../src/components.tsx");
 
 let bump: () => void = () => {};
 let pressedVersion = -1;
+let probedStyleEnumerations = 0;
+
+function probedStyle(version: number) {
+    return new Proxy(
+        { width: 100 + version, height: 4, backgroundColor: "#123456" },
+        {
+            ownKeys(target) {
+                probedStyleEnumerations++;
+                return Reflect.ownKeys(target);
+            },
+        },
+    );
+}
 
 function App() {
     const [version, setVersion] = useState(0);
@@ -34,11 +47,11 @@ function App() {
                     onPress={() => {
                         pressedVersion = version;
                     }}
-                    style={{
-                        width: index === 0 ? 100 + version : 100,
-                        height: 4,
-                        backgroundColor: "#123456",
-                    }}
+                    style={
+                        index === 0
+                            ? probedStyle(version)
+                            : { width: 100, height: 4, backgroundColor: "#123456" }
+                    }
                 >
                     <Text style={{ color: "#ffffff" }}>{`row ${index}`}</Text>
                 </View>
@@ -86,9 +99,11 @@ const ids = rowIds(first);
 assert.equal(ids.size, 80, "initial tree contains every row");
 
 const before = applied.length;
+probedStyleEnumerations = 0;
 bump();
 await wait(50);
 assert.ok(applied.length > before, "the changed first row crosses a second commit");
+assert.equal(probedStyleEnumerations, 2, "a changed style is normalized exactly once per commit");
 const second = JSON.parse(applied.at(-1)!) as WireNode;
 
 for (let index = 1; index < 80; index++) {

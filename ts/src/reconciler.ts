@@ -24,6 +24,10 @@ export interface Instance {
     dirty: boolean;
     cached: SerializedNode | undefined;
     cachedListGroup: string | undefined;
+    // commitUpdate defers layout comparison until serialize() has already built
+    // the normalized native node, avoiding a second style normalization pass.
+    layoutSnapshot: LayoutSnapshot | undefined;
+    layoutDirty: boolean;
     // true if this node is a portal host/view or has one in its subtree; such
     // nodes embed external mutable content (PortalContext) so they are never
     // cached — but their siblings/cousins still memoize normally.
@@ -71,7 +75,6 @@ const pendingMeasures = new Map<number, Array<() => void>>();
 // these so the host wires the hover/press flip → `pseudo` event emit. Mirrors
 // `measuredIds`: a side set the serializer reads, not a React prop.
 const pseudoEventIds = new Set<number>();
-const layoutSignatures = new Map<number, string>();
 const PORTAL_HOST_TYPE = "RNTPortalHostView";
 const PORTAL_VIEW_TYPE = "RNTPortalView";
 
@@ -158,6 +161,35 @@ function sameSerializedValue(a: unknown, b: unknown): boolean {
         if (!sameSerializedValue(aRecord[key], bRecord[key])) return false;
     }
     return true;
+}
+
+type LayoutSnapshot = Pick<
+    SerializedNode,
+    | "type"
+    | "style"
+    | "text"
+    | "runs"
+    | "numberOfLines"
+    | "placeholder"
+    | "value"
+    | "src"
+    | "nativeLayoutKey"
+    | "nativeResize"
+>;
+
+function layoutSnapshot(node: SerializedNode): LayoutSnapshot {
+    return {
+        type: node.type,
+        style: node.style,
+        text: node.text,
+        runs: node.runs,
+        numberOfLines: node.numberOfLines,
+        placeholder: node.placeholder,
+        value: node.value,
+        src: node.src,
+        nativeLayoutKey: node.nativeLayoutKey,
+        nativeResize: node.nativeResize,
+    };
 }
 
 function markSerializeDirtyById(id: number) {
@@ -357,20 +389,6 @@ function flushPendingMeasures(id: number) {
     for (const callback of callbacks) callback();
 }
 
-function layoutSignature(type: string, props: Record<string, unknown>): string {
-    const style = normalizePropsStyle(props) ?? {};
-    return JSON.stringify({
-        type,
-        style,
-        numberOfLines: props.numberOfLines,
-        multiline: props.multiline,
-        source: props.source,
-        src: props.src,
-        nativeLayoutKey: props.nativeLayoutKey,
-        nativeResize: props.nativeResize,
-    });
-}
-
 const TOP_LEVEL_STYLE_PROPS = [
     "alignContent",
     "alignItems",
@@ -496,7 +514,6 @@ function cleanupInstance(node: Instance | TextInstance) {
     pseudoEventIds.delete(node.id);
     layouts.delete(node.id);
     instances.delete(node.id);
-    layoutSignatures.delete(node.id);
     pendingMeasures.delete(node.id);
     for (const child of node.children) cleanupInstance(child);
 }
@@ -568,6 +585,8 @@ function createPublicInstance(type: string, props: Record<string, unknown>): Ins
         dirty: true,
         cached: undefined,
         cachedListGroup: undefined,
+        layoutSnapshot: undefined,
+        layoutDirty: false,
         hasPortal: false,
         // reanimated host-instance shims — see the Instance interface. globalId IS the
         // native tag + shadow-node wrapper, so the reanimated seam maps animated ops to
@@ -613,7 +632,6 @@ function createPublicInstance(type: string, props: Record<string, unknown>): Ins
         },
     };
     instances.set(id, instance);
-    layoutSignatures.set(id, layoutSignature(type, props));
     return instance;
 }
 
@@ -1113,6 +1131,17 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
     // just serialized above, so child.hasPortal is current; cache-hit children keep
     // their last value, which is still valid until a structural change dirties them).
     inst.hasPortal = isPortalType(inst.type) || inst.children.some((c) => !isTextLike(c) && c.hasPortal);
+    if (inst.layoutDirty || inst.layoutSnapshot === undefined) {
+        const nextLayoutSnapshot = layoutSnapshot(node);
+        if (
+            inst.layoutSnapshot !== undefined &&
+            !sameSerializedValue(nextLayoutSnapshot, inst.layoutSnapshot)
+        ) {
+            invalidateLayout(inst);
+        }
+        inst.layoutSnapshot = nextLayoutSnapshot;
+        inst.layoutDirty = false;
+    }
     inst.dirty = false;
     if (inst.hasPortal) {
         inst.cached = undefined;
@@ -1299,12 +1328,8 @@ const hostConfig: any = {
     },
     // react-reconciler 0.31 signature: (instance, type, prevProps, nextProps, handle)
     commitUpdate(instance: Instance, _type: string, _prevProps: unknown, nextProps: Record<string, unknown>) {
-        const nextSignature = layoutSignature(instance.type, nextProps);
-        if (layoutSignatures.get(instance.id) !== nextSignature) {
-            layoutSignatures.set(instance.id, nextSignature);
-            invalidateLayout(instance);
-        }
         instance.props = nextProps;
+        instance.layoutDirty = true;
         registerHandlers(instance.id, nextProps);
         markSerializeDirty(instance);
         if (SERIALIZE_TRACE) commitUpdates++;
@@ -1326,6 +1351,7 @@ const hostConfig: any = {
         const children = instance.props?.children;
         if (typeof children === "string" || typeof children === "number") {
             instance.props = { ...instance.props, children: undefined };
+            instance.layoutDirty = true;
             invalidateLayout(instance);
             markSerializeDirty(instance);
         }

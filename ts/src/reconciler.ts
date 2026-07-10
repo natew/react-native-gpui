@@ -28,6 +28,8 @@ export interface Instance {
     // the normalized native node, avoiding a second style normalization pass.
     layoutSnapshot: LayoutSnapshot | undefined;
     layoutDirty: boolean;
+    preparedStyle: Record<string, unknown> | undefined;
+    hasPreparedStyle: boolean;
     // true if this node is a portal host/view or has one in its subtree; such
     // nodes embed external mutable content (PortalContext) so they are never
     // cached — but their siblings/cousins still memoize normally.
@@ -190,6 +192,26 @@ function layoutSnapshot(node: SerializedNode): LayoutSnapshot {
         nativeLayoutKey: node.nativeLayoutKey,
         nativeResize: node.nativeResize,
     };
+}
+
+function sameHostPropsExceptStyle(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+    const aKeys = Object.keys(a).filter((key) => key !== "style");
+    const bKeys = Object.keys(b).filter((key) => key !== "style");
+    if (aKeys.length !== bKeys.length) return false;
+    for (const key of aKeys) {
+        if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
+        const aValue = a[key];
+        const bValue = b[key];
+        if (Object.is(aValue, bValue)) continue;
+        if (typeof aValue === "function" && typeof bValue === "function") continue;
+        if (key === "children") {
+            const aInline = typeof aValue === "string" || typeof aValue === "number";
+            const bInline = typeof bValue === "string" || typeof bValue === "number";
+            if (!aInline && !bInline) continue;
+        }
+        if (!sameSerializedValue(aValue, bValue)) return false;
+    }
+    return true;
 }
 
 function markSerializeDirtyById(id: number) {
@@ -496,6 +518,12 @@ function normalizePropsStyle(props: Record<string, unknown>): Record<string, unk
         | undefined;
 }
 
+function normalizeHostStyle(type: string, props: Record<string, unknown>): Record<string, unknown> | undefined {
+    const style = normalizePropsStyle(props);
+    if (type !== "ScrollView" || style?.overflow !== undefined) return style;
+    return { ...style, overflow: "scroll" };
+}
+
 function invalidateLayout(node: Instance | TextInstance) {
     if (isTextLike(node)) return;
     layouts.delete(node.id);
@@ -587,6 +615,8 @@ function createPublicInstance(type: string, props: Record<string, unknown>): Ins
         cachedListGroup: undefined,
         layoutSnapshot: undefined,
         layoutDirty: false,
+        preparedStyle: undefined,
+        hasPreparedStyle: false,
         hasPortal: false,
         // reanimated host-instance shims — see the Instance interface. globalId IS the
         // native tag + shadow-node wrapper, so the reanimated seam maps animated ops to
@@ -985,7 +1015,9 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
         const g = listGroup ?? "(none)";
         serMissByGroup[g] = (serMissByGroup[g] ?? 0) + 1;
     }
-    const style = (normalizePropsStyle(props) ?? {}) as Record<string, unknown>;
+    const style = (inst.hasPreparedStyle ? inst.preparedStyle : normalizeHostStyle(inst.type, props)) ?? {};
+    inst.preparedStyle = undefined;
+    inst.hasPreparedStyle = false;
     // hover/press style props stay in the styling layer. The host only receives `pseudoEvents`
     // for nodes that Tamagui subscribed through the platform driver; the resulting native
     // hover flips feed Tamagui's emitter/animation path instead of a serialized paint delta.
@@ -1077,7 +1109,6 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
         }
         case "ScrollView":
             node.type = "div";
-            if (style.overflow === undefined) style.overflow = "scroll";
             break;
         case PORTAL_HOST_TYPE:
             node.type = "div";
@@ -1328,10 +1359,19 @@ const hostConfig: any = {
     },
     // react-reconciler 0.31 signature: (instance, type, prevProps, nextProps, handle)
     commitUpdate(instance: Instance, _type: string, _prevProps: unknown, nextProps: Record<string, unknown>) {
+        const nextStyle = normalizeHostStyle(instance.type, nextProps);
+        const outputChanged =
+            instance.cached === undefined ||
+            !sameSerializedValue(nextStyle, instance.cached.style) ||
+            !sameHostPropsExceptStyle(instance.props, nextProps);
         instance.props = nextProps;
-        instance.layoutDirty = true;
         registerHandlers(instance.id, nextProps);
-        markSerializeDirty(instance);
+        if (outputChanged) {
+            instance.preparedStyle = nextStyle;
+            instance.hasPreparedStyle = true;
+            instance.layoutDirty = true;
+            markSerializeDirty(instance);
+        }
         if (SERIALIZE_TRACE) commitUpdates++;
     },
     commitTextUpdate(textInstance: TextInstance, _old: string, next: string) {

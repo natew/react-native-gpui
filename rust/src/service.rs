@@ -198,8 +198,8 @@ const RN_WEBVIEW_SHIM: &str = "window.ReactNativeWebView={postMessage:function(d
 // The prior committed tree's globalId -> Arc index, used to resolve delta `ref` nodes
 // (unchanged subtrees the reconciler didn't re-serialize). Rebuilt from the
 // reconstructed tree after every commit so reused subtrees stay resolvable for future
-// refs. Thread-local because `parse_json_tree` runs on the JS thread inside
-// `host_apply_tree` (one runtime = one JS thread); this also isolates the index per
+// refs. Thread-local because `parse_json_tree` runs on the ordered Hermes tree parser
+// thread; this also isolates the index per
 // test thread so parallel tests don't pollute each other.
 thread_local! {
     static PRIOR_TREE_INDEX: RefCell<HashMap<u64, Arc<ReactElement>>> =
@@ -2193,9 +2193,10 @@ fn main() {
     // `kill -USR2 <pid>` = live reload (same path as Cmd+R); see hermes.rs.
     hermes::install_reload_signal_handler();
     // The JS runs in an embedded Hermes runtime on a dedicated thread (hermes.rs). The
-    // bundle's reconciler hands every committed tree to __rngpui_applyTree, which parses it
-    // and sends an Incoming on this channel: the first tree bootstraps the window size, the
-    // rest are applied by a foreground task that calls cx.notify() — no polling.
+    // bundle's reconciler hands every committed tree to __rngpui_applyTree. an ordered worker
+    // parses it off the React thread and sends an Incoming on this channel: the first tree
+    // bootstraps the window size, the rest are applied by a foreground task that calls
+    // cx.notify() — no polling.
     let (tree_tx, tree_rx) = flume::unbounded::<Incoming>();
     if let Ok(path) = std::env::var("RNGPUI_CONTROL_SOCKET") {
         debug_control::start(path, tree_tx.clone());
@@ -2210,8 +2211,9 @@ fn main() {
     // runtimes overlap each other and the GPUI platform init below. JsCalls
     // queued while a bundle is still evaluating drain once its run_loop starts,
     // so the startup interleaving is loss-free in both directions.
-    hermes::start_ui(load_ui_bundle(), tree_tx.clone());
-    hermes::start(bundle, tree_tx);
+    let tree_json_tx = hermes::start_tree_parser(tree_tx.clone());
+    hermes::start_ui(load_ui_bundle(), tree_tx.clone(), tree_json_tx.clone());
+    hermes::start(bundle, tree_tx, tree_json_tx);
     // NOTE: we deliberately do NOT block for the first tree here. The GPUI platform init
     // below (Application::new + app.run + gpui_component::init) is tree-independent and is
     // the dominant cold-start cost (~85ms), so we let it overlap the JS eval (~60ms). The

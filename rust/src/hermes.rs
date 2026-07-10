@@ -4,8 +4,8 @@
 //!
 //! Data flow:
 //!   JS → Rust:  the bundle's reconciler calls `globalThis.__rngpui_applyTree(json)` every
-//!               commit; `host_apply_tree` parses it and sends an `Incoming` on the `flume`
-//!               channel the GPUI applier drains. Host env fns (timers, fetch, ws) likewise.
+//!               commit; an ordered tree worker parses it off the Hermes thread and
+//!               sends an `Incoming` on the `flume` channel the GPUI applier drains.
 //!   Rust → JS:  anything that must call into JS (`bridge::emit_*` events, fetch/ws results)
 //!               calls `hermes::post(fn, arg)`, which queues a `JsCall`; this thread's loop
 //!               drains the queue and invokes the global JS fn on the JS thread.
@@ -226,8 +226,35 @@ impl TimerState {
 
 struct JsContext {
     tree_tx: Sender<Incoming>,
+    tree_json_tx: Sender<String>,
     start: Instant,
     timers: RefCell<TimerState>,
+}
+
+/// preserve React commit order while moving tree parsing and delta reconstruction
+/// off the React thread. animation writes keep their direct render-thread lane.
+pub(crate) fn start_tree_parser(tree_tx: Sender<Incoming>) -> Sender<String> {
+    let (tree_json_tx, tree_json_rx) = flume::unbounded::<String>();
+    std::thread::Builder::new()
+        .name("hermes-tree-parser".into())
+        .spawn(move || {
+            while let Ok(json) = tree_json_rx.recv() {
+                let incoming = match serde_json::from_str::<serde_json::Value>(&json) {
+                    Ok(value) => crate::parse_incoming(&value),
+                    Err(error) => {
+                        eprintln!("[hermes] applyTree: bad json: {error}");
+                        None
+                    }
+                };
+                if let Some(incoming) = incoming
+                    && tree_tx.send(incoming).is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .expect("spawn Hermes tree parser thread");
+    tree_json_tx
 }
 
 fn ctx_ref<'a>(ud: *mut c_void) -> &'a JsContext {
@@ -265,14 +292,7 @@ extern "C" fn host_apply_tree(ud: *mut c_void, arg: *const c_char) {
     if anim_trace() {
         eprintln!("[anim-trace] applyTree bytes={}", s.len());
     }
-    match serde_json::from_str::<serde_json::Value>(&s) {
-        Ok(v) => {
-            if let Some(inc) = crate::parse_incoming(&v) {
-                let _ = ctx.tree_tx.send(inc);
-            }
-        }
-        Err(e) => eprintln!("[hermes] applyTree: bad json: {e}"),
-    }
+    let _ = ctx.tree_json_tx.send(s);
 }
 
 extern "C" fn host_log(_ud: *mut c_void, arg: *const c_char) {
@@ -901,7 +921,7 @@ fn system_color_scheme() -> &'static str {
 /// + `bundle`, then run the JS event loop. The first React commit (during bundle eval) sends
 ///
 /// `Incoming::Tree` on `tree_tx`, which `main()` awaits inside `app.run`.
-pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
+pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>, tree_json_tx: Sender<String>) {
     let (calls_tx, calls_rx) = flume::unbounded::<JsCall>();
     let _ = JS_CALLS.set(calls_tx);
     // rAF rides the display's real vsync: raf.ts arms the clock per frame via
@@ -932,6 +952,7 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
             mark("runtime created");
             let ctx = Box::new(JsContext {
                 tree_tx,
+                tree_json_tx,
                 start: epoch(),
                 timers: RefCell::new(TimerState::default()),
             });
@@ -1000,7 +1021,7 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
 /// `_updateProps` crosses straight to the render thread as
 /// `Incoming::SetNodeStyle` — never touching the React runtime. The ui bundle is
 /// app-independent library code (upstream reanimated core + the worklet bridge).
-pub fn start_ui(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
+pub fn start_ui(bundle: Vec<u8>, tree_tx: Sender<Incoming>, tree_json_tx: Sender<String>) {
     let (calls_tx, calls_rx) = flume::unbounded::<JsCall>();
     let _ = UI_CALLS.set(calls_tx);
     crate::frame_clock::register(
@@ -1019,6 +1040,7 @@ pub fn start_ui(bundle: Vec<u8>, tree_tx: Sender<Incoming>) {
             }
             let ctx = Box::new(JsContext {
                 tree_tx,
+                tree_json_tx,
                 start: epoch(),
                 timers: RefCell::new(TimerState::default()),
             });
@@ -1427,8 +1449,32 @@ fn perf_batch_label(batch: &[JsCall]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CKey, HostCall, QueueClass, coalesce_key, plan_dispatch, queue_class};
-    use std::time::Instant;
+    use super::{
+        CKey, HostCall, QueueClass, coalesce_key, plan_dispatch, queue_class, start_tree_parser,
+    };
+    use crate::Incoming;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn tree_parser_preserves_commit_order() {
+        let (tree_tx, tree_rx) = flume::unbounded();
+        let tree_json_tx = start_tree_parser(tree_tx);
+
+        tree_json_tx
+            .send(r#"{"$cmd":"inspector","enabled":false}"#.to_string())
+            .unwrap();
+        tree_json_tx
+            .send(r#"{"$cmd":"inspector","enabled":true}"#.to_string())
+            .unwrap();
+        assert!(matches!(
+            tree_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Incoming::Inspector { enabled: false }
+        ));
+        assert!(matches!(
+            tree_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Incoming::Inspector { enabled: true }
+        ));
+    }
 
     fn call(func: &'static str, arg: &str) -> HostCall {
         HostCall {

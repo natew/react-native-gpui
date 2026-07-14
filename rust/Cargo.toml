@@ -47,12 +47,27 @@ core-foundation = "0.10"
 core-graphics = "0.24"
 objc = "0.2"
 
-# Patched gpui 0.2.2: makes `DispatchEventResult` `pub` (upstream `pub(crate)`) so the
-# `realtap` debug command can call `Window::dispatch_event` — the real OS-click event
-# path (hitbox hit-test + listeners) — to test on-screen clickability. Rust 2024's
-# `unnameable_types` otherwise forbids an external crate from producing the private
-# return type, even to discard it. The vendored copy is byte-identical to crates.io
-# gpui-0.2.2 except that one visibility change. The patch applies to gpui-component too
-# (it depends on the same gpui), so the whole graph shares one gpui.
+# Patched gpui 0.2.2. The patch applies to gpui-component too (it depends on the same
+# gpui), so the whole graph shares one gpui. Divergences from crates.io gpui-0.2.2:
+#
+# 1. `DispatchEventResult` is `pub` (upstream `pub(crate)`) so the `realtap` debug
+#    command can call `Window::dispatch_event` — the real OS-click event path (hitbox
+#    hit-test + listeners) — to test on-screen clickability. Rust 2024's
+#    `unnameable_types` otherwise forbids an external crate from producing the private
+#    return type, even to discard it.
+#
+# 2. Retained-layout fast path (src/taffy.rs, src/window.rs). gpui is strictly immediate-
+#    mode: it rebuilds AND re-solves the whole taffy flexbox tree every draw, so an idle
+#    "paint-only" frame (a hover bg flip, an opacity pulse) pays the full O(total-nodes)
+#    constraint solve (~7ms at 1300 nodes) even though no box moved. The host calls the new
+#    `Window::prepare_layout_frame(reuse_paint_only)` at the top of its `Render::render`
+#    when it knows a frame changed only paint-only style keys; the patched
+#    `TaffyLayoutEngine` then carries the previous full-layout frame's solved geometry over,
+#    rebuilds the tree + runs each node's (cheap, cached) text measure so gpui's text/input
+#    elements still populate their per-frame state, and SKIPS the flexbox solve — copying
+#    every node's bounds positionally from the prior frame. A node-count mismatch self-heals
+#    to a full relayout next draw. Cuts the per-frame draw cost ~10ms→~4ms on hover/pulse
+#    frames at 400-session scale. `RNGPUI_DISABLE_RETAINED_LAYOUT` forces the stock path;
+#    `RNGPUI_DRAW_PROBE` prints the per-draw wall-clock + reuse flag.
 [patch.crates-io]
 gpui = { path = "vendor/gpui-0.2.2-patched" }

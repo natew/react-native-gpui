@@ -301,6 +301,13 @@ fn native_layout_override(key: &str) -> NativeLayoutOverride {
         .unwrap_or_default()
 }
 
+/// True while a native pane-resize drag is in progress. The retained-layout fast path
+/// must NOT engage during a drag — each drag step moves a pane's width (a taffy box), so
+/// the geometry genuinely changes and must be re-solved.
+pub fn native_resize_active() -> bool {
+    ACTIVE_NATIVE_RESIZE.lock().unwrap().is_some()
+}
+
 pub fn native_layout_has_animations() -> bool {
     // Finalize any animation whose duration has fully elapsed, committing its end value
     // as a static override — driven by wall-clock, independent of whether the element was
@@ -2089,6 +2096,11 @@ impl Element for ReactDivElement {
                 if !inside {
                     PRESSED.lock().unwrap().remove(&id);
                 }
+                // a native hover transition swaps the precomputed hover variant in PAINT
+                // only (div.rs paint, after layout) — it never re-lays-out, even if the
+                // hoverStyle carries width/padding. So this repaint is geometry-stable:
+                // arm the retained-layout fast path so it skips the ~7ms taffy solve.
+                crate::anim_overlay::mark_paint_only_frame();
                 window.refresh();
             });
             if has_press {
@@ -2099,6 +2111,7 @@ impl Element for ReactDivElement {
                         && down_hitbox.is_hovered(window)
                         && PRESSED.lock().unwrap().insert(id)
                     {
+                        crate::anim_overlay::mark_paint_only_frame();
                         window.refresh();
                     }
                 });
@@ -2107,6 +2120,7 @@ impl Element for ReactDivElement {
                         && ev.button == MouseButton::Left
                         && PRESSED.lock().unwrap().remove(&id)
                     {
+                        crate::anim_overlay::mark_paint_only_frame();
                         window.refresh();
                     }
                 });
@@ -2118,6 +2132,7 @@ impl Element for ReactDivElement {
                 let left_hover = PSEUDO_HOVER.lock().unwrap().remove(&id);
                 let left_press = PRESSED.lock().unwrap().remove(&id);
                 if left_hover || left_press {
+                    crate::anim_overlay::mark_paint_only_frame();
                     window.refresh();
                 }
             });

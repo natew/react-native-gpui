@@ -3146,6 +3146,7 @@ fn main() {
                     }
                     Incoming::DebugRealKey { key, reply } => {
                         let keystroke = match parse_real_keystroke(&key) {
+                            Ok(keystroke) => keystroke,
                             Err(error) => {
                                 let _ = reply.send(serde_json::json!({
                                     "ok": false,

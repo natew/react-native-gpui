@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, AppContext, Bounds, Context, Entity, InteractiveElement as _, IntoElement, KeyBinding,
-    Menu, MenuItem, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    Keystroke, Menu, MenuItem, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, Styled, TitlebarOptions, Window,
     WindowBounds, WindowOptions, actions, point, px, size,
 };
@@ -107,18 +107,16 @@ fn dispatch_real_input(window: &mut Window, input: gpui::PlatformInput, cx: &mut
     let _ = window.dispatch_event(input, cx);
 }
 
-/// The `key_char` a real keystroke would carry for a probe key. Single printable keys
-/// type themselves; named keys (enter/tab/escape/…) carry no char. Enter's char is "\n"
-/// so the focused element's `js_key` resolves it to "Enter" the same way an OS Return does.
-fn real_key_char(key: &str) -> Option<String> {
-    match key {
-        "enter" | "return" => Some("\n".to_string()),
+fn normalize_real_keystroke(mut keystroke: Keystroke) -> Keystroke {
+    keystroke.key_char = match keystroke.key.as_str() {
+        "enter" => Some("\n".to_string()),
         "tab" => Some("\t".to_string()),
-        k if k.chars().count() == 1 => Some(k.to_string()),
-        _ => None,
-    }
+        _ => keystroke.key_char,
+    };
+    keystroke
 }
 
+/// Map GPUI's parsed keystroke back to the React Native key vocabulary.
 fn js_key_for_keystroke(keystroke: &gpui::Keystroke) -> String {
     if keystroke.key == "enter" || keystroke.key_char.as_deref() == Some("\n") {
         "Enter".to_string()
@@ -2660,6 +2658,11 @@ fn main() {
                         let applied = window_handle.update(cx, |_root, window, cx| {
                             pump.update(cx, |this, cx| {
                                 if let Some(state) = this.inputs.get(&id) {
+                                    // no-activate test windows cannot become the macOS key
+                                    // window, but an imperative focus still targets this input.
+                                    // retain that target so background drivers exercise the
+                                    // same TextInput change/key handlers without stealing focus.
+                                    this.focused_input = Some(id);
                                     state.update(cx, |input, cx| input.focus(window, cx));
                                 }
                             })
@@ -3147,6 +3150,18 @@ fn main() {
                         }
                     }
                     Incoming::DebugRealKey { key, reply } => {
+                        let keystroke = match Keystroke::parse(&key) {
+                            Ok(keystroke) => normalize_real_keystroke(keystroke),
+                            Err(error) => {
+                                let _ = reply.send(serde_json::json!({
+                                    "ok": false,
+                                    "type": "realKey",
+                                    "key": key,
+                                    "error": error.to_string(),
+                                }));
+                                continue;
+                            }
+                        };
                         let reply_after_dispatch = reply.clone();
                         let key_after_dispatch = key.clone();
                         let scheduled = window_handle.update(cx, |_root, window, cx| {
@@ -3155,11 +3170,6 @@ fn main() {
                             // probe exercises the real dispatch path without re-entering Root.
                             window.defer(cx, move |window, cx| {
                                 let before = crate::bridge::events_emitted_count();
-                                let keystroke = gpui::Keystroke {
-                                    modifiers: gpui::Modifiers::default(),
-                                    key: key_after_dispatch.clone(),
-                                    key_char: real_key_char(&key_after_dispatch),
-                                };
                                 dispatch_real_input(
                                     window,
                                     gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
@@ -3850,7 +3860,8 @@ fn main() {
 mod tests {
     use super::{
         AppCommandBinding, AppCommandBindingSlot, Incoming, TerminalFrameKind,
-        app_command_key_bindings, parse_incoming, position_for_byte_offset,
+        app_command_key_bindings, normalize_real_keystroke, parse_incoming,
+        position_for_byte_offset,
     };
     use gpui::{KeyContext, Keymap, Keystroke};
     use serde_json::json;
@@ -4059,6 +4070,19 @@ mod tests {
             vec![app_command_binding("focus.down", "down", Some("!Input"))],
         ));
         assert_eq!(keymap.bindings_for_input(&[down], &context).0.len(), 1);
+    }
+
+    #[test]
+    fn real_key_preserves_modifiers_and_input_characters() {
+        let command = normalize_real_keystroke(Keystroke::parse("cmd-k").expect("cmd-k"));
+        assert!(command.modifiers.platform);
+        assert_eq!(command.key, "k");
+
+        let enter = normalize_real_keystroke(Keystroke::parse("enter").expect("enter"));
+        assert_eq!(enter.key_char.as_deref(), Some("\n"));
+
+        let tab = normalize_real_keystroke(Keystroke::parse("tab").expect("tab"));
+        assert_eq!(tab.key_char.as_deref(), Some("\t"));
     }
 
     #[test]

@@ -37,6 +37,7 @@ export {
     ActivityIndicator,
     StatusBar,
     Modal,
+    RefreshControl,
     requireNativeComponent,
     codegenNativeComponent,
     codegenNativeCommands,
@@ -68,6 +69,7 @@ export type {
     SectionListProps,
     KeyboardAvoidingViewProps,
     ActivityIndicatorProps,
+    RefreshControlProps,
 } from "./components";
 
 // stylesheet + style types

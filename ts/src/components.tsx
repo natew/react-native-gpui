@@ -46,6 +46,24 @@ export interface TextProps extends AccessibilityProps {
 export const View = "View" as unknown as FC<ViewProps>;
 export const Text = "Text" as unknown as FC<TextProps>;
 
+// build-compat stub: @legendapp/list imports RefreshControl from react-native;
+// gpui has no pull-to-refresh, so it renders nothing. (Matches the main-branch
+// shim; added here so the offthread worktree bundles against the current gui.)
+export interface RefreshControlProps {
+    refreshing: boolean;
+    onRefresh?: () => void;
+    progressViewOffset?: number;
+    tintColor?: ColorValue;
+    title?: string;
+    titleColor?: ColorValue;
+    colors?: ColorValue[];
+    enabled?: boolean;
+    style?: StyleProp<ViewStyle>;
+}
+export function RefreshControl(_props: RefreshControlProps) {
+    return null;
+}
+
 export interface TextInputProps extends AccessibilityProps {
     value?: string;
     defaultValue?: string;

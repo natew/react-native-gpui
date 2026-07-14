@@ -107,13 +107,8 @@ fn dispatch_real_input(window: &mut Window, input: gpui::PlatformInput, cx: &mut
     let _ = window.dispatch_event(input, cx);
 }
 
-fn normalize_real_keystroke(mut keystroke: Keystroke) -> Keystroke {
-    keystroke.key_char = match keystroke.key.as_str() {
-        "enter" => Some("\n".to_string()),
-        "tab" => Some("\t".to_string()),
-        _ => keystroke.key_char,
-    };
-    keystroke
+fn parse_real_keystroke(key: &str) -> Result<Keystroke, gpui::InvalidKeystrokeError> {
+    Keystroke::parse(key).map(Keystroke::with_simulated_ime)
 }
 
 /// Map GPUI's parsed keystroke back to the React Native key vocabulary.
@@ -3150,8 +3145,7 @@ fn main() {
                         }
                     }
                     Incoming::DebugRealKey { key, reply } => {
-                        let keystroke = match Keystroke::parse(&key) {
-                            Ok(keystroke) => normalize_real_keystroke(keystroke),
+                        let keystroke = match parse_real_keystroke(&key) {
                             Err(error) => {
                                 let _ = reply.send(serde_json::json!({
                                     "ok": false,
@@ -3860,8 +3854,7 @@ fn main() {
 mod tests {
     use super::{
         AppCommandBinding, AppCommandBindingSlot, Incoming, TerminalFrameKind,
-        app_command_key_bindings, normalize_real_keystroke, parse_incoming,
-        position_for_byte_offset,
+        app_command_key_bindings, parse_incoming, parse_real_keystroke, position_for_byte_offset,
     };
     use gpui::{KeyContext, Keymap, Keystroke};
     use serde_json::json;
@@ -4074,15 +4067,18 @@ mod tests {
 
     #[test]
     fn real_key_preserves_modifiers_and_input_characters() {
-        let command = normalize_real_keystroke(Keystroke::parse("cmd-k").expect("cmd-k"));
+        let command = parse_real_keystroke("cmd-k").expect("cmd-k");
         assert!(command.modifiers.platform);
         assert_eq!(command.key, "k");
 
-        let enter = normalize_real_keystroke(Keystroke::parse("enter").expect("enter"));
+        let enter = parse_real_keystroke("enter").expect("enter");
         assert_eq!(enter.key_char.as_deref(), Some("\n"));
 
-        let tab = normalize_real_keystroke(Keystroke::parse("tab").expect("tab"));
+        let tab = parse_real_keystroke("tab").expect("tab");
         assert_eq!(tab.key_char.as_deref(), Some("\t"));
+
+        let letter = parse_real_keystroke("a").expect("a");
+        assert_eq!(letter.key_char.as_deref(), Some("a"));
     }
 
     #[test]

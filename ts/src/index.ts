@@ -65,6 +65,7 @@ export type {
     SystemViewGlassVariant,
     SystemViewShadow,
     GhosttyTerminalFrame,
+    GhosttyTerminalHandle,
     GhosttyTerminalProps,
     ScrollViewHandle,
     ScrollViewProps,

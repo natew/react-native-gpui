@@ -20,7 +20,10 @@ pub use input::ReactInputElement;
 pub use native_control::ReactNativeControlElement;
 pub use svg::ReactSvgElement;
 pub use system::ReactSystemElement;
-pub use terminal::ReactGhosttyTerminalElement;
+pub use terminal::{
+    ReactGhosttyTerminalElement, effective_presentation, painted_presentation, present_session,
+    retain_presentations,
+};
 pub use text::ReactTextElement;
 pub use webview::ReactWebViewElement;
 

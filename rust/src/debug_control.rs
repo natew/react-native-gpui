@@ -178,6 +178,13 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
         .ok_or("missing $cmd")?;
     match cmd {
         "dump" => Ok(Incoming::DebugDump { reply }),
+        "terminalPresentation" => Ok(Incoming::DebugTerminalPresentation {
+            id: value
+                .get("id")
+                .and_then(Value::as_u64)
+                .ok_or("missing id")?,
+            reply,
+        }),
         "tap" => Ok(Incoming::DebugTap {
             x: number(value, "x")?,
             y: number(value, "y")?,

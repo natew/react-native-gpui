@@ -1670,6 +1670,11 @@ pub(crate) enum Incoming {
     ScrollToEnd {
         id: u64,
     },
+    TerminalSession {
+        id: u64,
+        session_id: String,
+        frames: Vec<TerminalFrame>,
+    },
     NativeLayout {
         key: String,
         width: Option<f32>,
@@ -1706,6 +1711,10 @@ pub(crate) enum Incoming {
     /// open a new native window by spawning a new process of the same binary.
     OpenWindow,
     DebugDump {
+        reply: flume::Sender<serde_json::Value>,
+    },
+    DebugTerminalPresentation {
+        id: u64,
         reply: flume::Sender<serde_json::Value>,
     },
     DebugTap {
@@ -1848,6 +1857,23 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
                 y: v.get("y").and_then(|x| x.as_f64()).map(|x| x as f32),
             }),
             "scrollToEnd" => id.map(|id| Incoming::ScrollToEnd { id }),
+            "terminalSession" => {
+                let id = id?;
+                let session_id = v.get("sessionId").and_then(|x| x.as_str())?;
+                if session_id.is_empty() {
+                    return None;
+                }
+                let frames = v
+                    .get("frames")
+                    .and_then(|x| x.as_array())
+                    .map(|frames| frames.iter().filter_map(parse_terminal_frame).collect())
+                    .unwrap_or_default();
+                Some(Incoming::TerminalSession {
+                    id,
+                    session_id: session_id.to_string(),
+                    frames,
+                })
+            }
             "nativeLayout" => {
                 let key = v.get("key").and_then(|x| x.as_str())?;
                 Some(Incoming::NativeLayout {
@@ -3406,6 +3432,7 @@ fn main() {
                                 drive_gpui_tweens = crate::anim_overlay_tween::tweens_active();
                                 crate::inspector::retain_sources(&node_ids);
                                 elements::retain_pointer_state(&node_ids);
+                                elements::retain_presentations(&node_ids);
                                 let mut native_layout_keys = HashSet::new();
                                 collect_native_layout_keys(&next_root, &mut native_layout_keys);
                                 elements::retain_native_layout_keys(&native_layout_keys);
@@ -3466,6 +3493,14 @@ fn main() {
                                 elements::scroll_to_end(id);
                                 cx.notify();
                             }
+                            Incoming::TerminalSession {
+                                id,
+                                session_id,
+                                frames,
+                            } => {
+                                elements::present_session(id, session_id, frames);
+                                cx.notify();
+                            }
                             Incoming::NativeLayout {
                                 key,
                                 width,
@@ -3497,6 +3532,17 @@ fn main() {
                                     "dockBadge": dock.badge,
                                     "dockAttentionInformational": dock.attention_informational,
                                     "dockAttentionCritical": dock.attention_critical,
+                                }));
+                            }
+                            Incoming::DebugTerminalPresentation { id, reply } => {
+                                let presentation = elements::painted_presentation(id);
+                                let _ = reply.send(serde_json::json!({
+                                    "ok": presentation.is_some(),
+                                    "type": "terminalPresentation",
+                                    "globalId": id,
+                                    "sessionId": presentation.as_ref().map(|value| &value.session_id),
+                                    "frameCount": presentation.as_ref().map(|value| value.frame_count).unwrap_or(0),
+                                    "paintCount": presentation.as_ref().map(|value| value.paint_count).unwrap_or(0),
                                 }));
                             }
                             Incoming::DebugTap { x, y, reply } => {
@@ -3803,8 +3849,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppCommandBinding, AppCommandBindingSlot, Incoming, app_command_key_bindings,
-        parse_incoming, position_for_byte_offset,
+        AppCommandBinding, AppCommandBindingSlot, Incoming, TerminalFrameKind,
+        app_command_key_bindings, parse_incoming, position_for_byte_offset,
     };
     use gpui::{KeyContext, Keymap, Keystroke};
     use serde_json::json;
@@ -3897,6 +3943,33 @@ mod tests {
         } else {
             panic!("expected scrollTo command");
         }
+    }
+
+    #[test]
+    fn parses_terminal_session_command_with_frames() {
+        let incoming = parse_incoming(&json!({
+            "$cmd": "terminalSession",
+            "id": 1_000_000_004_u64,
+            "sessionId": "ab-terminal",
+            "frames": [
+                { "seq": 41, "kind": "snapshot", "data": "YWJj", "cols": 120, "rows": 40 },
+                { "seq": 42, "kind": "bytes", "data": "ZA==" }
+            ]
+        }));
+
+        let Some(Incoming::TerminalSession {
+            id,
+            session_id,
+            frames,
+        }) = incoming
+        else {
+            panic!("expected terminalSession command");
+        };
+        assert_eq!(id, 1_000_000_004);
+        assert_eq!(session_id, "ab-terminal");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].kind, TerminalFrameKind::Snapshot);
+        assert_eq!(frames[1].seq, 42);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -36,6 +36,10 @@ thread_local! {
     // few new frames + a cached render. Bounded by an LRU cap so idle sessions
     // don't leak.
     static TERMINALS: RefCell<HashMap<String, TerminalState>> = RefCell::new(HashMap::new());
+    // imperative session changes sit above the last committed React props until
+    // that tree catches up. This keeps the stable host on the native hot path.
+    static TERMINAL_PRESENTATIONS: RefCell<HashMap<u64, TerminalPresentation>> = RefCell::new(HashMap::new());
+    static TERMINAL_PAINTED_PRESENTATIONS: RefCell<HashMap<u64, PaintedTerminalPresentation>> = RefCell::new(HashMap::new());
     static TERMINAL_FOCUS: RefCell<HashMap<u64, gpui::FocusHandle>> = RefCell::new(HashMap::new());
     static TERMINAL_CLOCK: RefCell<u64> = const { RefCell::new(0) };
     // last (cols, rows) the element measured from its own bounds and reported to
@@ -48,10 +52,117 @@ thread_local! {
 // Keep at most this many warm per-session terminals; evict least-recently-used.
 const MAX_WARM_TERMINALS: usize = 12;
 
+struct TerminalPresentation {
+    session_id: String,
+    frames: Arc<Vec<TerminalFrame>>,
+    last_seq: u64,
+}
+
+#[derive(Clone)]
+pub struct PaintedTerminalPresentation {
+    pub session_id: String,
+    pub frame_count: usize,
+    pub paint_count: u64,
+}
+
+pub fn present_session(global_id: u64, session_id: String, frames: Vec<TerminalFrame>) {
+    let last_seq = frames.last().map(|frame| frame.seq).unwrap_or(0);
+    TERMINAL_PRESENTATIONS.with(|presentations| {
+        presentations.borrow_mut().insert(
+            global_id,
+            TerminalPresentation {
+                session_id,
+                frames: Arc::new(frames),
+                last_seq,
+            },
+        );
+    });
+}
+
+pub fn retain_presentations(present: &HashSet<u64>) {
+    TERMINAL_PRESENTATIONS.with(|presentations| {
+        presentations
+            .borrow_mut()
+            .retain(|global_id, _| present.contains(global_id));
+    });
+    TERMINAL_PAINTED_PRESENTATIONS.with(|presentations| {
+        presentations
+            .borrow_mut()
+            .retain(|global_id, _| present.contains(global_id));
+    });
+}
+
+pub fn painted_presentation(global_id: u64) -> Option<PaintedTerminalPresentation> {
+    TERMINAL_PAINTED_PRESENTATIONS
+        .with(|presentations| presentations.borrow().get(&global_id).cloned())
+}
+
+fn note_painted(global_id: u64, session_id: &str, frame_count: usize) {
+    TERMINAL_PAINTED_PRESENTATIONS.with(|presentations| {
+        let mut presentations = presentations.borrow_mut();
+        let paint_count = presentations
+            .get(&global_id)
+            .map_or(1, |presentation| presentation.paint_count.wrapping_add(1));
+        presentations.insert(
+            global_id,
+            PaintedTerminalPresentation {
+                session_id: session_id.to_string(),
+                frame_count,
+                paint_count,
+            },
+        );
+    });
+}
+
+pub fn effective_presentation(element: &ReactElement) -> (String, usize) {
+    let (session_id, frames) = resolve_presentation(element);
+    (
+        session_id,
+        frames
+            .as_ref()
+            .map_or(element.terminal_frames.len(), |frames| frames.len()),
+    )
+}
+
+fn resolve_presentation(element: &ReactElement) -> (String, Option<Arc<Vec<TerminalFrame>>>) {
+    let authored_session_id = element
+        .terminal_session_id
+        .clone()
+        .unwrap_or_else(|| "__terminal__".to_string());
+    let authored_last_seq = element
+        .terminal_frames
+        .last()
+        .map(|frame| frame.seq)
+        .unwrap_or(0);
+    TERMINAL_PRESENTATIONS.with(|presentations| {
+        let mut presentations = presentations.borrow_mut();
+        let caught_up = presentations
+            .get(&element.global_id)
+            .is_some_and(|presentation| {
+                authored_session_id == presentation.session_id
+                    && authored_last_seq >= presentation.last_seq
+            });
+        if caught_up {
+            presentations.remove(&element.global_id);
+        }
+        presentations
+            .get(&element.global_id)
+            .map(|presentation| {
+                (
+                    presentation.session_id.clone(),
+                    Some(presentation.frames.clone()),
+                )
+            })
+            .unwrap_or((authored_session_id, None))
+    })
+}
+
 pub struct ReactGhosttyTerminalElement {
     element: Arc<ReactElement>,
     _window_id: u64,
     child: Option<gpui::AnyElement>,
+    presented_session_id: String,
+    presented_frame_count: usize,
 }
 
 impl ReactGhosttyTerminalElement {
@@ -60,10 +171,18 @@ impl ReactGhosttyTerminalElement {
             element,
             _window_id: window_id,
             child: None,
+            presented_session_id: String::new(),
+            presented_frame_count: 0,
         }
     }
 
-    fn build_child(&self, window: &mut Window, cx: &mut App) -> gpui::AnyElement {
+    fn build_child(&mut self, window: &mut Window, cx: &mut App) -> gpui::AnyElement {
+        let (scroll_session_id, frame_count, rows, translate_y) = terminal_rows(
+            &self.element,
+            self.element.style.line_height.unwrap_or(18.0),
+        );
+        self.presented_session_id = scroll_session_id.clone();
+        self.presented_frame_count = frame_count;
         let style = &self.element.style;
         let font_size = style.font_size.unwrap_or(12.0);
         let line_height = style.line_height.unwrap_or(18.0);
@@ -72,7 +191,6 @@ impl ReactGhosttyTerminalElement {
         let background = style
             .background_color
             .unwrap_or_else(|| color_from_hex(0x050507));
-        let (rows, translate_y) = terminal_rows(&self.element, line_height);
         let focus_handle = terminal_focus_handle(self.element.global_id, cx);
         let click_focus_handle = focus_handle.clone();
         let listens_key_press = self.element.listens("keyPress");
@@ -81,12 +199,6 @@ impl ReactGhosttyTerminalElement {
         let element_id = self.element.global_id;
         let press_element_id = element_id;
         let drop_element_id = element_id;
-        let scroll_session_id = self
-            .element
-            .terminal_session_id
-            .clone()
-            .unwrap_or_else(|| "__terminal__".to_string());
-
         // the element's resolved corner radii. The outer `style.paint` (in this
         // element's `paint`) already paints a rounded background + drop shadow from
         // `corner_radii`, but this inner root paints its OWN `size_full` background
@@ -386,6 +498,11 @@ impl Element for ReactGhosttyTerminalElement {
                 child.paint(window, cx);
             }
         });
+        note_painted(
+            self.element.global_id,
+            &self.presented_session_id,
+            self.presented_frame_count,
+        );
     }
 }
 
@@ -450,11 +567,15 @@ struct RowHighlight {
 /// `(rows, translate_y)` where translate_y is 0 while pinned to the bottom and
 /// in `(-line_height, 0]` while scrolled (slides the grid up so the extra
 /// history row prepended at the top fills in smoothly).
-fn terminal_rows(element: &ReactElement, line_height: f32) -> (Vec<RenderedRow>, f32) {
-    let session_id = element
-        .terminal_session_id
-        .clone()
-        .unwrap_or_else(|| "__terminal__".to_string());
+fn terminal_rows(
+    element: &ReactElement,
+    line_height: f32,
+) -> (String, usize, Vec<RenderedRow>, f32) {
+    let (session_id, presented_frames) = resolve_presentation(element);
+    let frames = presented_frames
+        .as_ref()
+        .map(|frames| frames.as_slice())
+        .unwrap_or(element.terminal_frames.as_slice());
     let mut result = (Vec::new(), 0.0);
     let tick = TERMINAL_CLOCK.with(|clock| {
         let mut clock = clock.borrow_mut();
@@ -463,14 +584,12 @@ fn terminal_rows(element: &ReactElement, line_height: f32) -> (Vec<RenderedRow>,
     });
     TERMINALS.with(|terminals| {
         let mut terminals = terminals.borrow_mut();
-        let initial_cols = element
-            .terminal_frames
+        let initial_cols = frames
             .iter()
             .rev()
             .find_map(|frame| frame.cols)
             .unwrap_or(100);
-        let initial_rows = element
-            .terminal_frames
+        let initial_rows = frames
             .iter()
             .rev()
             .find_map(|frame| frame.rows)
@@ -486,10 +605,10 @@ fn terminal_rows(element: &ReactElement, line_height: f32) -> (Vec<RenderedRow>,
         let state = terminals.get_mut(&session_id).expect("terminal inserted");
         state.last_used = tick;
         state.line_height = line_height.max(1.0);
-        state.apply_frames(&element.terminal_frames);
+        state.apply_frames(frames);
         result = state.rows_for_render().unwrap_or((Vec::new(), 0.0));
     });
-    result
+    (session_id, frames.len(), result.0, result.1)
 }
 
 /// Drop the least-recently-used warm terminals once the map exceeds the cap,

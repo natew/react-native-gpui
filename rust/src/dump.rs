@@ -53,6 +53,11 @@ fn dump_node(el: &Arc<ReactElement>) -> Value {
     if let Some(key) = el.native_layout_key.as_ref() {
         obj.insert("nativeLayoutKey".into(), json!(key));
     }
+    if el.terminal_session_id.is_some() {
+        let (session_id, frame_count) = crate::elements::effective_presentation(el);
+        obj.insert("terminalSessionId".into(), json!(session_id));
+        obj.insert("terminalFrameCount".into(), json!(frame_count));
+    }
     if let Some(resize) = el.native_resize.as_ref() {
         let mut native = Map::new();
         native.insert("target".into(), json!(resize.target));

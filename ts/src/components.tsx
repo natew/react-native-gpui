@@ -253,10 +253,10 @@ export interface WebViewHandle {
     reload: () => void;
 }
 
-let nextWebViewCommandId = 1_000_000_000;
+let nextHostCommandId = 1_000_000_000;
 
-function createWebViewCommandId() {
-    return nextWebViewCommandId++;
+function createHostCommandId() {
+    return nextHostCommandId++;
 }
 
 /**
@@ -267,7 +267,7 @@ function createWebViewCommandId() {
  */
 export const WebView = forwardRef<WebViewHandle, WebViewProps>(function WebView(props, ref) {
     const commandIdRef = useRef<number | null>(null);
-    if (commandIdRef.current == null) commandIdRef.current = createWebViewCommandId();
+    if (commandIdRef.current == null) commandIdRef.current = createHostCommandId();
     const commandId = commandIdRef.current;
     const handle = useMemo<WebViewHandle>(
         () => ({
@@ -318,8 +318,39 @@ export interface GhosttyTerminalProps extends AccessibilityProps {
     onMeasureViewport?: (viewport: { cols: number; rows: number }) => void;
 }
 
-export const GhosttyTerminal = forwardRef<unknown, GhosttyTerminalProps>(function GhosttyTerminal(props, ref) {
-    return createElement("GhosttyTerminal" as any, { ...props, ref });
+export interface GhosttyTerminalHandle extends NativeHostHandle {
+    showSession: (sessionId: string, frames: GhosttyTerminalFrame[]) => void;
+}
+
+export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminalProps>(function GhosttyTerminal(props, ref) {
+    const host = useRef<NativeHostHandle | null>(null);
+    const commandIdRef = useRef<number | null>(null);
+    if (commandIdRef.current == null) commandIdRef.current = createHostCommandId();
+    const commandId = commandIdRef.current;
+    const handle = useMemo<GhosttyTerminalHandle>(
+        () => ({
+            id: commandId,
+            measure(callback) {
+                host.current?.measure?.(callback);
+            },
+            measureInWindow(callback) {
+                host.current?.measureInWindow?.(callback);
+            },
+            measureLayout(relativeToNativeNode, onSuccess, onFail) {
+                host.current?.measureLayout?.(relativeToNativeNode, onSuccess, onFail);
+            },
+            showSession(sessionId, frames) {
+                sendCommand({ $cmd: "terminalSession", id: commandId, sessionId, frames });
+            },
+        }),
+        [commandId],
+    );
+    useImperativeHandle(ref, () => handle, [handle]);
+    return createElement("GhosttyTerminal" as any, {
+        ...props,
+        ref: host,
+        __rngpuiHostId: commandId,
+    });
 });
 
 // ── ScrollView ──────────────────────────────────────────────────────

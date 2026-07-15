@@ -84,6 +84,7 @@ export interface TextInputProps extends AccessibilityProps {
 }
 export interface TextInputHandle {
     focus: () => void;
+    clear: () => void;
     blur: () => void;
 }
 export const TextInput = forwardRef<TextInputHandle, TextInputProps>(function TextInput(props, ref) {
@@ -93,6 +94,9 @@ export const TextInput = forwardRef<TextInputHandle, TextInputProps>(function Te
         () => ({
             focus() {
                 if (host.current) sendCommand({ $cmd: "focusInput", id: host.current.id });
+            },
+            clear() {
+                if (host.current) sendCommand({ $cmd: "clearInput", id: host.current.id });
             },
             blur() {
                 if (host.current) sendCommand({ $cmd: "blurInput", id: host.current.id });

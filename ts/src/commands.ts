@@ -59,6 +59,7 @@ export type Command =
           clear?: boolean;
       }
     | { $cmd: "focusInput"; id: number }
+    | { $cmd: "clearInput"; id: number }
     | { $cmd: "blurInput"; id: number }
     | { $cmd: "dockBadge"; label: string }
     | { $cmd: "requestAttention"; critical?: boolean }

@@ -1687,6 +1687,9 @@ pub(crate) enum Incoming {
     FocusInput {
         id: u64,
     },
+    ClearInput {
+        id: u64,
+    },
     BlurInput,
     NativeContextMenu(native_menu::NativeContextMenu),
     ClipboardWrite {
@@ -1883,6 +1886,7 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
                 })
             }
             "focusInput" => id.map(|id| Incoming::FocusInput { id }),
+            "clearInput" => id.map(|id| Incoming::ClearInput { id }),
             "blurInput" => Some(Incoming::BlurInput),
             "nativeContextMenu" => serde_json::from_value(v.clone())
                 .ok()
@@ -2659,6 +2663,25 @@ fn main() {
                                     // same TextInput change/key handlers without stealing focus.
                                     this.focused_input = Some(id);
                                     state.update(cx, |input, cx| input.focus(window, cx));
+                                }
+                            })
+                        });
+                        if applied.is_err() {
+                            break;
+                        }
+                    }
+                    Incoming::ClearInput { id } => {
+                        let applied = window_handle.update(cx, |_root, window, cx| {
+                            pump.update(cx, |this, cx| {
+                                if let Some(state) = this.inputs.get(&id) {
+                                    suppress_next_input_change(
+                                        &mut this.suppressed_input_changes,
+                                        id,
+                                        String::new(),
+                                    );
+                                    state.update(cx, |input, cx| {
+                                        input.set_value(String::new(), window, cx);
+                                    });
                                 }
                             })
                         });
@@ -3712,6 +3735,7 @@ fn main() {
                                 }
                             }
                             Incoming::FocusInput { .. }
+                            | Incoming::ClearInput { .. }
                             | Incoming::BlurInput
                             | Incoming::PickPaths { .. }
                             | Incoming::Quit
@@ -3947,6 +3971,20 @@ mod tests {
             assert_eq!(y, Some(13.0));
         } else {
             panic!("expected scrollTo command");
+        }
+    }
+
+    #[test]
+    fn parses_clear_input_command() {
+        let incoming = parse_incoming(&json!({
+            "$cmd": "clearInput",
+            "id": 114
+        }));
+
+        if let Some(Incoming::ClearInput { id }) = incoming {
+            assert_eq!(id, 114);
+        } else {
+            panic!("expected clearInput command");
         }
     }
 

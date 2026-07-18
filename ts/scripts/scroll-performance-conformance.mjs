@@ -56,9 +56,56 @@ try {
         y: node.bounds.y + node.bounds.height / 2,
     });
     const point = center(scroll);
-    const nestedStats = await host.request({ $cmd: "scrollDriverStats", ...center(nestedInner) });
+    const nestedPoint = center(nestedInner);
+    const outer = byTestId(beforeTree, "nested-outer");
+    if (!outer?.bounds) throw new Error("nested outer scroll bounds were not measured");
+    const outerPoint = {
+        x: outer.bounds.x + 2,
+        y: outer.bounds.y + outer.bounds.height - 2,
+    };
+    const nestedStats = await host.request({ $cmd: "scrollDriverStats", ...nestedPoint, reset: true });
     if (!nestedStats.ok || !nestedStats.hasVerticalScroller) {
         throw new Error(`default vertical overlay scroller was not enabled: ${JSON.stringify(nestedStats)}`);
+    }
+    const outerStats = await host.request({ $cmd: "scrollDriverStats", ...outerPoint, reset: true });
+    if (!outerStats.ok || outerStats.targetId === nestedStats.targetId) {
+        throw new Error(`nested AppKit drivers were not independently addressable: ${JSON.stringify({ nestedStats, outerStats })}`);
+    }
+
+    const wheel = (at, dy, phase, momentumPhase = "none") =>
+        host.request({ $cmd: "nativeDriverWheel", ...at, dy, phase, momentumPhase });
+    const began = await wheel(nestedPoint, 16, "began");
+    if (!began.ok || began.hitTargetId !== nestedStats.targetId) {
+        throw new Error(`real AppKit begin did not hit the deepest nested driver: ${JSON.stringify(began)}`);
+    }
+    const changedOverOuter = await wheel(outerPoint, 20, "changed");
+    if (!changedOverOuter.ok || changedOverOuter.hitTargetId !== outerStats.targetId) {
+        throw new Error(`changed phase did not enter through the outer driver: ${JSON.stringify(changedOverOuter)}`);
+    }
+    await wheel(outerPoint, 20, "none", "changed");
+    await wheel(outerPoint, 0, "none", "ended");
+    await sleep(30);
+    const innerAfterLockedGesture = await host.request({ $cmd: "scrollDriverStats", ...nestedPoint });
+    const outerAfterLockedGesture = await host.request({ $cmd: "scrollDriverStats", ...outerPoint });
+    if (innerAfterLockedGesture.offsetY < 20 || Math.abs(outerAfterLockedGesture.offsetY) > 0.5) {
+        throw new Error(
+            `nested gesture ownership escaped before momentum ended: ${JSON.stringify({ innerAfterLockedGesture, outerAfterLockedGesture })}`,
+        );
+    }
+    const legacyOuter = await wheel(outerPoint, 18, "none");
+    await sleep(20);
+    const outerAfterLegacy = await host.request({ $cmd: "scrollDriverStats", ...outerPoint });
+    if (!legacyOuter.ok || outerAfterLegacy.offsetY < 10) {
+        throw new Error(`phase-none wheel did not use the current AppKit hit: ${JSON.stringify({ legacyOuter, outerAfterLegacy })}`);
+    }
+
+    await host.request({ $cmd: "scrollAt", ...nestedPoint, dx: 0, dy: -10000 });
+    await sleep(20);
+    await wheel(nestedPoint, -120, "began");
+    const elastic = await wheel(nestedPoint, -120, "changed");
+    await wheel(nestedPoint, 0, "ended");
+    if (!elastic.ok || elastic.offsetY >= -0.5) {
+        throw new Error(`AppKit rubber-band offset was clamped before paint: ${JSON.stringify(elastic)}`);
     }
     const initial = await host.request({ $cmd: "scrollDriverStats", ...point, reset: true });
     if (!initial.ok || initial.driver !== "appkit") {

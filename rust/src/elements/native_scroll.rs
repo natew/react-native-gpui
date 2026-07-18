@@ -85,6 +85,7 @@ thread_local! {
     static LAST_NATIVE_OFFSETS: RefCell<HashMap<u64, (f64, f64)>> = RefCell::new(HashMap::new());
     static OBSERVER: RefCell<Option<id>> = RefCell::new(None);
     static ACTIVE_DRIVER: RefCell<Option<u64>> = const { RefCell::new(None) };
+    static PROOF_SCROLL_HIT: RefCell<bool> = const { RefCell::new(false) };
 }
 
 #[cfg(target_os = "macos")]
@@ -97,6 +98,15 @@ const NS_SCROLL_ELASTICITY_NONE: i64 = 1;
 const NS_SCROLL_ELASTICITY_ALLOWED: i64 = 2;
 #[cfg(target_os = "macos")]
 const FRAME_INTERVAL: Duration = Duration::from_nanos(8_333_333);
+
+#[cfg(target_os = "macos")]
+const CG_SCROLL_UNIT_PIXEL: u32 = 0;
+#[cfg(target_os = "macos")]
+const CG_SCROLL_WHEEL_EVENT_IS_CONTINUOUS: u32 = 88;
+#[cfg(target_os = "macos")]
+const CG_SCROLL_WHEEL_EVENT_SCROLL_PHASE: u32 = 99;
+#[cfg(target_os = "macos")]
+const CG_SCROLL_WHEEL_EVENT_MOMENTUM_PHASE: u32 = 123;
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
@@ -114,6 +124,15 @@ unsafe extern "C" {
         context: *mut c_void,
         work: Option<unsafe extern "C" fn(*mut c_void)>,
     );
+    fn CGEventCreateScrollWheelEvent(
+        source: *const c_void,
+        units: u32,
+        wheel_count: u32,
+        wheel_1: i32,
+        ...
+    ) -> id;
+    fn CGEventSetIntegerValueField(event: id, field: u32, value: i64);
+    fn CFRelease(cf: id);
 }
 
 #[cfg(target_os = "macos")]
@@ -136,10 +155,15 @@ extern "C" fn scroll_hit_test(this: &Object, _: Sel, point: NSPoint) -> id {
             }
             candidate = msg_send![candidate, superview];
         }
+        let proof_scroll = PROOF_SCROLL_HIT.with(|proof| *proof.borrow());
         let app: id = msg_send![class!(NSApplication), sharedApplication];
         let current: id = msg_send![app, currentEvent];
-        if current != nil {
-            let event_type: u64 = msg_send![current, type];
+        if proof_scroll || current != nil {
+            let event_type: u64 = if proof_scroll {
+                NS_SCROLL_WHEEL_EVENT
+            } else {
+                msg_send![current, type]
+            };
             if event_type == NS_SCROLL_WHEEL_EVENT {
                 let gpui_view: id = msg_send![this, superview];
                 let bounds: NSRect = msg_send![gpui_view, bounds];
@@ -156,6 +180,167 @@ extern "C" fn scroll_hit_test(this: &Object, _: Sel, point: NSPoint) -> id {
             }
         }
         nil
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct NativeScrollProof {
+    pub hit_driver_id: Option<u64>,
+    pub dispatched: bool,
+    pub offset_x: f64,
+    pub offset_y: f64,
+}
+
+#[cfg(target_os = "macos")]
+fn event_phase(value: &str) -> Option<i64> {
+    match value {
+        "none" => Some(0),
+        "began" => Some(1),
+        "stationary" => Some(2),
+        "changed" => Some(4),
+        "ended" => Some(8),
+        "cancelled" => Some(16),
+        "mayBegin" => Some(32),
+        _ => None,
+    }
+}
+
+/// Dispatch a pixel-precise phased wheel event through AppKit's real view hit test.
+/// This is test-only control-socket plumbing. Production wheel events take the same
+/// `hitTest:` and `scrollWheel:` methods without entering through this function.
+#[cfg(target_os = "macos")]
+pub fn native_scroll_proof(
+    window: &mut Window,
+    x: f64,
+    y: f64,
+    dy: f64,
+    phase: &str,
+    momentum_phase: &str,
+) -> NativeScrollProof {
+    let Some((parent_view, gpui_view)) = webview_parent(window) else {
+        return NativeScrollProof {
+            hit_driver_id: None,
+            dispatched: false,
+            offset_x: 0.0,
+            offset_y: 0.0,
+        };
+    };
+    let Some(phase) = event_phase(phase) else {
+        return NativeScrollProof {
+            hit_driver_id: None,
+            dispatched: false,
+            offset_x: 0.0,
+            offset_y: 0.0,
+        };
+    };
+    let Some(momentum_phase) = event_phase(momentum_phase) else {
+        return NativeScrollProof {
+            hit_driver_id: None,
+            dispatched: false,
+            offset_x: 0.0,
+            offset_y: 0.0,
+        };
+    };
+    unsafe {
+        let bounds: NSRect = msg_send![gpui_view, bounds];
+        let flipped: BOOL = msg_send![gpui_view, isFlipped];
+        let local_y = if flipped == YES {
+            y
+        } else {
+            bounds.size.height - y
+        };
+        let local = NSPoint::new(x, local_y);
+        let parent_superview: id = msg_send![parent_view, superview];
+        let point_in_parent_super: NSPoint = if parent_superview == nil {
+            local
+        } else {
+            msg_send![gpui_view, convertPoint: local toView: parent_superview]
+        };
+        PROOF_SCROLL_HIT.with(|proof| *proof.borrow_mut() = true);
+        let hit: id = msg_send![parent_view, hitTest: point_in_parent_super];
+        PROOF_SCROLL_HIT.with(|proof| *proof.borrow_mut() = false);
+
+        let mut candidate = hit;
+        let mut hit_scroll_view = nil;
+        while candidate != nil {
+            let is_driver: BOOL = msg_send![candidate, isKindOfClass: scroll_class()];
+            if is_driver == YES {
+                hit_scroll_view = candidate;
+                break;
+            }
+            candidate = msg_send![candidate, superview];
+        }
+        let hit_driver_id = if hit_scroll_view == nil {
+            None
+        } else {
+            DRIVERS.with(|drivers| {
+                drivers
+                    .borrow()
+                    .iter()
+                    .find_map(|(id, driver)| (driver.scroll_view == hit_scroll_view).then_some(*id))
+            })
+        };
+        let Some(hit_driver_id) = hit_driver_id else {
+            return NativeScrollProof {
+                hit_driver_id: None,
+                dispatched: false,
+                offset_x: 0.0,
+                offset_y: 0.0,
+            };
+        };
+        let cg_event =
+            CGEventCreateScrollWheelEvent(std::ptr::null(), CG_SCROLL_UNIT_PIXEL, 1, -(dy as i32));
+        if cg_event == nil {
+            return NativeScrollProof {
+                hit_driver_id: Some(hit_driver_id),
+                dispatched: false,
+                offset_x: 0.0,
+                offset_y: 0.0,
+            };
+        }
+        CGEventSetIntegerValueField(cg_event, CG_SCROLL_WHEEL_EVENT_IS_CONTINUOUS, 1);
+        CGEventSetIntegerValueField(cg_event, CG_SCROLL_WHEEL_EVENT_SCROLL_PHASE, phase);
+        CGEventSetIntegerValueField(
+            cg_event,
+            CG_SCROLL_WHEEL_EVENT_MOMENTUM_PHASE,
+            momentum_phase,
+        );
+        let ns_event: id = msg_send![class!(NSEvent), eventWithCGEvent: cg_event];
+        CFRelease(cg_event);
+        if ns_event == nil {
+            return NativeScrollProof {
+                hit_driver_id: Some(hit_driver_id),
+                dispatched: false,
+                offset_x: 0.0,
+                offset_y: 0.0,
+            };
+        }
+        let _: () = msg_send![hit_scroll_view, scrollWheel: ns_event];
+        let clip: id = msg_send![hit_scroll_view, contentView];
+        let clip_bounds: NSRect = msg_send![clip, bounds];
+        NativeScrollProof {
+            hit_driver_id: Some(hit_driver_id),
+            dispatched: true,
+            offset_x: clip_bounds.origin.x,
+            offset_y: clip_bounds.origin.y,
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn native_scroll_proof(
+    _window: &mut Window,
+    _x: f64,
+    _y: f64,
+    _dy: f64,
+    _phase: &str,
+    _momentum_phase: &str,
+) -> NativeScrollProof {
+    NativeScrollProof {
+        hit_driver_id: None,
+        dispatched: false,
+        offset_x: 0.0,
+        offset_y: 0.0,
     }
 }
 
@@ -643,6 +828,12 @@ pub fn retain_drivers(present: &HashSet<u64>) {
             let Some(driver) = drivers.remove(&driver_id) else {
                 continue;
             };
+            ACTIVE_DRIVER.with(|active| {
+                let mut active = active.borrow_mut();
+                if *active == Some(driver_id) {
+                    *active = None;
+                }
+            });
             unsafe {
                 let center: id = msg_send![class!(NSNotificationCenter), defaultCenter];
                 let _: () = msg_send![

@@ -276,6 +276,22 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
             reset: value.get("reset").and_then(Value::as_bool).unwrap_or(false),
             reply,
         }),
+        "nativeDriverWheel" => Ok(Incoming::DebugNativeDriverWheel {
+            x: number(value, "x")?,
+            y: number(value, "y")?,
+            dy: number(value, "dy").unwrap_or(0.0),
+            phase: value
+                .get("phase")
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+                .to_string(),
+            momentum_phase: value
+                .get("momentumPhase")
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+                .to_string(),
+            reply,
+        }),
         "nativeScrollAt" => Ok(Incoming::DebugNativeScrollAt {
             x: number(value, "x")?,
             y: number(value, "y")?,

@@ -2160,6 +2160,14 @@ pub(crate) enum Incoming {
         reset: bool,
         reply: flume::Sender<serde_json::Value>,
     },
+    DebugNativeDriverWheel {
+        x: f32,
+        y: f32,
+        dy: f32,
+        phase: String,
+        momentum_phase: String,
+        reply: flume::Sender<serde_json::Value>,
+    },
     /// proof-of-native-scroll: run the REAL AppKit `hitTest:` at (x,y) and report the
     /// resolved view class, then synthesize a real scroll-wheel `NSEvent` and deliver it
     /// natively to that view via `scrollWheel:` — NO rngpui JS delta-forwarding. If the
@@ -3924,6 +3932,36 @@ fn main() {
                             }));
                         }
                     }
+                    Incoming::DebugNativeDriverWheel {
+                        x,
+                        y,
+                        dy,
+                        phase,
+                        momentum_phase,
+                        reply,
+                    } => {
+                        let proof = window_handle
+                            .update(cx, |_root, window, _cx| {
+                                elements::native_scroll::native_scroll_proof(
+                                    window,
+                                    x as f64,
+                                    y as f64,
+                                    dy as f64,
+                                    &phase,
+                                    &momentum_phase,
+                                )
+                            })
+                            .ok();
+                        let _ = reply.send(serde_json::json!({
+                            "ok": proof.as_ref().is_some_and(|proof| proof.dispatched),
+                            "type": "nativeDriverWheel",
+                            "hitTargetId": proof.as_ref().and_then(|proof| proof.hit_driver_id),
+                            "offsetX": proof.as_ref().map(|proof| proof.offset_x),
+                            "offsetY": proof.as_ref().map(|proof| proof.offset_y),
+                            "phase": phase,
+                            "momentumPhase": momentum_phase,
+                        }));
+                    }
                     Incoming::DebugNativeScrollAt { x, y, dy, reply } => {
                         // proof the hitTest passthrough routes a REAL scroll-wheel NSEvent
                         // natively to the WKWebView — no rngpui JS delta-forwarding. resolve
@@ -4391,6 +4429,7 @@ fn main() {
                             | Incoming::DebugResize { .. }
                             | Incoming::DebugScrollAt { .. }
                             | Incoming::DebugScrollDriverStats { .. }
+                            | Incoming::DebugNativeDriverWheel { .. }
                             | Incoming::DebugNativeScrollAt { .. }
                             | Incoming::DebugWebviewCopyProof { .. }
                             | Incoming::NativeContextMenu(_)

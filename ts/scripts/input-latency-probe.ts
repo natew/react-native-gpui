@@ -17,7 +17,8 @@ type PaintedInput = {
 
 let host: LaunchedHost | null = null;
 try {
-    host = await launchHost("examples/input-runtime-conformance.tsx", { size: "780x520" });
+    process.env.RNGPUI_INPUT_PAINT_TRACE = "1";
+    host = await launchHost("examples/input-runtime-conformance.tsx", { size: "780x620" });
     const tree = await host.dump();
     const primary = requireTestId(tree, "primary-input");
     const secondary = requireTestId(tree, "secondary-input");
@@ -66,6 +67,7 @@ try {
     process.exitCode = 1;
 } finally {
     host?.close();
+    delete process.env.RNGPUI_INPUT_PAINT_TRACE;
 }
 
 async function measurePaint(

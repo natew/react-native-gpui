@@ -47,6 +47,7 @@ const frameBudgetMs = Number(process.env.RNGPUI_INPUT_FRAME_BUDGET_MS ?? 16.67);
 
 let host: LaunchedHost | null = null;
 try {
+    process.env.RNGPUI_INPUT_PAINT_TRACE = "1";
     host = await launchHost(entry, { size: "780x620" });
 
     const initialTree = await host.dump();
@@ -340,6 +341,7 @@ try {
     process.exitCode = 1;
 } finally {
     host?.close();
+    delete process.env.RNGPUI_INPUT_PAINT_TRACE;
 }
 
 async function measurePresentation(

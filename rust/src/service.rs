@@ -772,11 +772,11 @@ struct ServiceApp {
 
 struct FrameMarker {
     child: AnyElement,
-    input: PaintedInputSnapshot,
+    input: Option<PaintedInputSnapshot>,
 }
 
 impl FrameMarker {
-    fn new(child: AnyElement, input: PaintedInputSnapshot) -> Self {
+    fn new(child: AnyElement, input: Option<PaintedInputSnapshot>) -> Self {
         Self { child, input }
     }
 }
@@ -791,6 +791,8 @@ struct PaintedInputSnapshot {
 
 static LAST_PAINTED_INPUT: Lazy<Mutex<PaintedInputSnapshot>> =
     Lazy::new(|| Mutex::new(PaintedInputSnapshot::default()));
+static TRACE_PAINTED_INPUT: Lazy<bool> =
+    Lazy::new(|| std::env::var_os("RNGPUI_INPUT_PAINT_TRACE").is_some());
 
 impl Element for FrameMarker {
     type RequestLayoutState = ();
@@ -837,8 +839,11 @@ impl Element for FrameMarker {
         cx: &mut App,
     ) {
         self.child.paint(window, cx);
-        self.input.frame = anim_trace::on_frame_painted();
-        *LAST_PAINTED_INPUT.lock().unwrap() = self.input.clone();
+        let frame = anim_trace::on_frame_painted();
+        if let Some(input) = self.input.as_mut() {
+            input.frame = frame;
+            *LAST_PAINTED_INPUT.lock().unwrap() = input.clone();
+        }
     }
 }
 
@@ -1882,7 +1887,10 @@ impl Render for ServiceApp {
             }
         }
 
-        FrameMarker::new(frame.into_any_element(), self.input_snapshot_for_paint(cx))
+        FrameMarker::new(
+            frame.into_any_element(),
+            TRACE_PAINTED_INPUT.then(|| self.input_snapshot_for_paint(cx)),
+        )
     }
 }
 

@@ -9,7 +9,8 @@ import { LegendList, type LegendListRef } from "@legendapp/list/react-native";
 import { memo, useCallback, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View, render } from "../src/index";
 
-const ITEM_COUNT = 100_000;
+const emptyReference = process.env.RNGPUI_LEGEND_EMPTY_REFERENCE === "1";
+const ITEM_COUNT = emptyReference ? 0 : 100_000;
 const ESTIMATED_LIST_SIZE = { height: 644, width: 900 } as const;
 const fixtureStartedAt = performance.now();
 
@@ -108,7 +109,11 @@ function App() {
                     <Text style={s.heading} numberOfLines={1}>
                         LegendList 100,000
                     </Text>
-                    <Text nativeID="legend-load-status" style={s.status} numberOfLines={1}>
+                    <Text
+                        nativeID={emptyReference ? "legend-empty-ready" : "legend-load-status"}
+                        style={s.status}
+                        numberOfLines={1}
+                    >
                         {loadLabel} · {targetLabel}
                     </Text>
                 </View>

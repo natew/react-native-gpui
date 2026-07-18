@@ -13,15 +13,20 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launchHost } from "../cli/host.ts";
+import { hasContentionFlag, startPerfContention } from "./perf-contention.mjs";
 
 const tsRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const workdir = mkdtempSync(join(tmpdir(), "rngpui-legend-100k-"));
-const bundleJs = join(workdir, "app.js");
-const bundleHbc = join(workdir, "app.hbc");
-const screenshotPath = "/tmp/rngpui-legend-100k.png";
-const reportPath = "/tmp/rngpui-legend-100k-report.json";
-const failureLogPath = "/tmp/rngpui-legend-100k-service.log";
+const listBundleJs = join(workdir, "list.js");
+const listBundleHbc = join(workdir, "list.hbc");
+const contentionMode = hasContentionFlag();
+const modeSuffix = contentionMode ? "-contention" : "";
+const screenshotPath = `/tmp/rngpui-legend-100k${modeSuffix}.png`;
+const reportPath = `/tmp/rngpui-legend-100k${modeSuffix}-report.json`;
+const failureLogPath = `/tmp/rngpui-legend-100k${modeSuffix}-service.log`;
 let host;
+let emptyHost;
+let perfContention;
 
 rmSync(screenshotPath, { force: true });
 rmSync(reportPath, { force: true });
@@ -34,10 +39,26 @@ try {
     process.env.RNGPUI_SHOT_SETTLE_MS = "1";
     process.env.RNGPUI_WIRE_TRACE = "1";
     ensureReanimatedRuntime();
-    bundleFixture();
+    bundleFixture("examples/legend-list-100k.tsx", listBundleJs);
+
+    perfContention = await startPerfContention(contentionMode);
+    process.env.RNGPUI_LEGEND_EMPTY_REFERENCE = "1";
+    emptyHost = await launchHost("", { bundle: listBundleHbc, size: "900x700" });
+    await waitForHostTree(
+        emptyHost,
+        (tree) => {
+            const marker = findNativeId(tree, "legend-empty-ready");
+            return intersectsWindow(marker?.bounds) && textContent(marker).includes("loaded:");
+        },
+        "painted empty LegendList reference",
+    );
+    const referenceMemory = processMemory(emptyHost.servicePid);
+    emptyHost.close();
+    emptyHost = undefined;
+    delete process.env.RNGPUI_LEGEND_EMPTY_REFERENCE;
 
     const launchStartedAt = performance.now();
-    host = await launchHost("", { bundle: bundleHbc, size: "900x700" });
+    host = await launchHost("", { bundle: listBundleHbc, size: "900x700" });
 
     const initialTree = await waitForTree(
         (tree) =>
@@ -50,7 +71,7 @@ try {
     const initialRow = findNativeId(initialTree, "legend-item-0");
     assert(initialRow && textContent(initialRow).includes("summary"), "initial summary row 0 is mounted");
     validateTree(initial, "initial");
-    const rssAfterLoadMb = residentMemoryMb(host.servicePid);
+    const memoryAfterLoad = processMemory(host.servicePid);
 
     const middleJump = await tapAndWait("jump-middle", 50_000);
     const middleTree = middleJump.tree;
@@ -78,7 +99,7 @@ try {
         maxStressNodes = Math.max(maxStressNodes, metrics.nodes);
         maxStressRows = Math.max(maxStressRows, metrics.rowNodes);
     }
-    const rssAfterFarJumpsMb = residentMemoryMb(host.servicePid);
+    const memoryAfterFarJumps = processMemory(host.servicePid);
 
     const logPath = join(host.sessionDir, "service.log");
     const scrollLogStart = statSync(logPath).size;
@@ -106,7 +127,7 @@ try {
     const final = treeMetrics(finalTree);
     validateTree(final, "post-scroll");
     assert(!findNativeId(finalTree, "legend-item-50000"), "scrolling recycled the former middle row");
-    const rssAfterScrollMb = residentMemoryMb(host.servicePid);
+    const memoryAfterScroll = processMemory(host.servicePid);
 
     host.capture(screenshotPath);
     const log = readFileSync(logPath, "utf8");
@@ -142,8 +163,27 @@ try {
     const scrollCommandLatencies = scrollResults.map(({ latencyMs }) => latencyMs);
     const maxNativeNodes = Math.max(initial.nodes, middle.nodes, end.nodes, start.nodes, final.nodes, maxStressNodes);
     const maxMountedRows = Math.max(initial.rowNodes, middle.rowNodes, end.rowNodes, start.rowNodes, final.rowNodes, maxStressRows);
+    const maxPhysicalFootprintMb = Math.max(
+        memoryAfterLoad.physicalFootprintMb,
+        memoryAfterFarJumps.physicalFootprintMb,
+        memoryAfterScroll.physicalFootprintMb,
+    );
+    const nativeFrameP95BudgetMs = contentionMode ? 16.67 : 8.33;
     const report = {
         itemCount: 100_000,
+        contention: {
+            mode: contentionMode ? "contention" : "idle",
+            burnerCount: perfContention.burnerCount,
+            burnerPids: perfContention.burnerPids,
+            burnerNiceValues: perfContention.burnerNiceValues,
+            cpuCount: perfContention.cpuCount,
+            niceIncrement: perfContention.niceIncrement,
+            maxBurnerDurationMs: perfContention.maxDurationMs,
+            loadAverageBefore: perfContention.loadAverageBefore,
+            loadAverageAfterWarmup: perfContention.loadAverageAfterWarmup,
+            loadAverageAfterBenchmark: perfContention.snapshot(),
+            nativeFrameP95BudgetMs,
+        },
         initial,
         middle,
         end,
@@ -151,11 +191,18 @@ try {
         final,
         startup,
         memory: {
-            rssAfterLoadMb,
-            rssAfterFarJumpsMb,
-            rssAfterScrollMb,
-            rssFarJumpGrowthMb: Number((rssAfterFarJumpsMb - rssAfterLoadMb).toFixed(1)),
-            rssTotalGrowthMb: Number((rssAfterScrollMb - rssAfterLoadMb).toFixed(1)),
+            reference: referenceMemory,
+            afterLoad: memoryAfterLoad,
+            afterFarJumps: memoryAfterFarJumps,
+            afterScroll: memoryAfterScroll,
+            physicalFootprintSettledDeltaMb: Number(
+                (memoryAfterLoad.physicalFootprintMb - referenceMemory.physicalFootprintMb).toFixed(1),
+            ),
+            physicalFootprintMaxDeltaMb: Number(
+                (maxPhysicalFootprintMb - referenceMemory.physicalFootprintMb).toFixed(1),
+            ),
+            rssFarJumpGrowthMb: Number((memoryAfterFarJumps.rssMb - memoryAfterLoad.rssMb).toFixed(1)),
+            rssTotalGrowthMb: Number((memoryAfterScroll.rssMb - memoryAfterLoad.rssMb).toFixed(1)),
         },
         recycling: {
             farJumps: stressTargets.length + 3,
@@ -242,20 +289,20 @@ try {
         assert(elapsedMs <= 100, `${target} tap-to-painted-settled <=100ms, saw ${elapsedMs}ms`);
     }
     assert(
-        report.memory.rssFarJumpGrowthMb <= 30,
-        `far-jump RSS growth <=30MB, saw ${report.memory.rssFarJumpGrowthMb}MB`,
+        report.memory.physicalFootprintSettledDeltaMb <= 30,
+        `settled 100k physical-footprint delta <=30MB, saw ${report.memory.physicalFootprintSettledDeltaMb}MB`,
     );
     assert(
-        report.memory.rssTotalGrowthMb <= 30,
-        `total RSS growth <=30MB, saw ${report.memory.rssTotalGrowthMb}MB`,
+        report.memory.physicalFootprintMaxDeltaMb <= 30,
+        `max 100k physical-footprint delta <=30MB, saw ${report.memory.physicalFootprintMaxDeltaMb}MB`,
     );
     assert(wireSamples.length >= 20, `captured enough delta-wire commits, saw ${wireSamples.length}`);
     assert(startup.nativeFirstRenderMs !== null, "captured native first-render timing");
     assert(startup.legendAppMs !== null, "captured LegendList onLoad timing");
     assert(startup.launchToUsableMs <= 200, `launch-to-usable list <=200ms, saw ${startup.launchToUsableMs}ms`);
     assert(
-        report.scroll.nativeFrameP95Ms !== null && report.scroll.nativeFrameP95Ms <= 8.33,
-        `native scroll-frame p95 <=8.33ms, saw ${report.scroll.nativeFrameP95Ms}ms`,
+        report.scroll.nativeFrameP95Ms !== null && report.scroll.nativeFrameP95Ms <= nativeFrameP95BudgetMs,
+        `native scroll-frame p95 <=${nativeFrameP95BudgetMs}ms in ${report.contention.mode} mode, saw ${report.scroll.nativeFrameP95Ms}ms`,
     );
     assert(
         report.scroll.commandRoundTripP95Ms !== null && report.scroll.commandRoundTripP95Ms <= 8.33,
@@ -273,8 +320,17 @@ try {
     if (existsSync(failureLogPath)) console.error(`LEGEND_100K_FAILURE_LOG ${failureLogPath}`);
     process.exitCode = 1;
 } finally {
-    host?.close();
-    rmSync(workdir, { recursive: true, force: true });
+    try {
+        host?.close();
+        emptyHost?.close();
+    } finally {
+        delete process.env.RNGPUI_LEGEND_EMPTY_REFERENCE;
+        try {
+            await perfContention?.stop();
+        } finally {
+            rmSync(workdir, { recursive: true, force: true });
+        }
+    }
 }
 
 function ensureReanimatedRuntime() {
@@ -283,14 +339,14 @@ function ensureReanimatedRuntime() {
     run("bun", ["scripts/prebuild-reanimated.mjs"], "prebuild Reanimated runtime");
 }
 
-function bundleFixture() {
+function bundleFixture(entry, output) {
     run(
         "bun",
-        ["scripts/bundle-hermes.mjs", "examples/legend-list-100k.tsx", bundleJs, "--bytecode"],
-        "bundle LegendList fixture",
+        ["scripts/bundle-hermes.mjs", entry, output, "--bytecode"],
+        `bundle ${entry}`,
         { NODE_ENV: "production" },
     );
-    assert(existsSync(bundleHbc), "Hermes bytecode was emitted");
+    assert(existsSync(output.replace(/\.js$/, ".hbc")), `Hermes bytecode was emitted for ${entry}`);
 }
 
 function run(command, args, label, env = {}) {
@@ -332,10 +388,14 @@ async function tapAndWait(buttonId, index) {
 }
 
 async function waitForTree(predicate, label) {
+    return waitForHostTree(host, predicate, label);
+}
+
+async function waitForHostTree(targetHost, predicate, label) {
     const deadline = performance.now() + 3_000;
     let latest;
     while (performance.now() < deadline) {
-        latest = await host.dump();
+        latest = await targetHost.dump();
         if (predicate(latest)) return latest;
         await sleep(20);
     }
@@ -428,6 +488,43 @@ function startupMetrics(log, launchToUsableMs) {
 function residentMemoryMb(pid) {
     const rssKb = Number(execFileSync("ps", ["-o", "rss=", "-p", String(pid)], { encoding: "utf8" }).trim());
     return Number((rssKb / 1024).toFixed(1));
+}
+
+function processMemory(pid) {
+    return {
+        physicalFootprintMb: physicalFootprintMb(pid),
+        rssMb: residentMemoryMb(pid),
+    };
+}
+
+function physicalFootprintMb(pid) {
+    if (process.platform !== "darwin" || !existsSync("/usr/bin/footprint")) {
+        throw new Error("physical-footprint acceptance requires macOS /usr/bin/footprint");
+    }
+    let output;
+    try {
+        output = execFileSync(
+            "/usr/bin/footprint",
+            ["--pid", String(pid), "--format", "formatted", "--noCategories"],
+            { encoding: "utf8" },
+        );
+    } catch (error) {
+        const detail = error?.stderr?.toString().trim() || error?.message || String(error);
+        throw new Error(`failed to capture phys_footprint for owned service pid ${pid}: ${detail}`);
+    }
+    const match = /^\s*phys_footprint:\s+([\d.]+)\s+([KMGT]?B)\s*$/im.exec(output);
+    if (!match) {
+        throw new Error(`footprint output for owned service pid ${pid} did not contain phys_footprint with units`);
+    }
+    const unitBytes = {
+        B: 1,
+        KB: 1024,
+        MB: 1024 ** 2,
+        GB: 1024 ** 3,
+        TB: 1024 ** 4,
+    }[match[2]];
+    assert(unitBytes, `recognized footprint unit ${match[2]}`);
+    return Number(((Number(match[1]) * unitBytes) / 1024 ** 2).toFixed(1));
 }
 
 function percentile(values, ratio) {

@@ -454,6 +454,9 @@ pub fn sync_driver(
                     .borrow_mut()
                     .insert(driver.clip_view as usize, (driver_id, gpui_view));
             });
+            LAST_NATIVE_OFFSETS.with(|offsets| {
+                offsets.borrow_mut().remove(&driver_id);
+            });
         }
 
         let target_x = f64::from(offset_x).clamp(0.0, (content_width - width).max(0.0));

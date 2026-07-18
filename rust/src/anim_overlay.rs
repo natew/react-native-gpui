@@ -77,12 +77,12 @@ static MERGED: Lazy<Mutex<HashMap<u64, MergedCache>>> = Lazy::new(|| Mutex::new(
 static LAYOUT_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 // Set true when the most recent host action that scheduled a draw was a paint-only
-// `SetNodeStyle` batch (every changed key is paint-only — backgroundColor/color/opacity/
-// borderColor/shadow/tint/transform — so no taffy box moved). The render gate reads this
+// `SetNodeStyle` batch or a structurally identical React delta with only paint-key changes
+// (backgroundColor/color/opacity/borderColor/shadow/tint/transform). The render gate reads this
 // (via `take_paint_only_frame`) to enable the retained-layout fast path: skip the taffy
 // rebuild + flexbox solve and replay the prior full-layout frame's geometry. ANY other
-// path that schedules a draw and might move a box — a React tree commit, a text-input
-// edit, a scrollTo, a native-layout/resize override, an inspector toggle — clears it via
+// path that schedules a draw and might move a box — a geometry-changing React tree
+// commit, a text-input edit, a scrollTo, a native-layout/resize override, an inspector toggle — clears it via
 // `clear_paint_only_frame()` so that frame falls back to a full layout. It is also
 // consumed (reset to false) every render, so a stale true can never carry into a later
 // non-paint-only frame.
@@ -132,8 +132,8 @@ pub fn arm_paint_only_frame() {
 }
 
 /// Any host action that schedules a draw and might move a layout box calls this to veto
-/// the retained-layout fast path for the resulting frame (tree commit, input edit,
-/// scrollTo, native layout/resize, inspector toggle, …).
+/// the retained-layout fast path for the resulting frame (geometry-changing tree commit,
+/// input edit, scrollTo, native layout/resize, inspector toggle, …).
 pub fn clear_paint_only_frame() {
     PAINT_ONLY_FRAME.store(false, std::sync::atomic::Ordering::Relaxed);
 }

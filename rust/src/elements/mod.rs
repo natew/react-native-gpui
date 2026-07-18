@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use crate::style::ElementStyle;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct AccessibilityInfo {
     pub accessible: Option<bool>,
     pub hidden: bool,
@@ -54,7 +54,7 @@ pub struct AccessibilityInfo {
 
 /// An inline styled run within a `<Text>` — preserves nested `<Text>` styling
 /// (bold lead-ins etc.) that would otherwise be flattened away.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TextRun {
     pub text: String,
     pub font_weight: Option<String>,
@@ -83,7 +83,7 @@ impl NativeResizeEdge {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct NativeResizeSpec {
     pub target: String,
     pub edge: NativeResizeEdge,
@@ -272,6 +272,82 @@ impl ReactElement {
     }
 }
 
+/// True when a React commit preserves the exact host tree and changes only style
+/// keys that paint in place. Delta refs make this proportional to the changed paths:
+/// an unchanged subtree is the same Arc and returns immediately. Unknown fields and
+/// style keys take the safe full-layout path.
+pub fn is_paint_only_tree_update(previous: &Arc<ReactElement>, next: &Arc<ReactElement>) -> bool {
+    if Arc::ptr_eq(previous, next) {
+        return true;
+    }
+    if previous.global_id != next.global_id
+        || previous.element_type != next.element_type
+        || previous.text != next.text
+        || previous.number_of_lines != next.number_of_lines
+        || previous.selectable != next.selectable
+        || previous.runs != next.runs
+        || previous.src != next.src
+        || previous.system_material != next.system_material
+        || previous.system_glass_variant != next.system_glass_variant
+        || previous.system_tint != next.system_tint
+        || previous.system_shadow != next.system_shadow
+        || previous.system_edge_fade != next.system_edge_fade
+        || previous.system_top_fade_start != next.system_top_fade_start
+        || previous.backdrop_blur_radius != next.backdrop_blur_radius
+        || previous.backdrop_tint != next.backdrop_tint
+        || previous.value != next.value
+        || previous.default_value != next.default_value
+        || previous.secure_text_entry != next.secure_text_entry
+        || previous.editable != next.editable
+        || previous.auto_focus != next.auto_focus
+        || previous.placeholder_text_color != next.placeholder_text_color
+        || previous.most_recent_event_count != next.most_recent_event_count
+        || previous.shows_vertical_scroll_indicator != next.shows_vertical_scroll_indicator
+        || previous.shows_horizontal_scroll_indicator != next.shows_horizontal_scroll_indicator
+        || previous.events != next.events
+        || previous.native_layout_key != next.native_layout_key
+        || previous.native_resize != next.native_resize
+        || previous.native_list_group != next.native_list_group
+        || previous.terminal_session_id != next.terminal_session_id
+        || previous.terminal_frames != next.terminal_frames
+        || previous.accessibility != next.accessibility
+        || previous.interactive != next.interactive
+        || previous.pseudo_events != next.pseudo_events
+        || previous.children.len() != next.children.len()
+        || !style_change_is_paint_only(previous.style_json.as_ref(), next.style_json.as_ref())
+    {
+        return false;
+    }
+    previous
+        .children
+        .iter()
+        .zip(&next.children)
+        .all(|(previous, next)| is_paint_only_tree_update(previous, next))
+}
+
+fn style_change_is_paint_only(
+    previous: Option<&serde_json::Value>,
+    next: Option<&serde_json::Value>,
+) -> bool {
+    if previous == next {
+        return true;
+    }
+    let previous = previous.and_then(serde_json::Value::as_object);
+    let next = next.and_then(serde_json::Value::as_object);
+    match (previous, next) {
+        (None, None) => true,
+        (Some(previous), None) => previous
+            .keys()
+            .all(|key| crate::anim_overlay::is_paint_only_key(key)),
+        (None, Some(next)) => next
+            .keys()
+            .all(|key| crate::anim_overlay::is_paint_only_key(key)),
+        (Some(previous), Some(next)) => previous.keys().chain(next.keys()).all(|key| {
+            previous.get(key) == next.get(key) || crate::anim_overlay::is_paint_only_key(key)
+        }),
+    }
+}
+
 pub fn report_layout(element: &ReactElement, bounds: Bounds<Pixels>) {
     let id = element.global_id;
     crate::bridge::remember_layout(
@@ -319,5 +395,24 @@ pub fn create_element(element: Arc<ReactElement>, window_id: u64) -> AnyElement 
             ReactNativeControlElement::new(element).into_any_element()
         }
         _ => ReactDivElement::new(element, window_id).into_element(),
+    }
+}
+
+#[cfg(test)]
+mod paint_only_update_tests {
+    use serde_json::json;
+
+    use super::style_change_is_paint_only;
+
+    #[test]
+    fn accepts_only_geometry_stable_style_differences() {
+        let previous = json!({ "width": 200, "backgroundColor": "#111111" });
+        let paint = json!({ "width": 200, "backgroundColor": "#222222" });
+        let layout = json!({ "width": 240, "backgroundColor": "#222222" });
+        let unknown = json!({ "width": 200, "futureStyle": true });
+
+        assert!(style_change_is_paint_only(Some(&previous), Some(&paint)));
+        assert!(!style_change_is_paint_only(Some(&previous), Some(&layout)));
+        assert!(!style_change_is_paint_only(Some(&previous), Some(&unknown)));
     }
 }

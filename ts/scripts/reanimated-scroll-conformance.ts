@@ -11,15 +11,16 @@ try {
     const started = performance.now();
     const deadline = started + 3_000;
     let target: DumpNode | null = null;
+    let observedY = 0;
     while (performance.now() < deadline) {
-        target = findNativeId(await host.dump(), "reanimated-scroll-target");
-        if (intersectsWindow(target?.bounds)) break;
+        const tree = await host.dump();
+        target = findNativeId(tree, "reanimated-scroll-target");
+        const status = findNativeId(tree, "reanimated-scroll-status");
+        observedY = Number(/^y:(\d+)$/.exec(textContent(status))?.[1]);
+        if (intersectsWindow(target?.bounds) && observedY >= 7_000) break;
         await sleep(12);
     }
     assert(intersectsWindow(target?.bounds), "Reanimated scrollTo did not paint the deep target");
-    const finalTree = await host.dump();
-    const status = findNativeId(finalTree, "reanimated-scroll-status");
-    const observedY = Number(/^y:(\d+)$/.exec(textContent(status))?.[1]);
     assert(observedY >= 7_000, `native onScroll did not acknowledge the clamped worklet offset: ${observedY}`);
     const elapsedMs = performance.now() - started;
     console.log(

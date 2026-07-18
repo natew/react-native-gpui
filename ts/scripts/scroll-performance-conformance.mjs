@@ -41,13 +41,33 @@ try {
 
     const beforeTree = await host.dump();
     const scroll = byTestId(beforeTree, "overview-scroll");
+    const nestedOuter = byTestId(beforeTree, "nested-outer");
+    const nestedInner = byTestId(beforeTree, "nested-inner");
     const anchorBefore = byTestId(beforeTree, "overview-row-020");
-    if (!scroll?.bounds || !anchorBefore?.bounds) throw new Error("fixture scroll bounds were not measured");
+    if (!scroll?.bounds || !nestedOuter?.bounds || !nestedInner?.bounds || !anchorBefore?.bounds) {
+        throw new Error("fixture scroll bounds were not measured");
+    }
 
-    const point = {
-        x: scroll.bounds.x + scroll.bounds.width / 2,
-        y: scroll.bounds.y + scroll.bounds.height / 2,
-    };
+    const center = (node) => ({
+        x: node.bounds.x + node.bounds.width / 2,
+        y: node.bounds.y + node.bounds.height / 2,
+    });
+    const nestedInnerPoint = center(nestedInner);
+    const nestedOuterPoint = center(nestedOuter);
+    await host.request({ $cmd: "scrollDriverStats", ...nestedInnerPoint, reset: true });
+    await host.request({ $cmd: "scrollDriverStats", ...nestedOuterPoint, reset: true });
+    const innerScroll = await host.request({ $cmd: "scrollAt", ...nestedInnerPoint, dx: 0, dy: 200 });
+    if (!innerScroll.ok) throw new Error(`nested inner scroll failed: ${JSON.stringify(innerScroll)}`);
+    const edgeScroll = await host.request({ $cmd: "scrollAt", ...nestedInnerPoint, dx: 0, dy: 40 });
+    if (!edgeScroll.ok) throw new Error(`nested edge scroll failed: ${JSON.stringify(edgeScroll)}`);
+    await sleep(80);
+    const innerStats = await host.request({ $cmd: "scrollDriverStats", ...nestedInnerPoint });
+    const outerStats = await host.request({ $cmd: "scrollDriverStats", ...nestedOuterPoint });
+    if (!innerStats.ok || !outerStats.ok || innerStats.offsetY <= 0 || outerStats.offsetY <= 0) {
+        throw new Error(`nested edge handoff did not reach ancestor: inner=${JSON.stringify(innerStats)} outer=${JSON.stringify(outerStats)}`);
+    }
+
+    const point = center(scroll);
     const initial = await host.request({ $cmd: "scrollDriverStats", ...point, reset: true });
     if (!initial.ok || initial.driver !== "appkit") {
         throw new Error(`expected an AppKit scroll driver, got ${JSON.stringify(initial)}`);

@@ -9,6 +9,24 @@ function App() {
                 Overview
             </Text>
             <ScrollView
+                testID="nested-outer"
+                style={{ height: 72, marginBottom: 12, backgroundColor: "#20242d" }}
+            >
+                <View style={{ height: 140, padding: 6 }}>
+                    <ScrollView
+                        testID="nested-inner"
+                        style={{ height: 52, backgroundColor: "#292f3b" }}
+                        contentContainerStyle={{ height: 128, padding: 4 }}
+                    >
+                        {Array.from({ length: 8 }, (_, index) => (
+                            <Text key={index} style={{ height: 15, color: "#b8c0cf", fontSize: 10 }}>
+                                {`nested ${index}`}
+                            </Text>
+                        ))}
+                    </ScrollView>
+                </View>
+            </ScrollView>
+            <ScrollView
                 testID="overview-scroll"
                 style={{ flex: 1, borderRadius: 10, backgroundColor: "#181b22" }}
                 contentContainerStyle={{ padding: 8 }}

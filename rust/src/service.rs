@@ -1219,6 +1219,22 @@ fn collect_scroll_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
     }
 }
 
+fn collect_scroll_ancestry(
+    el: &Arc<ReactElement>,
+    parent_scroll: Option<u64>,
+    out: &mut HashMap<u64, Option<u64>>,
+) {
+    let current = if matches!(el.style.overflow.as_deref(), Some("scroll") | Some("auto")) {
+        out.insert(el.global_id, parent_scroll);
+        Some(el.global_id)
+    } else {
+        parent_scroll
+    };
+    for child in &el.children {
+        collect_scroll_ancestry(child, current, out);
+    }
+}
+
 /// Collect ids of every node that listens for onLayout, to GC stale dedup state.
 fn collect_layout_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
     if el.listens("layout") {
@@ -1745,6 +1761,9 @@ impl Render for ServiceApp {
             collect_scroll_ids(&self.root, &mut scroll_ids);
             elements::retain_scroll_state(&scroll_ids);
             elements::native_scroll::retain_drivers(&scroll_ids);
+            let mut scroll_ancestry = HashMap::new();
+            collect_scroll_ancestry(&self.root, None, &mut scroll_ancestry);
+            elements::native_scroll::retain_scroll_ancestry(&scroll_ancestry);
 
             if self.inspector.enabled() {
                 inspector::refresh_snapshot_cache(&self.root);

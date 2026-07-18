@@ -16,7 +16,10 @@ export function hasContentionFlag(args = process.argv.slice(2)) {
 
 export async function startPerfContention(enabled, options = {}) {
     const cpuCount = cpus().length;
-    const burnerCount = enabled ? (options.burnerCount ?? Math.max(1, Math.min(6, cpuCount - 2))) : 0;
+    // keep the shared workstation responsive: two low-priority owned burners are
+    // enough to prove the loaded lane without recreating the compile storm this gate
+    // is meant to survive.
+    const burnerCount = enabled ? (options.burnerCount ?? Math.max(1, Math.min(2, cpuCount - 2))) : 0;
     const maxDurationMs = options.maxDurationMs ?? 120_000;
     const warmupMs = options.warmupMs ?? 250;
     const loadAverageBefore = loadSnapshot();

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { render, StyleSheet, Text, TextInput, View } from "../src/index";
+import { Pressable, render, StyleSheet, Text, TextInput, View } from "../src/index";
 
 const LARGE_TREE_NODES = 800;
 const decorationRows = Array.from({ length: LARGE_TREE_NODES }, (_, index) => index);
@@ -13,6 +13,7 @@ function App() {
     const [eventCount, setEventCount] = useState(0);
     const [submitted, setSubmitted] = useState("");
     const [composingEnter, setComposingEnter] = useState(false);
+    const [primaryEditable, setPrimaryEditable] = useState(true);
     const primaryFocuses = useRef(0);
     const secondaryFocuses = useRef(0);
 
@@ -35,6 +36,7 @@ function App() {
                     testID="primary-input"
                     autoFocus
                     multiline
+                    editable={primaryEditable}
                     value={draft}
                     onChangeText={setDraft}
                     onChange={(event) => {
@@ -89,8 +91,16 @@ function App() {
                         composingEnter,
                         primaryFocuses: primaryFocuses.current,
                         secondaryFocuses: secondaryFocuses.current,
+                        primaryEditable,
                     })}
                 </Text>
+                <Pressable
+                    testID="disable-primary"
+                    style={styles.disableButton}
+                    onPress={() => setPrimaryEditable(false)}
+                >
+                    <Text style={styles.disableButtonText}>Disable primary</Text>
+                </Pressable>
             </View>
         </View>
     );
@@ -143,6 +153,17 @@ const styles = StyleSheet.create({
         color: "#d8deec",
         fontSize: 11,
         lineHeight: 15,
+    },
+    disableButton: {
+        height: 30,
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: 6,
+        backgroundColor: "#353c4b",
+    },
+    disableButtonText: {
+        color: "#ffffff",
+        fontSize: 12,
     },
 });
 

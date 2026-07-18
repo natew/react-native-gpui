@@ -742,7 +742,6 @@ struct ServiceApp {
     last_h: f64,
     // persistent gpui-component input state, one per <TextInput>/<TextArea> id.
     inputs: HashMap<u64, Entity<InputState>>,
-    input_values: HashMap<u64, Option<String>>,
     input_placeholders: HashMap<u64, String>,
     input_secure: HashMap<u64, bool>,
     input_event_counts: HashMap<u64, u64>,
@@ -1110,6 +1109,16 @@ fn position_for_byte_offset(text: &str, byte_offset: usize) -> Position {
     Position { line, character }
 }
 
+fn should_apply_input_value(
+    native_value: &str,
+    prop_value: Option<&str>,
+    most_recent_event_count: u64,
+    native_event_count: u64,
+) -> bool {
+    most_recent_event_count >= native_event_count
+        && prop_value.is_some_and(|value| value != native_value)
+}
+
 fn value_without_submit_newline(input: &InputState) -> Option<(String, Position)> {
     let value = input.value().to_string();
     let cursor = input.cursor().min(value.len());
@@ -1431,7 +1440,6 @@ impl Render for ServiceApp {
                 ax::set_focused_text_node(id, false);
             }
             self.inputs.retain(|id, _| present.contains(id));
-            self.input_values.retain(|id, _| present.contains(id));
             self.input_placeholders.retain(|id, _| present.contains(id));
             self.input_secure.retain(|id, _| present.contains(id));
             self.input_event_counts.retain(|id, _| present.contains(id));
@@ -1449,6 +1457,9 @@ impl Render for ServiceApp {
             } in specs
             {
                 if !editable && self.focused_input == Some(id) {
+                    self.focused_input = None;
+                    #[cfg(target_os = "macos")]
+                    ax::set_focused_text_node(id, false);
                     window.focus(&self.app_focus);
                 }
                 if !self.inputs.contains_key(&id) {
@@ -1564,7 +1575,6 @@ impl Render for ServiceApp {
                     })
                     .detach();
                     self.inputs.insert(id, state);
-                    self.input_values.insert(id, value);
                     self.input_placeholders.insert(id, placeholder);
                     self.input_secure.insert(id, secure);
                     self.input_event_counts.insert(id, 0);
@@ -1574,28 +1584,33 @@ impl Render for ServiceApp {
                     {
                         state.update(cx, |input, cx| input.focus(window, cx));
                     }
-                } else if self.input_values.get(&id) != Some(&value) {
+                } else {
                     let native_event_count = self.input_event_counts.get(&id).copied().unwrap_or(0);
-                    if most_recent_event_count >= native_event_count
-                        && let Some(next_value) = value.clone()
+                    let state = self.inputs.get(&id).cloned();
+                    let should_apply = state.as_ref().is_some_and(|state| {
+                        should_apply_input_value(
+                            state.read(cx).value().as_ref(),
+                            value.as_deref(),
+                            most_recent_event_count,
+                            native_event_count,
+                        )
+                    });
+                    if should_apply
+                        && let Some(next_value) = value
+                        && let Some(state) = state
                     {
-                        if let Some(state) = self.inputs.get(&id) {
-                            state.update(cx, |input, cx| {
-                                if input.value().as_ref() != next_value.as_str() {
-                                    let cursor_position =
-                                        position_for_byte_offset(&next_value, next_value.len());
-                                    suppress_next_input_change(
-                                        &mut self.suppressed_input_changes,
-                                        id,
-                                        next_value.clone(),
-                                    );
-                                    input.set_value(next_value, window, cx);
-                                    input.set_cursor_position_without_focus(cursor_position, cx);
-                                }
-                            });
-                        }
+                        let cursor_position =
+                            position_for_byte_offset(&next_value, next_value.len());
+                        suppress_next_input_change(
+                            &mut self.suppressed_input_changes,
+                            id,
+                            next_value.clone(),
+                        );
+                        state.update(cx, |input, cx| {
+                            input.set_value(next_value, window, cx);
+                            input.set_cursor_position_without_focus(cursor_position, cx);
+                        });
                     }
-                    self.input_values.insert(id, value);
                 }
                 if self.input_placeholders.get(&id) != Some(&placeholder) {
                     if let Some(state) = self.inputs.get(&id) {
@@ -2767,7 +2782,6 @@ fn main() {
             last_w: 0.0,
             last_h: 0.0,
             inputs: HashMap::new(),
-            input_values: HashMap::new(),
             input_placeholders: HashMap::new(),
             input_secure: HashMap::new(),
             input_event_counts: HashMap::new(),
@@ -4434,6 +4448,7 @@ mod tests {
     use super::{
         AppCommandBinding, AppCommandBindingSlot, Incoming, TerminalFrameKind,
         app_command_key_bindings, parse_incoming, parse_real_keystroke, position_for_byte_offset,
+        should_apply_input_value,
     };
     use gpui::{KeyContext, Keymap, Keystroke};
     use serde_json::json;
@@ -4750,6 +4765,32 @@ mod tests {
         let end = position_for_byte_offset(text, text.len());
         assert_eq!(end.line, 1);
         assert_eq!(end.character, 6);
+    }
+
+    #[test]
+    fn acknowledged_controlled_value_restores_native_text_after_stale_commit() {
+        let native_value = "native edit";
+        let controlled_value = "react value";
+
+        assert!(!should_apply_input_value(
+            native_value,
+            Some(controlled_value),
+            0,
+            1,
+        ));
+        assert!(should_apply_input_value(
+            native_value,
+            Some(controlled_value),
+            1,
+            1,
+        ));
+        assert!(!should_apply_input_value(
+            controlled_value,
+            Some(controlled_value),
+            1,
+            1,
+        ));
+        assert!(!should_apply_input_value(native_value, None, 1, 1));
     }
 
     #[test]

@@ -14,6 +14,7 @@ type InputStatus = {
     composingEnter: boolean;
     primaryFocuses: number;
     secondaryFocuses: number;
+    primaryEditable: boolean;
 };
 
 type InputSnapshot = {
@@ -50,6 +51,7 @@ try {
     const primary = requireTestId(initialTree, "primary-input");
     const secondary = requireTestId(initialTree, "secondary-input");
     const placeholderColorInput = requireTestId(initialTree, "placeholder-color-input");
+    const disablePrimary = requireTestId(initialTree, "disable-primary");
     const nodes = countNodes(initialTree);
     assert(nodes >= 1_600, `large-tree fixture only rendered ${nodes} nodes`);
 
@@ -271,6 +273,21 @@ try {
     assert(snapshot.value === submitted.draft, "controlled submit left the native newline behind");
     assert(snapshot.focusedId === primary.globalId, "controlled submit lost focus");
     assert((snapshot.eventCount ?? 0) === submitted.eventCount, "native and React event counters diverged");
+
+    await realTap(host, disablePrimary);
+    await waitForStatus(
+        host,
+        "editable true-to-false blur",
+        (status) => !status.primaryEditable && status.focused === "none",
+    );
+    const disabledSnapshot = await host.request<InputSnapshot>({ $cmd: "inputState" });
+    assert(!disabledSnapshot.ok, "disabling the focused input left focused_input populated");
+    const disabledAxFocus = await host.request<{ ok: boolean }>({
+        $cmd: "axFocus",
+        id: primary.globalId,
+        focused: true,
+    });
+    assert(!disabledAxFocus.ok, "AX refocused an editable=false InputState");
 
     const focus = summarize(focusLatencies);
     const key = summarize(keyLatencies);

@@ -97,12 +97,26 @@ try {
     if (!began.ok || began.hitTargetId !== nestedStats.targetId) {
         throw new Error(`real AppKit begin did not hit the deepest nested driver: ${JSON.stringify(began)}`);
     }
+    assertReferenceMatch(began, "nested gesture begin");
     const changedOverOuter = await wheel(outerPoint, 20, "changed");
-    if (!changedOverOuter.ok || changedOverOuter.hitTargetId !== outerStats.targetId) {
+    if (
+        !changedOverOuter.ok ||
+        changedOverOuter.hitTargetId !== outerStats.targetId ||
+        changedOverOuter.effectiveTargetId !== nestedStats.targetId
+    ) {
         throw new Error(`changed phase did not enter through the outer driver: ${JSON.stringify(changedOverOuter)}`);
     }
-    await wheel(outerPoint, 20, "none", "changed");
-    await wheel(outerPoint, 0, "none", "ended");
+    assertReferenceMatch(changedOverOuter, "nested pointer crossing");
+    const nestedMomentum = await wheel(outerPoint, 20, "none", "changed");
+    if (nestedMomentum.effectiveTargetId !== nestedStats.targetId) {
+        throw new Error(`momentum escaped the nested gesture owner: ${JSON.stringify(nestedMomentum)}`);
+    }
+    assertReferenceMatch(nestedMomentum, "nested momentum");
+    const nestedMomentumEnd = await wheel(outerPoint, 0, "none", "ended");
+    if (nestedMomentumEnd.effectiveTargetId !== nestedStats.targetId) {
+        throw new Error(`momentum end escaped the nested gesture owner: ${JSON.stringify(nestedMomentumEnd)}`);
+    }
+    assertReferenceMatch(nestedMomentumEnd, "nested momentum end");
     await sleep(30);
     const innerAfterLockedGesture = await host.request({ $cmd: "scrollDriverStats", ...nestedPoint });
     const outerAfterLockedGesture = await host.request({ $cmd: "scrollDriverStats", ...outerPoint });
@@ -139,6 +153,8 @@ try {
     // same non-activating window. Both receive the identical phased NSEvent stream.
     await host.request({ $cmd: "scrollAt", ...point, dx: 0, dy: 1_000 });
     await sleep(20);
+    const decayBaseline = await host.request({ $cmd: "scrollDriverStats", ...point });
+    if (!decayBaseline.ok) throw new Error(`distance baseline was unavailable: ${JSON.stringify(decayBaseline)}`);
     const decaySequence = [
         [48, "began", "none"],
         [40, "changed", "none"],
@@ -150,12 +166,20 @@ try {
         [2, "none", "changed"],
         [0, "none", "ended"],
     ];
-    const decaySamples = [];
+    const decayProofs = [];
     for (const [dy, phase, momentumPhase] of decaySequence) {
         const sample = await wheel(point, dy, phase, momentumPhase);
         assertReferenceMatch(sample, `distance/decay ${phase}/${momentumPhase}`);
-        decaySamples.push(sample.offsetY);
+        decayProofs.push(sample);
     }
+    const directDistance = decayProofs[1].offsetY - decayBaseline.offsetY;
+    const referenceDirectDistance = decayProofs[1].referenceOffsetY - decayBaseline.offsetY;
+    if (directDistance < 60 || referenceDirectDistance < 60) {
+        throw new Error(
+            `stock-matched direct gesture moved only production=${directDistance.toFixed(2)}px reference=${referenceDirectDistance.toFixed(2)}px`,
+        );
+    }
+    const decaySamples = decayProofs.map((sample) => sample.offsetY);
     const momentumOffsets = decaySamples.slice(2, 8);
     const momentumDistances = momentumOffsets.slice(1).map((offset, index) => offset - momentumOffsets[index]);
     if (momentumDistances[0] < 20 || momentumDistances.some((distance) => distance < -0.5)) {

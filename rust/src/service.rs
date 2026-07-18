@@ -1392,9 +1392,10 @@ impl Render for ServiceApp {
         // ── retained-layout fast path decision ───────────────────────────────────────
         // Consume the paint-only-frame flag EVERY render (so a stale `true` can never leak
         // into a later frame), then engage the retained-layout reuse only when this frame
-        // is provably geometry-stable: the trigger was a paint-only `SetNodeStyle`
-        // (`paint_only`), AND no new React tree (`root_dirty`), AND no animated layout key
-        // moved (`layout_dirty`), AND the window didn't resize, AND no pane-resize drag /
+        // is provably geometry-stable: the trigger was a paint-only `SetNodeStyle` or a
+        // structurally identical React delta whose changed keys are all paint-only. A
+        // different React tree still vetoes reuse. No animated layout key may have moved
+        // (`layout_dirty`), the window must not have resized, and no pane-resize drag /
         // native-layout animation is mid-flight, AND the inspector overlay (which adds a
         // structural child) is off. Any of those forces a full taffy solve — the safe
         // direction. When it engages, `window.prepare_layout_frame(true)` replays the prior
@@ -1408,7 +1409,7 @@ impl Render for ServiceApp {
         // every repaint and assert pixel/bounds parity. Never set in production.
         let force_reuse = std::env::var_os("RNGPUI_FORCE_RETAINED_LAYOUT").is_some();
         let want_reuse = (paint_only || force_reuse)
-            && !self.root_dirty
+            && (!self.root_dirty || paint_only)
             && !layout_dirty
             && !viewport_changed
             && !elements::native_resize_active()
@@ -3956,6 +3957,7 @@ fn main() {
                             "ok": proof.as_ref().is_some_and(|proof| proof.dispatched),
                             "type": "nativeDriverWheel",
                             "hitTargetId": proof.as_ref().and_then(|proof| proof.hit_driver_id),
+                            "effectiveTargetId": proof.as_ref().and_then(|proof| proof.effective_driver_id),
                             "offsetX": proof.as_ref().map(|proof| proof.offset_x),
                             "offsetY": proof.as_ref().map(|proof| proof.offset_y),
                             "referenceOffsetX": proof.as_ref().map(|proof| proof.reference_offset_x),
@@ -4162,6 +4164,13 @@ fn main() {
                         let applied = pump.update(cx, |this, cx| match msg {
                             Incoming::Tree(t) => {
                                 let next_root = fill_root(t);
+                                let root_paint_only =
+                                    elements::is_paint_only_tree_update(&this.root, &next_root);
+                                if root_paint_only {
+                                    crate::anim_overlay::arm_paint_only_frame();
+                                } else {
+                                    crate::anim_overlay::clear_paint_only_frame();
+                                }
                                 let mut node_ids = HashSet::new();
                                 collect_node_ids(&next_root, &mut node_ids);
                                 bridge::retain_layout(&node_ids);

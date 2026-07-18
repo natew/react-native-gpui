@@ -195,6 +195,7 @@ extern "C" fn scroll_hit_test(this: &Object, _: Sel, point: NSPoint) -> id {
 #[derive(Clone, Debug)]
 pub struct NativeScrollProof {
     pub hit_driver_id: Option<u64>,
+    pub effective_driver_id: Option<u64>,
     pub dispatched: bool,
     pub offset_x: f64,
     pub offset_y: f64,
@@ -298,6 +299,7 @@ pub fn native_scroll_proof(
     let Some((parent_view, gpui_view)) = webview_parent(window) else {
         return NativeScrollProof {
             hit_driver_id: None,
+            effective_driver_id: None,
             dispatched: false,
             offset_x: 0.0,
             offset_y: 0.0,
@@ -308,6 +310,7 @@ pub fn native_scroll_proof(
     let Some(phase) = event_phase(phase) else {
         return NativeScrollProof {
             hit_driver_id: None,
+            effective_driver_id: None,
             dispatched: false,
             offset_x: 0.0,
             offset_y: 0.0,
@@ -318,6 +321,7 @@ pub fn native_scroll_proof(
     let Some(momentum_phase) = event_phase(momentum_phase) else {
         return NativeScrollProof {
             hit_driver_id: None,
+            effective_driver_id: None,
             dispatched: false,
             offset_x: 0.0,
             offset_y: 0.0,
@@ -367,6 +371,7 @@ pub fn native_scroll_proof(
         let Some(hit_driver_id) = hit_driver_id else {
             return NativeScrollProof {
                 hit_driver_id: None,
+                effective_driver_id: None,
                 dispatched: false,
                 offset_x: 0.0,
                 offset_y: 0.0,
@@ -379,6 +384,7 @@ pub fn native_scroll_proof(
         if cg_event == nil {
             return NativeScrollProof {
                 hit_driver_id: Some(hit_driver_id),
+                effective_driver_id: None,
                 dispatched: false,
                 offset_x: 0.0,
                 offset_y: 0.0,
@@ -398,6 +404,7 @@ pub fn native_scroll_proof(
         if ns_event == nil {
             return NativeScrollProof {
                 hit_driver_id: Some(hit_driver_id),
+                effective_driver_id: None,
                 dispatched: false,
                 offset_x: 0.0,
                 offset_y: 0.0,
@@ -405,17 +412,24 @@ pub fn native_scroll_proof(
                 reference_offset_y: 0.0,
             };
         }
-        let driver = DRIVERS.with(|drivers| drivers.borrow().get(&hit_driver_id).copied());
+        let effective_driver_id = if phase == 1 || phase == 32 {
+            hit_driver_id
+        } else if phase != 0 || momentum_phase != 0 {
+            ACTIVE_DRIVER.with(|active| active.borrow().unwrap_or(hit_driver_id))
+        } else {
+            hit_driver_id
+        };
+        let driver = DRIVERS.with(|drivers| drivers.borrow().get(&effective_driver_id).copied());
         let reference = driver.map(|driver| {
             REFERENCE_DRIVERS.with(|references| {
                 let mut references = references.borrow_mut();
                 if phase == 1 || phase == 32 {
-                    if let Some(previous) = references.remove(&hit_driver_id) {
+                    if let Some(previous) = references.remove(&effective_driver_id) {
                         release_reference(previous);
                     }
                 }
                 *references
-                    .entry(hit_driver_id)
+                    .entry(effective_driver_id)
                     .or_insert_with(|| create_reference(driver))
             })
         });
@@ -423,7 +437,8 @@ pub fn native_scroll_proof(
         if let Some(reference) = reference {
             let _: () = msg_send![reference.scroll_view, scrollWheel: ns_event];
         }
-        let clip: id = msg_send![hit_scroll_view, contentView];
+        let effective_scroll_view = driver.map_or(hit_scroll_view, |driver| driver.scroll_view);
+        let clip: id = msg_send![effective_scroll_view, contentView];
         let clip_bounds: NSRect = msg_send![clip, bounds];
         let reference_bounds = reference.map(|reference| {
             let bounds: NSRect = msg_send![reference.clip_view, bounds];
@@ -431,6 +446,7 @@ pub fn native_scroll_proof(
         });
         NativeScrollProof {
             hit_driver_id: Some(hit_driver_id),
+            effective_driver_id: Some(effective_driver_id),
             dispatched: true,
             offset_x: clip_bounds.origin.x,
             offset_y: clip_bounds.origin.y,
@@ -451,6 +467,7 @@ pub fn native_scroll_proof(
 ) -> NativeScrollProof {
     NativeScrollProof {
         hit_driver_id: None,
+        effective_driver_id: None,
         dispatched: false,
         offset_x: 0.0,
         offset_y: 0.0,

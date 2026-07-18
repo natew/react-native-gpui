@@ -458,7 +458,7 @@ pub fn sync_driver(
 
         let target_x = f64::from(offset_x).clamp(0.0, (content_width - width).max(0.0));
         let target_y = f64::from(offset_y).clamp(0.0, (content_height - height).max(0.0));
-        let mut matches_native_report = false;
+        let matches_native_report;
         unsafe {
             let next_bounds = (x, y, width, height);
             if !bounds_close(driver.last_bounds, next_bounds) {

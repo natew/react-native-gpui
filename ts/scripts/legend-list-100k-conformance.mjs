@@ -35,6 +35,7 @@ rmSync(failureLogPath, { force: true });
 try {
     process.env.RNGPUI_STARTUP_TIMING = "1";
     process.env.RNGPUI_FRAME_TRACE = "1";
+    process.env.RNGPUI_DRAW_PROBE = "1";
     process.env.RNGPUI_SERIALIZE_TRACE = "1";
     process.env.RNGPUI_SHOT_SETTLE_MS = "1";
     process.env.RNGPUI_WIRE_TRACE = "1";
@@ -147,6 +148,10 @@ try {
         nodesRebuilt: Number(match[7]),
     }));
     const nativeFrameTotals = nativeFrameSamples.map(({ totalMs }) => totalMs);
+    const drawSamples = [...scrollLog.matchAll(/^\[draw\] ([\d.]+)ms reuse=(true|false)$/gm)].map(
+        (match) => ({ totalMs: Number(match[1]), reusedLayout: match[2] === "true" }),
+    );
+    const drawTotals = drawSamples.map(({ totalMs }) => totalMs);
     const wireSamples = [...scrollLog.matchAll(/\[wire\] refs=(\d+) full=(\d+)/g)].map((match) => ({
         refs: Number(match[1]),
         full: Number(match[2]),
@@ -256,6 +261,10 @@ try {
             nativeFramesMeasured: nativeFrameTotals.length,
             nativeFrameP50Ms: percentile(nativeFrameTotals, 0.5),
             nativeFrameP95Ms: percentile(nativeFrameTotals, 0.95),
+            drawSamples: drawSamples.length,
+            drawP50Ms: percentile(drawTotals, 0.5),
+            drawP95Ms: percentile(drawTotals, 0.95),
+            drawFullLayoutFrames: drawSamples.filter(({ reusedLayout }) => !reusedLayout).length,
             nativeCreateP95Ms: percentile(
                 nativeFrameSamples.map(({ createMs }) => createMs),
                 0.95,
@@ -301,14 +310,15 @@ try {
     assert(startup.legendAppMs !== null, "captured LegendList onLoad timing");
     assert(startup.launchToUsableMs <= 200, `launch-to-usable list <=200ms, saw ${startup.launchToUsableMs}ms`);
     assert(
-        report.scroll.nativeFrameP95Ms !== null && report.scroll.nativeFrameP95Ms <= nativeFrameP95BudgetMs,
-        `native scroll-frame p95 <=${nativeFrameP95BudgetMs}ms in ${report.contention.mode} mode, saw ${report.scroll.nativeFrameP95Ms}ms`,
+        report.scroll.drawP95Ms !== null && report.scroll.drawP95Ms <= nativeFrameP95BudgetMs,
+        `whole-draw scroll p95 <=${nativeFrameP95BudgetMs}ms in ${report.contention.mode} mode, saw ${report.scroll.drawP95Ms}ms`,
     );
     assert(
         report.scroll.commandRoundTripP95Ms !== null && report.scroll.commandRoundTripP95Ms <= 8.33,
         `scroll command round-trip p95 <=8.33ms, saw ${report.scroll.commandRoundTripP95Ms}ms`,
     );
     assert(nativeFrameTotals.length >= 20, `captured enough native scroll frames, saw ${nativeFrameTotals.length}`);
+    assert(drawTotals.length >= 20, `captured enough whole-draw scroll frames, saw ${drawTotals.length}`);
 
     console.log(`LEGEND_100K_METRICS ${JSON.stringify(report)}`);
     console.log(`LEGEND_100K_REPORT ${reportPath}`);

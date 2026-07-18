@@ -280,6 +280,7 @@ pub fn is_paint_only_tree_update(previous: &Arc<ReactElement>, next: &Arc<ReactE
     if Arc::ptr_eq(previous, next) {
         return true;
     }
+    let fixed_box_input = matches!(previous.element_type.as_str(), "textinput" | "textarea");
     if previous.global_id != next.global_id
         || previous.element_type != next.element_type
         || previous.text != next.text
@@ -295,13 +296,13 @@ pub fn is_paint_only_tree_update(previous: &Arc<ReactElement>, next: &Arc<ReactE
         || previous.system_top_fade_start != next.system_top_fade_start
         || previous.backdrop_blur_radius != next.backdrop_blur_radius
         || previous.backdrop_tint != next.backdrop_tint
-        || previous.value != next.value
+        || (!fixed_box_input && previous.value != next.value)
         || previous.default_value != next.default_value
         || previous.secure_text_entry != next.secure_text_entry
         || previous.editable != next.editable
         || previous.auto_focus != next.auto_focus
         || previous.placeholder_text_color != next.placeholder_text_color
-        || previous.most_recent_event_count != next.most_recent_event_count
+        || (!fixed_box_input && previous.most_recent_event_count != next.most_recent_event_count)
         || previous.shows_vertical_scroll_indicator != next.shows_vertical_scroll_indicator
         || previous.shows_horizontal_scroll_indicator != next.shows_horizontal_scroll_indicator
         || previous.events != next.events

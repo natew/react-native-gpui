@@ -1585,10 +1585,12 @@ impl Render for ServiceApp {
                         },
                     )
                     .detach();
-                    // re-render this view when the input's contents/cursor change. An edit
-                    // can resize the text box (and moves the caret), so veto the retained-
-                    // layout fast path for the resulting frame even if it coalesces with a
-                    // paint-only overlay write — force a full taffy solve.
+                    // re-render when contents, selection, or cursor change. RNGPUI always
+                    // hosts this editor inside the React node's resolved box (textarea uses
+                    // h_full; single-line uses the wrapper height), so editing changes its
+                    // internal shaped lines and paint geometry without moving the host box.
+                    // Prepaint still reshapes text/caret/selection/IME geometry on a retained
+                    // frame; only the unchanged outer Taffy boxes are replayed.
                     cx.observe(&state, move |_this, input, cx| {
                         #[cfg(target_os = "macos")]
                         {
@@ -1599,7 +1601,7 @@ impl Render for ServiceApp {
                                 input.selected_text_value(),
                             );
                         }
-                        crate::anim_overlay::clear_paint_only_frame();
+                        crate::anim_overlay::arm_paint_only_frame();
                         cx.notify();
                     })
                     .detach();

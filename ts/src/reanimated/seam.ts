@@ -22,6 +22,8 @@
 // NativeSeam() runs at module load (this file is evaluated by the bundler's seam redirect
 // before upstream's core.ts imports resolve).
 
+import { registerWorkletBuiltin } from './worklet-runtime'
+
 interface MeasuredDimensions {
   x: number
   y: number
@@ -244,6 +246,11 @@ function engineMeasure(_node: unknown): MeasuredDimensions | null {
 
 function engineScrollTo(animatedRef: unknown, x: unknown, y: unknown): void {
   const globalId = resolveGlobalId(animatedRef)
+  if (SEAM_DEBUG) {
+    console.error(
+      `[seam] scrollTo target=${String(globalId)} x=${String(x)} y=${String(y)} host=${typeof __rngpui_scrollTo}`,
+    )
+  }
   if (
     globalId == null ||
     typeof x !== 'number' ||
@@ -525,6 +532,7 @@ function markWorkletBuiltin<T extends (...args: never[]) => unknown>(name: strin
     configurable: true,
   })
   Object.defineProperty(fn, '__closure', { value: {}, enumerable: false, configurable: true, writable: true })
+  registerWorkletBuiltin(name, fn)
   return fn
 }
 

@@ -30,6 +30,7 @@ import {
   SHAREABLE_ID_KEY,
   __WORKLET_RUNTIME_INTERNALS,
 } from "../src/reanimated/worklet-runtime.ts";
+import { scrollTo } from "../src/reanimated/seam.ts";
 
 let failed = false;
 function check(name, ok, detail = "") {
@@ -62,6 +63,19 @@ const uiChannel = {
 };
 react = new WorkletRuntime({ channel: reactChannel, buffer, role: "react" });
 ui = new WorkletRuntime({ channel: uiChannel, buffer, role: "ui" });
+
+// =========================================================================
+// 0. platform functions cross by stable builtin name. their implementation is
+// bundled as Hermes bytecode, whose Function#toString is not executable source.
+// =========================================================================
+{
+  const spec = serializeValue(scrollTo);
+  check(
+    "platform-builtin-serializes-by-name",
+    spec.kind === "builtin" && spec.name === "scrollTo",
+    `spec=${JSON.stringify(spec)}`,
+  );
+}
 
 // =========================================================================
 // 1. slot alloc striping — react even, ui odd

@@ -96,7 +96,7 @@ export function createRoot(options: RootOptions = {}): Root {
         }
         if (lastTree && sameTree(tree, lastTree)) return;
         const wire = toWireDelta(tree, sentNodes);
-        if (typeof process !== "undefined" && process.env.RNGPUI_WIRE_TRACE) {
+        if (typeof process !== "undefined" && process.env?.RNGPUI_WIRE_TRACE) {
             // diagnostic: how much of the wire crossed as refs vs full nodes —
             // pairs with RNGPUI_SERIALIZE_TRACE to localize delta regressions
             // (memo hitting but wire full = the WeakSet membership is broken).

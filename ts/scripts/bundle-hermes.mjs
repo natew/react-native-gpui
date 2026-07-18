@@ -31,16 +31,11 @@ const result = await Bun.build({
   define: {
     'process.env.NODE_ENV': JSON.stringify(mode),
     __DEV__: mode === 'development' ? 'true' : 'false',
-    // the Hermes host provides an empty process.env at runtime, so fixtures and
-    // diagnostics can't read host env vars live. inline the selected values at
-    // bundle time while keeping the default production bundle quiet.
+    // appearance conformance selects light or dark when producing its fixture so
+    // the emitted bytecode remains deterministic across host system themes.
     'process.env.RNGPUI_INPUT_FIXTURE_APPEARANCE': JSON.stringify(
       process.env.RNGPUI_INPUT_FIXTURE_APPEARANCE || '',
     ),
-    'process.env.RNGPUI_SERIALIZE_TRACE': JSON.stringify(
-      process.env.RNGPUI_SERIALIZE_TRACE || '',
-    ),
-    'process.env.RNGPUI_WIRE_TRACE': JSON.stringify(process.env.RNGPUI_WIRE_TRACE || ''),
   },
   // wire real react-native-reanimated@4 + worklets for the embedded Hermes target:
   // worklet babel transform (content-gated) + native-seam redirect to ts/src/reanimated.

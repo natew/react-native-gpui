@@ -340,6 +340,14 @@ fn parse_json_tree(
         .get("placeholderTextColor")
         .and_then(|v| v.as_str())
         .and_then(crate::style::parse_css_color);
+    let shows_vertical_scroll_indicator = obj
+        .get("showsVerticalScrollIndicator")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let shows_horizontal_scroll_indicator = obj
+        .get("showsHorizontalScrollIndicator")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let events: Vec<String> = obj
         .get("events")
         .and_then(|v| v.as_array())
@@ -464,6 +472,8 @@ fn parse_json_tree(
         auto_focus,
         placeholder_text_color,
         most_recent_event_count,
+        shows_vertical_scroll_indicator,
+        shows_horizontal_scroll_indicator,
         events,
         native_layout_key,
         native_resize,
@@ -1919,6 +1929,8 @@ fn fallback_root() -> Arc<ReactElement> {
         auto_focus: false,
         placeholder_text_color: None,
         most_recent_event_count: 0,
+        shows_vertical_scroll_indicator: true,
+        shows_horizontal_scroll_indicator: true,
         events: Vec::new(),
         native_layout_key: None,
         native_resize: None,

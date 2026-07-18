@@ -171,6 +171,9 @@ pub struct ReactElement {
     pub placeholder_text_color: Option<Hsla>,
     /// latest native edit acknowledged by the serialized controlled value.
     pub most_recent_event_count: u64,
+    /// RN ScrollView overlay-scroller visibility; input/physics remain native.
+    pub shows_vertical_scroll_indicator: bool,
+    pub shows_horizontal_scroll_indicator: bool,
     /// event names this node listens to: "press", "changeText", "layout", …
     pub events: Vec<String>,
     /// native-only key for runtime layout overrides, bypassing React commits.

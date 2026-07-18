@@ -1355,6 +1355,8 @@ mod tests {
             auto_focus: false,
             placeholder_text_color: None,
             most_recent_event_count: 0,
+            shows_vertical_scroll_indicator: true,
+            shows_horizontal_scroll_indicator: true,
             events: Vec::new(),
             native_layout_key: None,
             native_resize: None,

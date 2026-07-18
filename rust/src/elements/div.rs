@@ -1745,6 +1745,8 @@ impl Element for ReactDivElement {
                 f32::from(content_h),
                 off.x,
                 off.y,
+                self.element.shows_horizontal_scroll_indicator,
+                self.element.shows_vertical_scroll_indicator,
             );
             if take_scroll_event(self.element.global_id) && self.element.listens("scroll") {
                 let width: f32 = bounds.size.width.into();

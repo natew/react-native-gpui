@@ -57,6 +57,8 @@ struct Driver {
     last_content: (f64, f64),
     horizontal: Option<bool>,
     vertical: Option<bool>,
+    shows_horizontal_scroller: Option<bool>,
+    shows_vertical_scroller: Option<bool>,
     scrollable: Option<bool>,
 }
 
@@ -386,6 +388,8 @@ unsafe fn create_driver(driver_id: u64, gpui_view: id) -> Driver {
         last_content: (f64::NAN, f64::NAN),
         horizontal: None,
         vertical: None,
+        shows_horizontal_scroller: None,
+        shows_vertical_scroller: None,
         scrollable: None,
     }
 }
@@ -424,6 +428,8 @@ pub fn sync_driver(
     content_height: f32,
     offset_x: f32,
     offset_y: f32,
+    shows_horizontal_scroller: bool,
+    shows_vertical_scroller: bool,
 ) {
     let Some((_, gpui_view)) = webview_parent(window) else {
         return;
@@ -478,8 +484,6 @@ pub fn sync_driver(
                 driver.last_content = next_content;
             }
             if driver.horizontal != Some(horizontal) {
-                let value = if horizontal { YES } else { NO };
-                let _: () = msg_send![driver.scroll_view, setHasHorizontalScroller: value];
                 let elasticity = if horizontal {
                     NS_SCROLL_ELASTICITY_ALLOWED
                 } else {
@@ -490,8 +494,6 @@ pub fn sync_driver(
                 driver.horizontal = Some(horizontal);
             }
             if driver.vertical != Some(vertical) {
-                let value = if vertical { YES } else { NO };
-                let _: () = msg_send![driver.scroll_view, setHasVerticalScroller: value];
                 let elasticity = if vertical {
                     NS_SCROLL_ELASTICITY_ALLOWED
                 } else {
@@ -499,6 +501,18 @@ pub fn sync_driver(
                 };
                 let _: () = msg_send![driver.scroll_view, setVerticalScrollElasticity: elasticity];
                 driver.vertical = Some(vertical);
+            }
+            let show_horizontal = horizontal && shows_horizontal_scroller;
+            if driver.shows_horizontal_scroller != Some(show_horizontal) {
+                let value = if show_horizontal { YES } else { NO };
+                let _: () = msg_send![driver.scroll_view, setHasHorizontalScroller: value];
+                driver.shows_horizontal_scroller = Some(show_horizontal);
+            }
+            let show_vertical = vertical && shows_vertical_scroller;
+            if driver.shows_vertical_scroller != Some(show_vertical) {
+                let value = if show_vertical { YES } else { NO };
+                let _: () = msg_send![driver.scroll_view, setHasVerticalScroller: value];
+                driver.shows_vertical_scroller = Some(show_vertical);
             }
             let clip_bounds: NSRect = msg_send![driver.clip_view, bounds];
             matches_native_report = LAST_NATIVE_OFFSETS.with(|offsets| {
@@ -553,6 +567,8 @@ pub fn sync_driver(
     _content_height: f32,
     _offset_x: f32,
     _offset_y: f32,
+    _shows_horizontal_scroller: bool,
+    _shows_vertical_scroller: bool,
 ) {
 }
 

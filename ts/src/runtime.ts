@@ -43,6 +43,9 @@ export type SerializedNode = {
     name?: string;
     placeholder?: string;
     placeholderTextColor?: string;
+    /** RN ScrollView overlay-scroller visibility. Scrolling stays enabled when false. */
+    showsVerticalScrollIndicator?: boolean;
+    showsHorizontalScrollIndicator?: boolean;
     /** `<SystemView>` NSVisualEffectView material name */
     systemMaterial?: string;
     /** `<SystemView>` NSGlassEffectView liquid-glass variant name (macOS 26+) */

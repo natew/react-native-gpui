@@ -1133,6 +1133,12 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
         }
         case "ScrollView":
             node.type = "div";
+            if (props.showsVerticalScrollIndicator === false) {
+                node.showsVerticalScrollIndicator = false;
+            }
+            if (props.showsHorizontalScrollIndicator === false) {
+                node.showsHorizontalScrollIndicator = false;
+            }
             break;
         case PORTAL_HOST_TYPE:
             node.type = "div";

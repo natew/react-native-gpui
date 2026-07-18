@@ -296,7 +296,7 @@ pub fn native_scroll_proof(
     phase: &str,
     momentum_phase: &str,
 ) -> NativeScrollProof {
-    let Some((parent_view, gpui_view)) = webview_parent(window) else {
+    let Some((_parent_view, gpui_view)) = webview_parent(window) else {
         return NativeScrollProof {
             hit_driver_id: None,
             effective_driver_id: None,
@@ -338,14 +338,18 @@ pub fn native_scroll_proof(
             bounds.size.height - y
         };
         let local = NSPoint::new(x, local_y);
-        let parent_superview: id = msg_send![parent_view, superview];
-        let point_in_parent_super: NSPoint = if parent_superview == nil {
+        // `hitTest:` receives a point in the receiver's superview coordinates.
+        // Scroll drivers are children of GPUIView, so enter through GPUIView's real
+        // AppKit hit-test override using a point in GPUIView's superview. Calling the
+        // wrapper parent here skipped one coordinate level and missed every driver.
+        let gpui_superview: id = msg_send![gpui_view, superview];
+        let point_in_gpui_super: NSPoint = if gpui_superview == nil {
             local
         } else {
-            msg_send![gpui_view, convertPoint: local toView: parent_superview]
+            msg_send![gpui_view, convertPoint: local toView: gpui_superview]
         };
         PROOF_SCROLL_HIT.with(|proof| *proof.borrow_mut() = true);
-        let hit: id = msg_send![parent_view, hitTest: point_in_parent_super];
+        let hit: id = msg_send![gpui_view, hitTest: point_in_gpui_super];
         PROOF_SCROLL_HIT.with(|proof| *proof.borrow_mut() = false);
 
         let mut candidate = hit;
@@ -984,7 +988,7 @@ pub fn retain_drivers(present: &HashSet<u64>) {
                 let _: () = msg_send![
                     center,
                     removeObserver: observer()
-                    name: unsafe { notification_name() }
+                    name: notification_name()
                     object: driver.clip_view
                 ];
                 let _: () = msg_send![driver.scroll_view, removeFromSuperview];

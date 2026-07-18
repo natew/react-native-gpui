@@ -230,24 +230,6 @@ unsafe extern "C" fn emit_scroll_offsets(_: *mut c_void) {
                 previous.1,
             )
         });
-        let at_left = previous_x <= 0.5 && delta_x < 0.0;
-        let at_right = previous_x >= max_x - 0.5 && delta_x > 0.0;
-        let at_top = previous_y <= 0.5 && delta_y < 0.0;
-        let at_bottom = previous_y >= max_y - 0.5 && delta_y > 0.0;
-        if at_left || at_right || at_top || at_bottom {
-            let ancestor = SCROLL_ANCESTORS.with(|ancestors| {
-                ancestors
-                    .borrow()
-                    .get(&pending.driver_id)
-                    .copied()
-                    .flatten()
-            });
-            if let Some(ancestor) = ancestor {
-                let handoff_x = if at_left || at_right { delta_x } else { 0.0 };
-                let handoff_y = if at_top || at_bottom { delta_y } else { 0.0 };
-                let _ = scroll_by(ancestor, handoff_x, handoff_y);
-            }
-        }
         STATS.with(|stats| {
             stats
                 .borrow_mut()
@@ -501,16 +483,14 @@ pub fn sync_driver(
 
 #[cfg(target_os = "macos")]
 pub fn scroll_by(driver_id: u64, dx: f32, dy: f32) -> bool {
-    let (applied, handoff) = DRIVERS.with(|drivers| {
+    DRIVERS.with(|drivers| {
         let drivers = drivers.borrow();
         let Some(driver) = drivers
             .get(&driver_id)
             .filter(|driver| driver.scrollable == Some(true))
         else {
-            return (false, None);
+            return false;
         };
-        let mut handoff_x = 0.0;
-        let mut handoff_y = 0.0;
         unsafe {
             let bounds: NSRect = msg_send![driver.clip_view, bounds];
             let document_frame: NSRect = msg_send![driver.document_view, frame];
@@ -518,33 +498,12 @@ pub fn scroll_by(driver_id: u64, dx: f32, dy: f32) -> bool {
             let max_y = (document_frame.size.height - bounds.size.height).max(0.0);
             let next_x = (bounds.origin.x + f64::from(dx)).clamp(0.0, max_x);
             let next_y = (bounds.origin.y + f64::from(dy)).clamp(0.0, max_y);
-            handoff_x = if (next_x - bounds.origin.x).abs() < 0.01 {
-                dx
-            } else {
-                0.0
-            };
-            handoff_y = if (next_y - bounds.origin.y).abs() < 0.01 {
-                dy
-            } else {
-                0.0
-            };
             let target = NSPoint::new(next_x, next_y);
             let _: () = msg_send![driver.clip_view, scrollToPoint: target];
             let _: () = msg_send![driver.scroll_view, reflectScrolledClipView: driver.clip_view];
         }
-        let ancestor = SCROLL_ANCESTORS
-            .with(|ancestors| ancestors.borrow().get(&driver_id).copied().flatten());
-        (
-            true,
-            ancestor.map(|ancestor| (ancestor, handoff_x, handoff_y)),
-        )
-    });
-    if let Some((ancestor, handoff_x, handoff_y)) = handoff {
-        if handoff_x != 0.0 || handoff_y != 0.0 {
-            let _ = scroll_by(ancestor, handoff_x, handoff_y);
-        }
-    }
-    applied
+        true
+    })
 }
 
 #[cfg(not(target_os = "macos"))]

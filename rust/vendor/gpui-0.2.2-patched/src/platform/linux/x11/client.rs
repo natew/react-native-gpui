@@ -2219,6 +2219,8 @@ fn make_scroll_wheel_event(
         delta: ScrollDelta::Lines(delta),
         modifiers,
         touch_phase: TouchPhase::default(),
+        native_scroll_id: None,
+        native_scroll_offset: None,
     }
 }
 

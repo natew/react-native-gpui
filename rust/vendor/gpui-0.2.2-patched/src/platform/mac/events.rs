@@ -241,6 +241,8 @@ impl PlatformInput {
                         delta,
                         touch_phase: phase,
                         modifiers: read_modifiers(native_event),
+                        native_scroll_id: None,
+                        native_scroll_offset: None,
                     })
                 }),
                 NSEventType::NSLeftMouseDragged

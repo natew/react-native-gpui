@@ -28,7 +28,7 @@ mod imp {
     use cocoa::base::{YES, id, nil};
     use cocoa::foundation::{NSPoint, NSRect};
     use objc::runtime::{BOOL, Class, Imp, Object, Sel};
-    use objc::{msg_send, sel, sel_impl};
+    use objc::{class, msg_send, sel, sel_impl};
 
     #[derive(Clone, Copy)]
     struct Rect {
@@ -123,6 +123,10 @@ mod imp {
         })
     }
 
+    pub fn native_underlay_at(x: f64, y: f64) -> bool {
+        should_passthrough(x, y)
+    }
+
     extern "C" fn hit_test(this: &Object, _sel: Sel, point: NSPoint) -> id {
         unsafe {
             // `point` arrives in the receiver's *superview* coordinate system.
@@ -142,6 +146,15 @@ mod imp {
             // inspector overlay/menu is up: gpui owns all input, no webview passthrough.
             if INPUT_GRAB.load(Ordering::Relaxed) {
                 return this as *const Object as id;
+            }
+
+            // native scroll drivers are real GPUIView children. let NSView run the
+            // ordinary child hit test first: the transparent driver returns a hit only
+            // for wheel events and its overlay scrollers, while clicks elsewhere still
+            // resolve to GPUIView below.
+            let native_hit: id = msg_send![super(this, class!(NSView)), hitTest: point];
+            if native_hit != nil && native_hit != this as *const Object as id {
+                return native_hit;
             }
 
             let superview: id = msg_send![this, superview];
@@ -165,8 +178,7 @@ mod imp {
                 return nil;
             }
 
-            // GPUIView is a content leaf (Metal layer, no content subviews; the webview
-            // host is a sibling), so an in-bounds non-passthrough point resolves to self.
+            // an in-bounds non-passthrough point resolves to the Metal view itself.
             this as *const Object as id
         }
     }
@@ -195,7 +207,8 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 pub use imp::{
-    begin_frame, record_native_control, record_occluder, record_webview, set_input_grab,
+    begin_frame, native_underlay_at, record_native_control, record_occluder, record_webview,
+    set_input_grab,
 };
 
 #[cfg(not(target_os = "macos"))]
@@ -208,3 +221,7 @@ pub fn record_native_control(_x: f64, _y: f64, _w: f64, _h: f64) {}
 pub fn record_occluder(_x: f64, _y: f64, _w: f64, _h: f64) {}
 #[cfg(not(target_os = "macos"))]
 pub fn set_input_grab(_grab: bool) {}
+#[cfg(not(target_os = "macos"))]
+pub fn native_underlay_at(_x: f64, _y: f64) -> bool {
+    false
+}

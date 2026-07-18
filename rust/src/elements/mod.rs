@@ -2,6 +2,7 @@ mod div;
 mod image;
 pub mod input;
 pub mod native_control;
+pub mod native_scroll;
 mod svg;
 pub mod system;
 mod terminal;

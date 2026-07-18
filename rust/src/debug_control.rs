@@ -270,6 +270,12 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
             dy: number(value, "dy").unwrap_or(0.0),
             reply,
         }),
+        "scrollDriverStats" => Ok(Incoming::DebugScrollDriverStats {
+            x: number(value, "x")?,
+            y: number(value, "y")?,
+            reset: value.get("reset").and_then(Value::as_bool).unwrap_or(false),
+            reply,
+        }),
         "nativeScrollAt" => Ok(Incoming::DebugNativeScrollAt {
             x: number(value, "x")?,
             y: number(value, "y")?,

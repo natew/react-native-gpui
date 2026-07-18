@@ -126,6 +126,11 @@ pub fn take_paint_only_frame() -> bool {
     PAINT_ONLY_FRAME.swap(false, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// mark a host-side visual change that leaves every layout box unchanged.
+pub fn arm_paint_only_frame() {
+    PAINT_ONLY_FRAME.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Any host action that schedules a draw and might move a layout box calls this to veto
 /// the retained-layout fast path for the resulting frame (tree commit, input edit,
 /// scrollTo, native layout/resize, inspector toggle, …).

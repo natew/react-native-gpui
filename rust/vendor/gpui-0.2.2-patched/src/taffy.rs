@@ -37,23 +37,16 @@ pub struct TaffyLayoutEngine {
     // SOLVE (~6.4ms at 1300 nodes; the per-node measure callbacks are only ~0.5ms because
     // text shaping is cached) even though no box moved.
     //
-    // When the host knows a frame changed only paint-only style keys it sets `reuse` for
-    // that draw. We still BUILD the taffy tree (fresh nodes + the gpui text/measure
-    // closures — those MUST run so gpui's text elements populate their per-frame layout
-    // state, or prepaint panics with "measurement has not been performed"), and we still
-    // run each node's measure (cheap, cached). What we SKIP is the expensive constraint
-    // solve: every node's absolute bounds are copied positionally from the previous full-
-    // layout frame's solved geometry (`prev_bounds`, captured in allocation order). The
-    // element tree is structurally identical on a paint-only frame, so the Nth node this
-    // frame is the same box as the Nth node last frame — its geometry is unchanged.
-    //
-    // `retained` collects this frame's node ids in allocation order; `prev_bounds` is last
-    // full-layout frame's solved absolute bounds in the same order. `reuse_desynced` trips
-    // if the two lengths disagree (a structural change slipped past the host gate) so the
-    // host falls back to a full relayout next draw — a one-frame glitch, never a crash.
+    // when the host knows a frame changed only paint-only state, the next draw replays
+    // the prior tree's LayoutIds in allocation order. fresh measure closures replace the
+    // retained closures in place, then run with the prior solved sizes. no taffy nodes,
+    // styles, children, or bounds are rebuilt. a positional kind/count mismatch trips
+    // `reuse_desynced`, and the host runs a full layout on the following draw.
     retained: Vec<LayoutId>,
+    retained_measured: Vec<bool>,
     prev_bounds: Vec<Bounds<Pixels>>,
     reuse: bool,
+    reuse_cursor: usize,
     reuse_desynced: bool,
 }
 
@@ -68,8 +61,10 @@ impl TaffyLayoutEngine {
             absolute_layout_bounds: FxHashMap::default(),
             computed_layouts: FxHashSet::default(),
             retained: Vec::new(),
+            retained_measured: Vec::new(),
             prev_bounds: Vec::new(),
             reuse: false,
+            reuse_cursor: 0,
             reuse_desynced: false,
         }
     }
@@ -79,29 +74,28 @@ impl TaffyLayoutEngine {
         self.absolute_layout_bounds.clear();
         self.computed_layouts.clear();
         self.retained.clear();
-        // prev_bounds is intentionally NOT cleared here: a full-layout frame clears the
-        // taffy tree at its start but still wants the PRIOR frame's bounds available to
-        // seed the NEXT reuse frame. It's only invalidated implicitly — the next full
-        // frame overwrites it via `capture_prev_bounds` after its solve.
+        self.retained_measured.clear();
+        // prev_bounds is intentionally not cleared here. the next full frame replaces
+        // it after solving, keeping the previous geometry available for diagnostics in
+        // the meantime.
         self.reuse = false;
+        self.reuse_cursor = 0;
         self.reuse_desynced = false;
     }
 
-    /// Begin a retained-layout (paint-only) frame: build a fresh tree + run measures, but
-    /// skip the flexbox solve and copy geometry from the previous frame. Returns false
+    /// begin a retained-layout frame: replay the prior nodes + run fresh measures, but
+    /// skip node/style reconstruction and the flexbox solve. Returns false
     /// (caller runs a full layout) when there is no prior geometry to reuse yet — the very
     /// first frame, or right after a tree commit.
     pub fn begin_reuse_frame(&mut self) -> bool {
-        if self.prev_bounds.is_empty() {
+        if self.prev_bounds.is_empty()
+            || self.retained.len() != self.prev_bounds.len()
+            || self.retained_measured.len() != self.retained.len()
+        {
             return false;
         }
-        // a reuse frame still rebuilds the tree from scratch, so clear last frame's nodes
-        // and bounds map (but NOT prev_bounds — that's the geometry we're about to reuse).
-        self.taffy.clear();
-        self.absolute_layout_bounds.clear();
-        self.computed_layouts.clear();
-        self.retained.clear();
         self.reuse = true;
+        self.reuse_cursor = 0;
         self.reuse_desynced = false;
         true
     }
@@ -112,7 +106,7 @@ impl TaffyLayoutEngine {
     }
 
     /// True when this reuse frame allocated a different node count than the retained frame
-    /// — a structural change slipped past the host gate, so the copied geometry is not
+    /// — a structural change slipped past the host gate, so the retained geometry is not
     /// trustworthy and the host must force a full relayout next draw.
     pub fn reuse_desynced(&self) -> bool {
         self.reuse_desynced
@@ -125,6 +119,20 @@ impl TaffyLayoutEngine {
         scale_factor: f32,
         children: &[LayoutId],
     ) -> LayoutId {
+        if self.reuse {
+            let index = self.reuse_cursor;
+            self.reuse_cursor += 1;
+            if let Some(&id) = self.retained.get(index) {
+                if self.retained_measured.get(index).copied() != Some(false) {
+                    self.reuse_desynced = true;
+                    self.taffy.set_node_context(id.into(), None).ok();
+                    self.retained_measured[index] = false;
+                }
+                return id;
+            }
+            self.reuse_desynced = true;
+        }
+
         let taffy_style = style.to_taffy(rem_size, scale_factor);
 
         let id: LayoutId = if children.is_empty() {
@@ -140,6 +148,7 @@ impl TaffyLayoutEngine {
                 .into()
         };
         self.retained.push(id);
+        self.retained_measured.push(false);
         id
     }
 
@@ -156,19 +165,51 @@ impl TaffyLayoutEngine {
         ) -> Size<Pixels>
         + 'static,
     ) -> LayoutId {
+        let context = NodeContext {
+            measure: StackSafe::new(Box::new(measure)),
+        };
+        if self.reuse {
+            let index = self.reuse_cursor;
+            self.reuse_cursor += 1;
+            if let Some(&id) = self.retained.get(index) {
+                if self.retained_measured.get(index).copied() == Some(true) {
+                    if let Some(existing) = self.taffy.get_node_context_mut(id.into()) {
+                        *existing = context;
+                    } else {
+                        self.reuse_desynced = true;
+                        self.taffy.set_node_context(id.into(), Some(context)).ok();
+                    }
+                } else {
+                    self.reuse_desynced = true;
+                    self.taffy.set_node_context(id.into(), Some(context)).ok();
+                    self.retained_measured[index] = true;
+                }
+                return id;
+            }
+
+            // a structure change slipped through the host gate. allocate the extra node
+            // so this frame stays safe, then force a full rebuild on the next draw.
+            self.reuse_desynced = true;
+            let taffy_style = style.to_taffy(rem_size, scale_factor);
+            let id: LayoutId = self
+                .taffy
+                .new_leaf_with_context(taffy_style, context)
+                .expect(EXPECT_MESSAGE)
+                .into();
+            self.retained.push(id);
+            self.retained_measured.push(true);
+            return id;
+        }
+
         let taffy_style = style.to_taffy(rem_size, scale_factor);
 
         let id: LayoutId = self
             .taffy
-            .new_leaf_with_context(
-                taffy_style,
-                NodeContext {
-                    measure: StackSafe::new(Box::new(measure)),
-                },
-            )
+            .new_leaf_with_context(taffy_style, context)
             .expect(EXPECT_MESSAGE)
             .into();
         self.retained.push(id);
+        self.retained_measured.push(true);
         id
     }
 
@@ -227,15 +268,10 @@ impl TaffyLayoutEngine {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // retained-layout frame: skip the expensive flexbox SOLVE (~6.4ms at 1300 nodes)
-        // and instead (a) invoke each measured node's closure so gpui's text/input
-        // elements populate this frame's layout state (cheap — ~0.5ms, shaping is cached —
-        // and REQUIRED, or their prepaint panics with "measurement has not been
-        // performed"), and (b) copy every node's absolute bounds positionally from the
-        // previous full-layout frame (`prev_bounds`). The element tree is structurally
-        // identical on a paint-only frame, so node `i` this frame is the same box as node
-        // `i` last frame — its geometry is unchanged. A node-count mismatch means a
-        // structural change slipped past the host gate: trip `reuse_desynced` so the host
+        // retained-layout frame: skip the expensive flexbox solve (~6.4ms at 1300 nodes).
+        // invoke each measured node's fresh closure so gpui's text/input elements
+        // populate this frame's layout state, then keep using the retained taffy tree and
+        // absolute-bounds cache. a node-count mismatch trips `reuse_desynced`, so the host
         // forces a full relayout next draw.
         if self.reuse {
             self.compute_layout_reuse(window, cx);
@@ -318,8 +354,8 @@ impl TaffyLayoutEngine {
         // Capture this full-layout frame's solved geometry positionally so the NEXT draw,
         // if it's a paint-only frame, can replay it without re-solving. `layout_bounds`
         // resolves + caches each node's absolute rect; we snapshot them in the same
-        // allocation order the elements requested them, which the (structurally identical)
-        // reuse frame will rebuild in.
+        // allocation order the elements requested them, which the structurally identical
+        // reuse frame will replay.
         let nodes = std::mem::take(&mut self.retained);
         let scale = window.scale_factor();
         self.prev_bounds.clear();
@@ -331,20 +367,19 @@ impl TaffyLayoutEngine {
         self.retained = nodes;
     }
 
-    /// The reuse-frame body of `compute_layout` (see the call site for the rationale). The
-    /// fresh tree was just built (so the gpui text/measure closures exist); here we run
-    /// each node's measure to populate the gpui elements' per-frame state, then copy the
-    /// node's absolute bounds from the previous full-layout frame instead of solving.
+    /// run fresh closures for measured nodes with their retained solved sizes. the tree
+    /// and absolute-bounds map already contain the prior full frame, so no copies or
+    /// taffy traversal are needed.
     fn compute_layout_reuse(&mut self, window: &mut Window, cx: &mut App) {
-        if self.retained.len() != self.prev_bounds.len() {
-            // structural change slipped past the host gate — the positional mapping is no
-            // longer valid. Copy what we can (so prepaint/paint still get sane-ish bounds
-            // this frame) and flag the desync so the host self-heals to a full layout next
-            // draw. Still run measures so text doesn't panic.
+        if self.reuse_cursor != self.prev_bounds.len() {
             self.reuse_desynced = true;
         }
-        let nodes = std::mem::take(&mut self.retained);
-        for (i, &node) in nodes.iter().enumerate() {
+        let expected = self.reuse_cursor.min(self.retained.len());
+        for i in 0..expected {
+            if !self.retained_measured.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            let node = self.retained[i];
             // run this node's measure closure (if any) so the gpui text/input element
             // populates its layout state for prepaint/paint. The cached known dimensions
             // come from the prior frame's solved size — identical geometry, so the shaping
@@ -377,11 +412,7 @@ impl TaffyLayoutEngine {
                     let _ = (ctx.measure)(known, avail, window, cx);
                 }
             }
-            if let Some(&bounds) = self.prev_bounds.get(i) {
-                self.absolute_layout_bounds.insert(node, bounds);
-            }
         }
-        self.retained = nodes;
     }
 
     pub fn layout_bounds(&mut self, id: LayoutId, scale_factor: f32) -> Bounds<Pixels> {
@@ -389,10 +420,9 @@ impl TaffyLayoutEngine {
             return layout;
         }
 
-        // A retained-layout replay that desynced returns LayoutId::INVALID, which has no
-        // taffy node — answer with a zero rect rather than panicking. The host sees
-        // `reuse_desynced()` and forces a full relayout on the next draw, so this is at
-        // most one mis-positioned frame, never a crash.
+        // a retained-layout replay that desynced can allocate an unmatched node. answer
+        // with a zero rect rather than panicking if taffy cannot resolve it; the host sees
+        // `reuse_desynced()` and forces a full relayout on the next draw.
         let Ok(layout) = self.taffy.layout(id.into()) else {
             return Bounds::default();
         };
@@ -773,7 +803,7 @@ mod retained_layout_tests {
 
     // request_layout / request_measured_layout need no Window, so the reuse bookkeeping
     // (retained capture, prev_bounds gating, desync detection) is unit-testable. The
-    // measure-pass + bounds-copy in compute_layout itself needs a Window and is covered by
+    // measured-closure replay in compute_layout itself needs a Window and is covered by
     // the ts conformance suite (describe/anim/pixel) instead.
 
     #[test]
@@ -785,6 +815,7 @@ mod retained_layout_tests {
         assert!(!e.is_reusing());
 
         // simulate a captured full-layout frame.
+        let _ = e.request_layout(Style::default(), px(16.0), 1.0, &[]);
         e.prev_bounds.push(Bounds {
             origin: point(px(0.0), px(0.0)),
             size: size(px(100.0), px(40.0)),
@@ -801,30 +832,49 @@ mod retained_layout_tests {
         let _a = e.request_layout(Style::default(), px(16.0), 1.0, &[]);
         let _b = e.request_layout(Style::default(), px(16.0), 1.0, &[]);
         assert_eq!(e.retained.len(), 2);
-        // clear wipes the in-progress tree + retained ids, but intentionally KEEPS
-        // prev_bounds so a following reuse frame can still replay the last solved geometry.
+        // clear wipes the in-progress tree + retained ids, but intentionally keeps
+        // prev_bounds for diagnostics until the following full frame replaces it.
         e.prev_bounds.push(Bounds::default());
         e.clear();
         assert!(e.retained.is_empty());
         assert_eq!(
             e.prev_bounds.len(),
             1,
-            "clear must keep prev_bounds so the next reuse frame can replay it"
+            "clear must keep prior geometry until the next full frame replaces it"
         );
     }
 
     #[test]
-    fn begin_reuse_resets_per_frame_tree_state() {
+    fn begin_reuse_replays_the_existing_tree_positionally() {
         let mut e = TaffyLayoutEngine::new();
+        let original = e.request_layout(Style::default(), px(16.0), 1.0, &[]);
         e.prev_bounds.push(Bounds::default());
-        // a stale node from a prior frame must not survive into a reuse frame's fresh build.
-        let _ = e.request_layout(Style::default(), px(16.0), 1.0, &[]);
         assert_eq!(e.retained.len(), 1);
         assert!(e.begin_reuse_frame());
-        assert!(
-            e.retained.is_empty(),
-            "begin_reuse_frame must clear the prior tree so this frame rebuilds cleanly"
-        );
+        let replayed = e.request_layout(Style::default(), px(16.0), 1.0, &[]);
+        assert_eq!(replayed, original);
+        assert_eq!(e.retained.len(), 1);
+        assert_eq!(e.reuse_cursor, 1);
         assert!(!e.reuse_desynced());
+    }
+
+    #[test]
+    fn reuse_kind_mismatch_marks_desync_and_keeps_the_current_kind_safe() {
+        let mut e = TaffyLayoutEngine::new();
+        let original = e.request_layout(Style::default(), px(16.0), 1.0, &[]);
+        e.prev_bounds.push(Bounds::default());
+        assert!(e.begin_reuse_frame());
+
+        let replayed = e.request_measured_layout(
+            Style::default(),
+            px(16.0),
+            1.0,
+            |_, _, _, _| Size::default(),
+        );
+
+        assert_eq!(replayed, original);
+        assert!(e.reuse_desynced());
+        assert_eq!(e.retained_measured, vec![true]);
+        assert!(e.taffy.get_node_context(replayed.into()).is_some());
     }
 }

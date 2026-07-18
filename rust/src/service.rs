@@ -1744,6 +1744,7 @@ impl Render for ServiceApp {
             let mut scroll_ids = HashSet::new();
             collect_scroll_ids(&self.root, &mut scroll_ids);
             elements::retain_scroll_state(&scroll_ids);
+            elements::native_scroll::retain_drivers(&scroll_ids);
 
             if self.inspector.enabled() {
                 inspector::refresh_snapshot_cache(&self.root);
@@ -2139,6 +2140,12 @@ pub(crate) enum Incoming {
         y: f32,
         dx: f32,
         dy: f32,
+        reply: flume::Sender<serde_json::Value>,
+    },
+    DebugScrollDriverStats {
+        x: f32,
+        y: f32,
+        reset: bool,
         reply: flume::Sender<serde_json::Value>,
     },
     /// proof-of-native-scroll: run the REAL AppKit `hitTest:` at (x,y) and report the
@@ -3819,6 +3826,90 @@ fn main() {
                             break;
                         }
                     }
+                    Incoming::DebugScrollAt {
+                        x,
+                        y,
+                        dx,
+                        dy,
+                        reply,
+                    } => {
+                        let response = pump.update(cx, |this, _cx| {
+                            if let Some(id) = inspector::scroll_container_at(&this.root, x, y) {
+                                #[cfg(target_os = "macos")]
+                                let applied = elements::native_scroll::scroll_by(id, dx, dy);
+                                #[cfg(not(target_os = "macos"))]
+                                let applied = {
+                                    elements::scroll_by(id, dx, dy);
+                                    _cx.notify();
+                                    true
+                                };
+                                serde_json::json!({
+                                    "ok": applied,
+                                    "type": "scrollAt",
+                                    "targetId": id,
+                                    "error": if applied { serde_json::Value::Null } else { serde_json::Value::String("native scroll driver is not ready".into()) },
+                                })
+                            } else if let Some(id) = inspector::webview_at(&this.root, x, y) {
+                                let ok = this
+                                    .webviews
+                                    .get(&id)
+                                    .and_then(|view| {
+                                        elements::webview::webview_scroll_script(dx, dy)
+                                            .map(|script| view.evaluate_script(&script).is_ok())
+                                    })
+                                    .unwrap_or(false);
+                                serde_json::json!({
+                                    "ok": ok,
+                                    "type": "scrollAt",
+                                    "targetId": id,
+                                })
+                            } else {
+                                serde_json::json!({
+                                    "ok": false,
+                                    "type": "scrollAt",
+                                    "error": "no scroll container at point",
+                                })
+                            }
+                        });
+                        let _ = reply.send(response.unwrap_or_else(|_| {
+                            serde_json::json!({
+                                "ok": false,
+                                "type": "scrollAt",
+                                "error": "window update failed",
+                            })
+                        }));
+                    }
+                    Incoming::DebugScrollDriverStats { x, y, reset, reply } => {
+                        let target = pump
+                            .read_with(cx, |this, _| {
+                                inspector::scroll_container_at(&this.root, x, y)
+                            })
+                            .ok()
+                            .flatten();
+                        let stats = target.and_then(|id| {
+                            elements::native_scroll::stats(id, reset).map(|stats| (id, stats))
+                        });
+                        if let Some((id, stats)) = stats {
+                            let _ = reply.send(serde_json::json!({
+                                "ok": true,
+                                "type": "scrollDriverStats",
+                                "driver": "appkit",
+                                "targetId": id,
+                                "notificationCount": stats.notification_count,
+                                "callbackCount": stats.callback_count,
+                                "offsetX": stats.offset_x,
+                                "offsetY": stats.offset_y,
+                                "maxX": stats.max_x,
+                                "maxY": stats.max_y,
+                            }));
+                        } else {
+                            let _ = reply.send(serde_json::json!({
+                                "ok": false,
+                                "type": "scrollDriverStats",
+                                "error": "no native scroll driver at point",
+                            }));
+                        }
+                    }
                     Incoming::DebugNativeScrollAt { x, y, dy, reply } => {
                         // proof the hitTest passthrough routes a REAL scroll-wheel NSEvent
                         // natively to the WKWebView — no rngpui JS delta-forwarding. resolve
@@ -4259,58 +4350,6 @@ fn main() {
                                     }
                                 }
                             }
-                            Incoming::DebugScrollAt {
-                                x,
-                                y,
-                                dx,
-                                dy,
-                                reply,
-                            } => {
-                                let target = inspector::scroll_container_at(&this.root, x, y);
-                                if let Some(id) = target {
-                                    elements::scroll_by(id, dx, dy);
-                                    if let Some((width, height, content_width, content_height)) =
-                                        inspector::scroll_container_metrics(&this.root, id)
-                                    {
-                                        let (scroll_x, scroll_y) = elements::scroll_position(id);
-                                        crate::bridge::scroll_event(
-                                            id,
-                                            scroll_x,
-                                            scroll_y,
-                                            width,
-                                            height,
-                                            content_width,
-                                            content_height,
-                                        );
-                                    }
-                                    cx.notify();
-                                    let _ = reply.send(serde_json::json!({
-                                        "ok": true,
-                                        "type": "scrollAt",
-                                        "targetId": id,
-                                    }));
-                                } else if let Some(id) = inspector::webview_at(&this.root, x, y) {
-                                    let ok = this
-                                        .webviews
-                                        .get(&id)
-                                        .and_then(|view| {
-                                            elements::webview::webview_scroll_script(dx, dy)
-                                                .map(|script| view.evaluate_script(&script).is_ok())
-                                        })
-                                        .unwrap_or(false);
-                                    let _ = reply.send(serde_json::json!({
-                                        "ok": ok,
-                                        "type": "scrollAt",
-                                        "targetId": id,
-                                    }));
-                                } else {
-                                    let _ = reply.send(serde_json::json!({
-                                        "ok": false,
-                                        "type": "scrollAt",
-                                        "error": "no scroll container at point",
-                                    }));
-                                }
-                            }
                             Incoming::FocusInput { .. }
                             | Incoming::AccessibilityEditInput { .. }
                             | Incoming::AccessibilitySetInputFocus { .. }
@@ -4336,6 +4375,8 @@ fn main() {
                             | Incoming::DebugRealDrag { .. }
                             | Incoming::DebugRealDragPath { .. }
                             | Incoming::DebugResize { .. }
+                            | Incoming::DebugScrollAt { .. }
+                            | Incoming::DebugScrollDriverStats { .. }
                             | Incoming::DebugNativeScrollAt { .. }
                             | Incoming::DebugWebviewCopyProof { .. }
                             | Incoming::NativeContextMenu(_)

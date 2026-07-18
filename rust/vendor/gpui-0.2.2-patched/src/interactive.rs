@@ -372,6 +372,13 @@ pub struct ScrollWheelEvent {
 
     /// The phase of the touch event.
     pub touch_phase: TouchPhase,
+
+    /// native scroll-driver identity when AppKit owns the gesture and reports an
+    /// absolute clip-view offset instead of a wheel delta.
+    pub native_scroll_id: Option<u64>,
+
+    /// absolute content offset reported by the native scroll driver.
+    pub native_scroll_offset: Option<Point<Pixels>>,
 }
 
 impl Sealed for ScrollWheelEvent {}

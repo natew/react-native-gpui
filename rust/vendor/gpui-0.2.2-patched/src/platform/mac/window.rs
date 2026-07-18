@@ -4,7 +4,7 @@ use crate::{
     ForegroundExecutor, KeyDownEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay,
     PlatformInput, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    SharedString, Size, SystemWindowTab, Timer, WindowAppearance, WindowBackgroundAppearance,
+    ScrollWheelEvent, SharedString, Size, SystemWindowTab, Timer, WindowAppearance, WindowBackgroundAppearance,
     WindowBounds, WindowControlArea, WindowKind, WindowParams, dispatch_get_main_queue,
     dispatch_sys::dispatch_async_f, platform::PlatformInputHandler, point, px, size,
 };
@@ -188,6 +188,11 @@ unsafe fn build_classes() {
                 decl.add_method(
                     sel!(scrollWheel:),
                     handle_view_event as extern "C" fn(&Object, Sel, id),
+                );
+                decl.add_method(
+                    sel!(rngpuiScrollDriverChanged:offsetX:offsetY:),
+                    handle_native_scroll_driver
+                        as extern "C" fn(&Object, Sel, u64, f64, f64),
                 );
                 decl.add_method(
                     sel!(swipeWithEvent:),
@@ -1926,6 +1931,26 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
             window_state.lock().event_callback = Some(callback);
         }
     }
+}
+
+extern "C" fn handle_native_scroll_driver(
+    this: &Object,
+    _: Sel,
+    driver_id: u64,
+    offset_x: f64,
+    offset_y: f64,
+) {
+    let window_state = unsafe { get_window_state(this) };
+    let event = PlatformInput::ScrollWheel(ScrollWheelEvent {
+        native_scroll_id: Some(driver_id),
+        native_scroll_offset: Some(point(px(offset_x as f32), px(offset_y as f32))),
+        ..Default::default()
+    });
+    let mut callback = window_state.lock().event_callback.take();
+    if let Some(callback) = callback.as_mut() {
+        callback(event);
+    }
+    window_state.lock().event_callback = callback;
 }
 
 extern "C" fn window_did_change_occlusion_state(this: &Object, _: Sel, _: id) {

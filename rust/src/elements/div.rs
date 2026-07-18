@@ -123,15 +123,22 @@ static NATIVE_LAYOUT_ANIMATIONS: Lazy<Mutex<HashMap<String, NativeLayoutAnimatio
 static ACTIVE_NATIVE_RESIZE: Lazy<Mutex<Option<ActiveNativeResize>>> =
     Lazy::new(|| Mutex::new(None));
 
+thread_local! {
+    // ancestor scroll viewport in window coordinates. Every container uses it
+    // to cull descendants, including rows below ScrollView's required content-
+    // container wrapper.
+    static SCROLL_CULL_VIEWPORTS: RefCell<Vec<Bounds<Pixels>>> = const { RefCell::new(Vec::new()) };
+}
+
 #[derive(Clone, Default)]
 pub struct DivPrepaintState {
     hitbox: Option<Hitbox>,
     max_scroll_x: f32,
     max_scroll_y: f32,
-    // child indices a scroll container windowed out this frame: their laid-out
+    // child indices an ancestor scroll viewport windowed out this frame: their laid-out
     // bounds fell outside the viewport (+ one screen of overscan each side), so
     // prepaint skipped them and paint must skip the exact same set. `None` for
-    // non-scroll divs (paint everything, unchanged). This is the scroll-fps win:
+    // non-culled divs (paint everything, unchanged). this is the scroll-fps win:
     // a long list otherwise prepaints + paints every row on every wheel tick, and
     // gpui has no partial repaint, so the whole off-screen subtree is pure waste.
     culled: Option<HashSet<usize>>,
@@ -150,6 +157,23 @@ fn mark_scroll_event(id: u64) {
 
 fn take_scroll_event(id: u64) -> bool {
     PENDING_SCROLL_EVENTS.lock().unwrap().remove(&id)
+}
+
+fn active_scroll_cull_viewport() -> Option<Bounds<Pixels>> {
+    SCROLL_CULL_VIEWPORTS.with(|viewports| viewports.borrow().last().copied())
+}
+
+fn with_scroll_cull_viewport<R>(viewport: Bounds<Pixels>, f: impl FnOnce() -> R) -> R {
+    SCROLL_CULL_VIEWPORTS.with(|viewports| viewports.borrow_mut().push(viewport));
+    let result = f();
+    SCROLL_CULL_VIEWPORTS.with(|viewports| {
+        viewports.borrow_mut().pop();
+    });
+    result
+}
+
+fn intersect_viewports(inherited: Option<Bounds<Pixels>>, own: Bounds<Pixels>) -> Bounds<Pixels> {
+    inherited.map_or(own, |inherited| inherited.intersect(&own))
 }
 
 pub fn scroll_to(id: u64, x: Option<f32>, y: Option<f32>) {
@@ -1684,6 +1708,9 @@ impl Element for ReactDivElement {
                 culled,
             };
         }
+        let inherited_viewport = active_scroll_cull_viewport();
+        let mut scroll_offset = None;
+        let mut child_viewport = inherited_viewport;
         if scroll {
             // clamp the stored offset to the scrollable range, then shift children up
             // by it (in prepaint, so hit-testing matches what's painted).
@@ -1704,6 +1731,17 @@ impl Element for ReactDivElement {
                 }
             };
             set_scroll(self.element.global_id, off);
+            scroll_offset = Some(off);
+
+            crate::elements::native_scroll::sync_driver(
+                window,
+                self.element.global_id,
+                bounds,
+                f32::from(content_w),
+                f32::from(content_h),
+                off.x,
+                off.y,
+            );
             if take_scroll_event(self.element.global_id) && self.element.listens("scroll") {
                 let width: f32 = bounds.size.width.into();
                 let height: f32 = bounds.size.height.into();
@@ -1717,38 +1755,56 @@ impl Element for ReactDivElement {
                     height + max_scroll_y,
                 );
             }
-            // viewport in content space (pre-offset child bounds live here) plus one
-            // screen of overscan on every side, so a fast fling never out-runs the
-            // window and pops in blank. layout_bounds is the taffy result, unaffected
-            // by the element offset we push below, so we compare it against the shifted
-            // viewport rather than shifting every child.
+            // visible bounds plus one screen of overscan on every side, so a fast fling
+            // never out-runs the window and pops in blank. `window.layout_bounds` adds
+            // the active element offset, so this viewport stays in window coordinates
+            // while the child bounds below are shifted by the scroll offset.
             let w = bounds.size.width;
             let h = bounds.size.height;
-            let ox = bounds.origin.x + px(off.x);
-            let oy = bounds.origin.y + px(off.y);
-            let (vx0, vy0, vx1, vy1) = (ox - w, oy - h, ox + w + w, oy + h + h);
-            let mut skipped: HashSet<usize> = HashSet::new();
-            let order = self.stacked_child_indices();
-            window.with_element_offset(point(px(-off.x), px(-off.y)), |window| {
-                for index in order.iter() {
-                    let b = window.layout_bounds(request_layout[index]);
-                    let visible =
-                        b.right() > vx0 && b.left() < vx1 && b.bottom() > vy0 && b.top() < vy1;
-                    if visible {
-                        self.children[index].element.prepaint(window, cx);
-                    } else {
-                        skipped.insert(index);
-                    }
+            let (vx0, vy0, vx1, vy1) = (
+                bounds.origin.x - w,
+                bounds.origin.y - h,
+                bounds.right() + w,
+                bounds.bottom() + h,
+            );
+            let own = Bounds::new(point(vx0, vy0), gpui::size(vx1 - vx0, vy1 - vy0));
+            child_viewport = Some(intersect_viewports(inherited_viewport, own));
+        }
+
+        let order = self.stacked_child_indices();
+        let mut prepaint_children = |window: &mut Window, cx: &mut App| {
+            let mut skipped = HashSet::new();
+            for index in order.iter() {
+                let visible = child_viewport.is_none_or(|viewport| {
+                    let child = window.layout_bounds(request_layout[*index]);
+                    child.right() > viewport.left()
+                        && child.left() < viewport.right()
+                        && child.bottom() > viewport.top()
+                        && child.top() < viewport.bottom()
+                });
+                if visible {
+                    self.children[*index].element.prepaint(window, cx);
+                } else {
+                    skipped.insert(*index);
                 }
-            });
+            }
             if !skipped.is_empty() {
                 culled = Some(skipped);
             }
-        } else {
-            let order = self.stacked_child_indices();
-            for index in order.iter() {
-                self.children[index].element.prepaint(window, cx);
+        };
+        let mut with_viewport = |window: &mut Window, cx: &mut App| {
+            if let Some(viewport) = child_viewport {
+                with_scroll_cull_viewport(viewport, || prepaint_children(window, cx));
+            } else {
+                prepaint_children(window, cx);
             }
+        };
+        if let Some(off) = scroll_offset {
+            window.with_element_offset(point(px(-off.x), px(-off.y)), |window| {
+                with_viewport(window, cx);
+            });
+        } else {
+            with_viewport(window, cx);
         }
 
         DivPrepaintState {
@@ -1788,22 +1844,28 @@ impl Element for ReactDivElement {
         apply_rounded_overflow_clips_to_style(&mut style, bounds, window.rem_size());
         let (clip, scroll) = overflow_mode(&self.element.style);
 
-        // Wheel handling: a listener that nudges the persisted offset and asks for a
-        // repaint. Gated by `bounds.contains` (not `should_handle_scroll`, whose
-        // hit-test set only stays fresh under continuous rendering — we render
-        // on-demand). Bubble runs inner→outer; the inner scroller consumes and stops
-        // propagation so an ancestor doesn't also move.
+        // native AppKit drivers report absolute offsets. synthetic debug
+        // input and non-macOS platforms keep the delta path through the same listener.
         if scroll {
             let id = self.element.global_id;
             let max_scroll_x = prepaint.max_scroll_x;
             let max_scroll_y = prepaint.max_scroll_y;
             let hitbox = prepaint.hitbox.clone();
-            let on_scroll = self.element.listens("scroll");
             window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, window, cx| {
-                if phase == DispatchPhase::Bubble
-                    && hitbox
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                let native = ev.native_scroll_id.zip(ev.native_scroll_offset);
+                if native.is_some_and(|(native_id, _)| native_id != id) {
+                    return;
+                }
+                if native.is_none()
+                    && !hitbox
                         .as_ref()
                         .is_some_and(|hitbox| hitbox.should_handle_scroll(window))
+                {
+                    return;
+                }
                 {
                     let dy: f32 = match ev.delta {
                         ScrollDelta::Lines(p) => p.y * 32.0,
@@ -1814,41 +1876,25 @@ impl Element for ReactDivElement {
                         ScrollDelta::Pixels(p) => p.x.into(),
                     };
                     let cur = get_scroll(id);
-                    let next = ScrollOffset {
-                        x: (cur.x - dx).clamp(0.0, max_scroll_x),
-                        y: (cur.y - dy).clamp(0.0, max_scroll_y),
-                    };
+                    let next = native.map_or_else(
+                        || ScrollOffset {
+                            x: (cur.x - dx).clamp(0.0, max_scroll_x),
+                            y: (cur.y - dy).clamp(0.0, max_scroll_y),
+                        },
+                        |(_, offset)| ScrollOffset {
+                            x: f32::from(offset.x).clamp(0.0, max_scroll_x),
+                            y: f32::from(offset.y).clamp(0.0, max_scroll_y),
+                        },
+                    );
                     if (next.x - cur.x).abs() > 0.01 || (next.y - cur.y).abs() > 0.01 {
                         set_scroll(id, next);
-                        if on_scroll {
-                            let width: f32 = bounds.size.width.into();
-                            let height: f32 = bounds.size.height.into();
-                            crate::bridge::scroll_event(
-                                id,
-                                next.x,
-                                next.y,
-                                width,
-                                height,
-                                width + max_scroll_x,
-                                height + max_scroll_y,
-                            );
-                        }
+                        mark_scroll_event(id);
                         // scrolling moves elements under a stationary mouse, so
                         // re-evaluate pseudo hover before repainting — otherwise
                         // scrolled-away elements keep a stale :hover state.
                         re_evaluate_pseudo_hover(window);
-                        // deliberately a FULL-layout repaint, not the retained-layout
-                        // reuse fast path (`set_paint_only_frame`). Reuse was tried on
-                        // scroll and is a net REGRESSION at ControlRoom node counts: it
-                        // still rebuilds the whole element tree AND runs every text
-                        // measure AND copies every node's bounds — only the flexbox solve
-                        // is skipped, and at these counts the solve is cheaper than that
-                        // bookkeeping. Worse, the bookkeeping scales with TOTAL nodes, so
-                        // scroll (whole tree reprocessed every wheel tick) felt slower
-                        // than a window resize (which vetoes reuse → full layout). Measured
-                        // ~1000 nodes: reuse p50 3.26/p95 4.52ms vs full 2.87/3.37ms. Do
-                        // not re-arm reuse here.
-                        window.refresh(); // on-demand: repaint to reflect the new offset
+                        crate::anim_overlay::arm_paint_only_frame();
+                        window.refresh();
                         cx.stop_propagation();
                     }
                 }

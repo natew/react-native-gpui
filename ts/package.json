@@ -79,6 +79,7 @@
         "rngpui": "bun run cli/bin.ts",
         "conformance:describe": "node scripts/describe-conformance.mjs",
         "conformance:drive": "node scripts/drive-conformance.mjs",
+        "conformance:scroll-performance": "bun run scripts/scroll-performance-conformance.mjs",
         "conformance:reload": "node scripts/reload-conformance.mjs",
         "conformance:hot-reload": "node scripts/hot-reload-conformance.mjs",
         "conformance:hot-reload-cli": "node scripts/hot-reload-cli-conformance.mjs",

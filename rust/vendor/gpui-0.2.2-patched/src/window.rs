@@ -3784,8 +3784,13 @@ impl Window {
                 PlatformInput::ModifiersChanged(modifiers_changed)
             }
             PlatformInput::ScrollWheel(scroll_wheel) => {
-                self.mouse_position = scroll_wheel.position;
-                self.modifiers = scroll_wheel.modifiers;
+                // a native AppKit driver reports its clip-view offset after the native
+                // wheel event has already been routed. its synthetic GPUI event has no
+                // meaningful pointer coordinates, so preserve the last real mouse state.
+                if scroll_wheel.native_scroll_id.is_none() {
+                    self.mouse_position = scroll_wheel.position;
+                    self.modifiers = scroll_wheel.modifiers;
+                }
                 PlatformInput::ScrollWheel(scroll_wheel)
             }
             // Translate dragging and dropping of external files from the operating system

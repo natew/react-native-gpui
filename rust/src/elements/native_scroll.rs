@@ -42,6 +42,8 @@ pub struct DriverStats {
     pub offset_y: f64,
     pub max_x: f64,
     pub max_y: f64,
+    pub has_horizontal_scroller: bool,
+    pub has_vertical_scroller: bool,
     last_callback_x: f64,
     last_callback_y: f64,
 }
@@ -548,6 +550,8 @@ pub fn sync_driver(
             let entry = stats.entry(driver_id).or_default();
             entry.max_x = (content_width - width).max(0.0);
             entry.max_y = (content_height - height).max(0.0);
+            entry.has_horizontal_scroller = horizontal && shows_horizontal_scroller;
+            entry.has_vertical_scroller = vertical && shows_vertical_scroller;
             if !matches_native_report {
                 entry.offset_x = target_x;
                 entry.offset_y = target_y;

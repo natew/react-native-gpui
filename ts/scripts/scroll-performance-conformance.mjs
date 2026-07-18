@@ -45,8 +45,9 @@ try {
 
     const beforeTree = await host.dump();
     const scroll = byTestId(beforeTree, "overview-scroll");
+    const nestedInner = byTestId(beforeTree, "nested-inner");
     const anchorBefore = byTestId(beforeTree, "overview-row-020");
-    if (!scroll?.bounds || !anchorBefore?.bounds) {
+    if (!scroll?.bounds || !nestedInner?.bounds || !anchorBefore?.bounds) {
         throw new Error("fixture scroll bounds were not measured");
     }
 
@@ -55,9 +56,16 @@ try {
         y: node.bounds.y + node.bounds.height / 2,
     });
     const point = center(scroll);
+    const nestedStats = await host.request({ $cmd: "scrollDriverStats", ...center(nestedInner) });
+    if (!nestedStats.ok || !nestedStats.hasVerticalScroller) {
+        throw new Error(`default vertical overlay scroller was not enabled: ${JSON.stringify(nestedStats)}`);
+    }
     const initial = await host.request({ $cmd: "scrollDriverStats", ...point, reset: true });
     if (!initial.ok || initial.driver !== "appkit") {
         throw new Error(`expected an AppKit scroll driver, got ${JSON.stringify(initial)}`);
+    }
+    if (initial.hasVerticalScroller) {
+        throw new Error(`showsVerticalScrollIndicator=false still exposed a scroller: ${JSON.stringify(initial)}`);
     }
 
     const logPath = join(host.sessionDir, "service.log");

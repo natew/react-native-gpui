@@ -28,6 +28,7 @@ function App() {
             </ScrollView>
             <ScrollView
                 testID="overview-scroll"
+                showsVerticalScrollIndicator={false}
                 style={{ flex: 1, borderRadius: 10, backgroundColor: "#181b22" }}
                 contentContainerStyle={{ padding: 8 }}
             >

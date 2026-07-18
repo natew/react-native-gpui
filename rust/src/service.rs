@@ -3913,6 +3913,8 @@ fn main() {
                                 "offsetY": stats.offset_y,
                                 "maxX": stats.max_x,
                                 "maxY": stats.max_y,
+                                "hasHorizontalScroller": stats.has_horizontal_scroller,
+                                "hasVerticalScroller": stats.has_vertical_scroller,
                             }));
                         } else {
                             let _ = reply.send(serde_json::json!({

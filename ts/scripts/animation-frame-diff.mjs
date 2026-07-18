@@ -89,7 +89,6 @@ async function waitForAnimationWindow(pid) {
     return waitForWindow(
         (window) =>
             window.pid === pid &&
-            window.title === "react-native-gpui" &&
             Math.abs(window.width - expectedWidth) <= 60 &&
             Math.abs(window.height - expectedHeight) <= 60,
         { timeoutMs: 5000, isFixtureExited: () => exited },

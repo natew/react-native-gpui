@@ -74,7 +74,7 @@ async function waitForFixtureWindow() {
             });
             if (pid) {
                 const window = listWindows()
-                    .filter((item) => item.pid === pid && item.title === "react-native-gpui")
+                    .filter((item) => item.pid === pid)
                     .sort((a, b) => b.width * b.height - a.width * a.height)[0];
                 if (window) {
                     fixturePid = pid;

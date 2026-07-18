@@ -74,7 +74,6 @@ async function waitForProbeWindow(pid) {
     return waitForWindow(
         (window) =>
             window.pid === pid &&
-            window.title === "react-native-gpui" &&
             Math.abs(window.width - 1180) <= 80 &&
             Math.abs(window.height - 760) <= 80,
         {

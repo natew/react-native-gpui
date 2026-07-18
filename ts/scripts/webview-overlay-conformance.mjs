@@ -174,10 +174,11 @@ try {
 if (failureMessage) fail(failureMessage);
 
 async function waitForOverlayWindow(pid, timeoutMs) {
+    // test mode is intentionally borderless, so AppKit publishes an empty window
+    // title. pid plus the fixture's unique bounds identifies the content window.
     return waitForWindow(
         (window) =>
             window.pid === pid &&
-            window.title === "react-native-gpui" &&
             Math.abs(window.width - expectedWindow.width) <= 80 &&
             Math.abs(window.height - expectedWindow.height) <= 80,
         {

@@ -76,7 +76,6 @@ async function waitForInputWindow() {
             if (pid) {
                 const windows = listGpuiWindows(pid);
                 const window = [...windows]
-                    .filter((item) => item.title === "react-native-gpui")
                     .sort((a, b) => b.width * b.height - a.width * a.height)[0];
                 if (window) {
                     const state = await cuaJson("get_window_state", {

@@ -3500,7 +3500,17 @@ fn main() {
                             }
                             Incoming::Eval { id, js } => {
                                 if let Some(view) = this.webviews.get(&id) {
-                                    let _ = view.evaluate_script(&js);
+                                    let result = view.evaluate_script(&js);
+                                    if std::env::var("RNGPUI_WEBVIEW_EVENT_DEBUG").is_ok() {
+                                        match result {
+                                            Ok(()) => eprintln!("[webview {id}] eval accepted"),
+                                            Err(error) => {
+                                                eprintln!("[webview {id}] eval rejected: {error}")
+                                            }
+                                        }
+                                    }
+                                } else if std::env::var("RNGPUI_WEBVIEW_EVENT_DEBUG").is_ok() {
+                                    eprintln!("[webview {id}] eval target missing")
                                 }
                             }
                             Incoming::Reload { id } => {

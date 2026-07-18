@@ -332,7 +332,7 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
 
     let window: GpuiWindow;
     try {
-        window = (await waitForWindow((win: GpuiWindow) => win.pid === servicePid && win.title === "react-native-gpui", {
+        window = (await waitForWindow((win: GpuiWindow) => win.pid === servicePid, {
             timeoutMs: 15_000,
             isFixtureExited: () => child.exitCode != null,
         })) as GpuiWindow;
@@ -385,7 +385,7 @@ export async function attachSession(sessionDir: string): Promise<LaunchedHost> {
     assertAlive(meta.servicePid);
     await waitForSocket(meta.socketPath);
     const window = (currentWindow(meta.servicePid) ??
-        ((await waitForWindow((win: GpuiWindow) => win.pid === meta.servicePid && win.title === "react-native-gpui", {
+        ((await waitForWindow((win: GpuiWindow) => win.pid === meta.servicePid, {
             timeoutMs: 5_000,
         })) as GpuiWindow)) as GpuiWindow;
     return makeLaunchedHost({
@@ -497,7 +497,7 @@ export async function attachHost(): Promise<AttachedHost> {
 export function currentWindow(servicePid: number): GpuiWindow | null {
     return (
         (listWindows() as GpuiWindow[])
-            .filter((window) => window.pid === servicePid && window.title === "react-native-gpui")
+            .filter((window) => window.pid === servicePid)
             .sort((a, b) => b.width * b.height - a.width * a.height)[0] ?? null
     );
 }

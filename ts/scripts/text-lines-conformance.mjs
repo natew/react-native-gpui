@@ -81,7 +81,6 @@ async function waitForTextWindow(pid, timeoutMs) {
     return waitForWindow(
         (window) =>
             window.pid === pid &&
-            window.title === "react-native-gpui" &&
             Math.abs(window.bounds.width - expectedWidth) <= 80 &&
             Math.abs(window.bounds.height - expectedHeight) <= 80,
         { timeoutMs, isFixtureExited: () => exited },

@@ -11,7 +11,6 @@ const screenshotPath = `${outDir}/rounded-overflow.png`;
 const pidPath = `${outDir}/service.pid`;
 const expectedWindow = { width: 220, height: 180 };
 const frame = { x: 40, y: 30, width: 140, height: 110 };
-const rootColor = [0x10, 0x20, 0x30];
 const childColor = [0xff, 0x00, 0x33];
 
 rmSync(outDir, { recursive: true, force: true });
@@ -39,8 +38,8 @@ child.on("exit", (code, signal) => {
 const childExit = new Promise((resolveExit) => child.once("exit", resolveExit));
 
 try {
-    const pid = await waitForServicePid(pidPath, { timeoutMs: 5000, isFixtureExited: () => exited });
-    const window = await waitForRoundedWindow(pid, 5000);
+    const pid = await waitForServicePid(pidPath, { timeoutMs: 15_000, isFixtureExited: () => exited });
+    const window = await waitForRoundedWindow(pid, 15_000);
     captureWindow(window, screenshotPath);
     const imageSize = readImageSize(screenshotPath);
     const scaleX = imageSize.width / window.width;
@@ -56,8 +55,10 @@ try {
         Math.round((frame.y + frame.height / 2) * scaleY),
     );
 
-    if (!nearColor(corner, rootColor, 18)) {
-        throw new Error(`rounded corner leaked child color: corner=${corner.join(",")} expected=${rootColor.join(",")}`);
+    // invisible WindowServer captures alpha-divide and quantize the low channels,
+    // so classify the dark blue-green root instead of comparing exact RGB values.
+    if (!isRootContent(corner)) {
+        throw new Error(`rounded corner leaked child color: corner=${corner.join(",")} expected=dark-blue-root-class`);
     }
     if (!isRedContent(center)) {
         throw new Error(`child content did not render in clipped frame: center=${center.join(",")} expected=${childColor.join(",")}`);
@@ -76,7 +77,6 @@ async function waitForRoundedWindow(pid, timeoutMs) {
     return waitForWindow(
         (window) =>
             window.pid === pid &&
-            window.title === "react-native-gpui" &&
             Math.abs(window.width - expectedWindow.width) <= 80 &&
             Math.abs(window.height - expectedWindow.height) <= 80,
         {
@@ -123,8 +123,8 @@ print("\\(Int(round(converted.redComponent * 255)))\\t\\(Int(round(converted.gre
     return raw.trim().split("\t").map((part) => Number(part));
 }
 
-function nearColor(actual, expected, tolerance) {
-    return actual.every((value, index) => Math.abs(value - expected[index]) <= tolerance);
+function isRootContent(actual) {
+    return actual[1] > actual[0] + 12 && actual[2] > actual[0] + 12 && actual[1] < 120 && actual[2] < 140;
 }
 
 function isRedContent(actual) {

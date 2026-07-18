@@ -51,7 +51,6 @@ try {
     const window = await waitForWindow(
         (candidate) =>
             candidate.pid === pid &&
-            candidate.title === "react-native-gpui" &&
             Math.abs(candidate.width - 220) <= 80 &&
             Math.abs(candidate.height - 180) <= 80,
         {

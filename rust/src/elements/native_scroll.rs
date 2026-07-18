@@ -133,15 +133,14 @@ extern "C" fn scroll_hit_test(this: &Object, _: Sel, point: NSPoint) -> id {
             let event_type: u64 = msg_send![current, type];
             if event_type == NS_SCROLL_WHEEL_EVENT {
                 let gpui_view: id = msg_send![this, superview];
-                let gpui_point: NSPoint = msg_send![this, convertPoint: point toView: gpui_view];
                 let bounds: NSRect = msg_send![gpui_view, bounds];
                 let flipped: BOOL = msg_send![gpui_view, isFlipped];
                 let y = if flipped == YES {
-                    gpui_point.y
+                    point.y
                 } else {
-                    bounds.size.height - gpui_point.y
+                    bounds.size.height - point.y
                 };
-                if crate::hit_passthrough::native_underlay_at(gpui_point.x, y) {
+                if crate::hit_passthrough::native_underlay_at(point.x, y) {
                     return nil;
                 }
                 return hit;

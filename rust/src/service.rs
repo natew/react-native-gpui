@@ -1614,7 +1614,7 @@ impl Render for ServiceApp {
                     })
                     .detach();
                     self.inputs.insert(id, state);
-                    self.input_placeholders.insert(id, placeholder);
+                    self.input_placeholders.insert(id, placeholder.clone());
                     self.input_secure.insert(id, secure);
                     self.input_event_counts.insert(id, 0);
                     if auto_focus

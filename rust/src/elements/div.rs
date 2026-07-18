@@ -1782,16 +1782,16 @@ impl Element for ReactDivElement {
             let mut skipped = HashSet::new();
             for index in order.iter() {
                 let visible = child_viewport.is_none_or(|viewport| {
-                    let child = window.layout_bounds(request_layout[*index]);
+                    let child = window.layout_bounds(request_layout[index]);
                     child.right() > viewport.left()
                         && child.left() < viewport.right()
                         && child.bottom() > viewport.top()
                         && child.top() < viewport.bottom()
                 });
                 if visible {
-                    self.children[*index].element.prepaint(window, cx);
+                    self.children[index].element.prepaint(window, cx);
                 } else {
-                    skipped.insert(*index);
+                    skipped.insert(index);
                 }
             }
             if !skipped.is_empty() {

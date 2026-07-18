@@ -286,6 +286,7 @@ impl ReactGhosttyTerminalElement {
                     modifiers.control,
                     modifiers.alt,
                     modifiers.platform,
+                    false,
                 );
                 cx.stop_propagation();
             })

@@ -56,6 +56,7 @@ impl ReactInputElement {
                 let editable = self.element.editable;
                 let listens_key_press = self.element.listens("keyPress");
                 let element_id = self.element.global_id;
+                let input_state = state.clone();
                 let mut input = Input::new(&state)
                     .appearance(false)
                     .focus_bordered(false)
@@ -67,11 +68,17 @@ impl ReactInputElement {
                 // here wins. The inner `TextElement` (state) reads `window.text_style()`
                 // for the font + `font_size`, which is exactly this inherited text style,
                 // so `style.fontSize` now visibly changes the input/placeholder size.
-                // (Text `color`/`placeholderTextColor` and `textAlign` are NOT applied:
-                // gpui-component hardcodes the text color to `theme().foreground` and the
-                // placeholder to `theme().muted_foreground`, and the input never reads a
-                // text alignment — none are reachable through the text style.)
+                // text alignment remains left because gpui-component's editor paints
+                // shaped lines and derives cursor, selection, hit testing, scrolling, and
+                // IME candidate geometry from left-origin positions. supporting alignment
+                // requires shifting that full geometry path together.
                 let style = &self.element.style;
+                if let Some(color) = style.color {
+                    input = input.input_text_color(color);
+                }
+                if let Some(color) = self.element.placeholder_text_color {
+                    input = input.placeholder_text_color(color);
+                }
                 if let Some(size) = style.font_size {
                     input = input.text_size(px(size));
                 }
@@ -89,12 +96,13 @@ impl ReactInputElement {
                 }
                 div()
                     .size_full()
-                    .on_key_down(move |event: &KeyDownEvent, _: &mut Window, _: &mut App| {
+                    .on_key_down(move |event: &KeyDownEvent, _: &mut Window, cx: &mut App| {
                         if !editable || !listens_key_press {
                             return;
                         }
                         let key = js_key(&event.keystroke);
-                        if key == "Enter" {
+                        let is_composing = input_state.read(cx).is_composing();
+                        if key == "Enter" && !is_composing {
                             return;
                         }
                         crate::bridge::key_press(
@@ -104,6 +112,7 @@ impl ReactInputElement {
                             event.keystroke.modifiers.control,
                             event.keystroke.modifiers.alt,
                             event.keystroke.modifiers.platform,
+                            is_composing,
                         );
                     })
                     .child(input)

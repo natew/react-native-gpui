@@ -162,6 +162,12 @@ pub struct ReactElement {
     pub secure_text_entry: bool,
     /// whether text input nodes accept editing. RN TextInput defaults to editable.
     pub editable: bool,
+    /// whether a newly-mounted text input should take focus once.
+    pub auto_focus: bool,
+    /// resolved RN placeholderTextColor for gpui-drawn inputs.
+    pub placeholder_text_color: Option<Hsla>,
+    /// latest native edit acknowledged by the serialized controlled value.
+    pub most_recent_event_count: u64,
     /// event names this node listens to: "press", "changeText", "layout", …
     pub events: Vec<String>,
     /// native-only key for runtime layout overrides, bypassing React commits.

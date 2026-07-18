@@ -58,6 +58,8 @@
         "conformance:display-none": "bun run scripts/display-none-conformance.ts",
         "conformance:inspector": "node scripts/inspector-conformance.mjs",
         "conformance:input": "node scripts/input-conformance-driver.mjs",
+        "conformance:input-runtime": "bun run scripts/input-runtime-conformance.ts",
+        "probe:input-latency": "bun run scripts/input-latency-probe.ts",
         "conformance:input:manual": "node scripts/run-hermes-example.mjs examples/input-conformance.tsx --interactive",
         "conformance:list-group": "node scripts/list-group-conformance-driver.mjs",
         "conformance:legend-100k": "bun run scripts/legend-list-100k-conformance.mjs",

@@ -36,9 +36,12 @@ export type SerializedNode = {
     value?: string;
     editable?: boolean;
     secureTextEntry?: boolean;
+    autoFocus?: boolean;
+    mostRecentEventCount?: number;
     src?: string;
     name?: string;
     placeholder?: string;
+    placeholderTextColor?: string;
     /** `<SystemView>` NSVisualEffectView material name */
     systemMaterial?: string;
     /** `<SystemView>` NSGlassEffectView liquid-glass variant name (macOS 26+) */
@@ -125,6 +128,8 @@ export type BridgeEvent =
           ctrlKey?: boolean;
           altKey?: boolean;
           metaKey?: boolean;
+          isComposing?: boolean;
+          eventCount?: number;
           button?: number;
           buttons?: number;
           pressDrag?: boolean;

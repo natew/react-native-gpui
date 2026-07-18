@@ -284,6 +284,53 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
                 .to_string(),
             reply,
         }),
+        "inputState" => Ok(Incoming::DebugInputState { reply }),
+        "imeSetMarked" => Ok(Incoming::DebugImeSetMarked {
+            text: value
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or("imeSetMarked command needs text")?
+                .to_string(),
+            selected_range: optional_range(value, "selectedRange")?,
+            replacement_range: optional_range(value, "replacementRange")?,
+            reply,
+        }),
+        "imeCommit" => Ok(Incoming::DebugImeCommit {
+            text: value
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or("imeCommit command needs text")?
+                .to_string(),
+            reply,
+        }),
+        "imeUnmark" => Ok(Incoming::DebugImeUnmark { reply }),
+        "axEdit" => Ok(Incoming::DebugAccessibilityEditInput {
+            id: value
+                .get("id")
+                .and_then(Value::as_u64)
+                .ok_or("axEdit command needs id")?,
+            text: value
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or("axEdit command needs text")?
+                .to_string(),
+            insert_at_cursor: value
+                .get("insertAtCursor")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            reply,
+        }),
+        "axFocus" => Ok(Incoming::DebugAccessibilitySetInputFocus {
+            id: value
+                .get("id")
+                .and_then(Value::as_u64)
+                .ok_or("axFocus command needs id")?,
+            focused: value
+                .get("focused")
+                .and_then(Value::as_bool)
+                .ok_or("axFocus command needs focused")?,
+            reply,
+        }),
         "key" => Ok(Incoming::DebugKeyPress {
             key: value
                 .get("key")
@@ -321,6 +368,25 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
         }),
         _ => Err("unknown debug command"),
     }
+}
+
+fn optional_range(
+    value: &Value,
+    key: &'static str,
+) -> Result<Option<std::ops::Range<usize>>, &'static str> {
+    let Some(items) = value.get(key) else {
+        return Ok(None);
+    };
+    let items = items.as_array().ok_or("range must be an array")?;
+    if items.len() != 2 {
+        return Err("range must contain start and end");
+    }
+    let start = items[0].as_u64().ok_or("range start must be an integer")? as usize;
+    let end = items[1].as_u64().ok_or("range end must be an integer")? as usize;
+    if end < start {
+        return Err("range end must not precede start");
+    }
+    Ok(Some(start..end))
 }
 
 fn number(value: &Value, key: &'static str) -> Result<f32, &'static str> {

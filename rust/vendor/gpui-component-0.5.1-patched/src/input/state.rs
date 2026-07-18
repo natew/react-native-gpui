@@ -5,7 +5,7 @@
 use anyhow::Result;
 use gpui::{
     Action, App, AppContext, Bounds, ClipboardItem, Context, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
+    EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, KeyBinding,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
     Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Subscription,
     Task, UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _, px,
@@ -15,7 +15,7 @@ use serde::Deserialize;
 use std::ops::Range;
 use std::rc::Rc;
 use sum_tree::Bias;
-use unicode_segmentation::*;
+use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentation};
 
 use super::{
     blink_cursor::BlinkCursor, change::Change, element::TextElement, mask_pattern::MaskPattern,
@@ -317,6 +317,8 @@ pub struct InputState {
     /// The mask pattern for formatting the input text
     pub(crate) mask_pattern: MaskPattern,
     pub(super) placeholder: SharedString,
+    pub(super) text_color: Option<Hsla>,
+    pub(super) placeholder_text_color: Option<Hsla>,
 
     /// Popover
     diagnostic_popover: Option<Entity<DiagnosticPopover>>,
@@ -412,6 +414,8 @@ impl InputState {
             deferred_scroll_offset: None,
             preferred_column: None,
             placeholder: SharedString::default(),
+            text_color: None,
+            placeholder_text_color: None,
             mask_pattern: MaskPattern::default(),
             lsp: Lsp::default(),
             diagnostic_popover: None,
@@ -828,16 +832,41 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.set_cursor_position_without_focus(position, cx);
+        self.focus(window, cx);
+    }
+
+    /// set the cursor without changing which control owns focus.
+    pub fn set_cursor_position_without_focus(
+        &mut self,
+        position: impl Into<Position>,
+        cx: &mut Context<Self>,
+    ) {
         let position: Position = position.into();
         let offset = self.text.position_to_offset(&position);
 
         self.move_to(offset, None, cx);
         self.update_preferred_column();
-        self.focus(window, cx);
+    }
+
+    /// whether this input currently owns appkit marked text.
+    pub fn is_composing(&self) -> bool {
+        self.ime_marked_range.is_some()
+    }
+
+    pub fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+
+    pub fn selected_text_value(&self) -> String {
+        self.selected_text().to_string()
     }
 
     /// Focus the input field.
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.disabled {
+            return;
+        }
         self.focus_handle.focus(window);
         self.blink_cursor.update(cx, |cursor, cx| {
             cursor.start(cx);
@@ -1043,12 +1072,16 @@ impl InputState {
         }
     }
 
-    pub(super) fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn delete_backward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor()), cx)
         }
         self.replace_text_in_range(None, "", window, cx);
         self.pause_blink_cursor(cx);
+    }
+
+    pub(super) fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_backward(window, cx);
     }
 
     pub(super) fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
@@ -1155,6 +1188,13 @@ impl InputState {
 
     pub(super) fn enter(&mut self, action: &Enter, window: &mut Window, cx: &mut Context<Self>) {
         if self.handle_action_for_context_menu(Box::new(action.clone()), window, cx) {
+            return;
+        }
+
+        // appkit commits marked text through `insertText:`. if the matching key action
+        // also reaches us, leave the composition intact instead of inserting a newline
+        // and turning the candidate-confirmation key into onSubmitEditing.
+        if self.ime_marked_range.is_some() {
             return;
         }
 
@@ -1683,25 +1723,11 @@ impl InputState {
     }
 
     pub(super) fn previous_boundary(&self, offset: usize) -> usize {
-        let mut offset = self.text.clip_offset(offset.saturating_sub(1), Bias::Left);
-        if let Some(ch) = self.text.char_at(offset) {
-            if ch == '\r' {
-                offset -= 1;
-            }
-        }
-
-        offset
+        previous_grapheme_boundary(&self.text, offset)
     }
 
     pub(super) fn next_boundary(&self, offset: usize) -> usize {
-        let mut offset = self.text.clip_offset(offset + 1, Bias::Right);
-        if let Some(ch) = self.text.char_at(offset) {
-            if ch == '\r' {
-                offset += 1;
-            }
-        }
-
-        offset
+        next_grapheme_boundary(&self.text, offset)
     }
 
     /// Returns the true to let InputElement to render cursor, when Input is focused and current BlinkCursor is visible.
@@ -1959,8 +1985,11 @@ impl EntityInputHandler for InputState {
             .map(|range| self.range_to_utf16(&range.into()))
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        self.ime_marked_range = None;
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.ime_marked_range.take().is_some() {
+            cx.emit(InputEvent::Change);
+            cx.notify();
+        }
     }
 
     /// Replace text in range.
@@ -2084,14 +2113,17 @@ impl EntityInputHandler for InputState {
             self.ime_marked_range = Some((range.start..range.start + new_text.len()).into());
             self.selected_range = new_selected_range_utf16
                 .as_ref()
-                .map(|range_utf16| self.range_from_utf16(range_utf16))
-                .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+                .map(|selected| utf16_range_in_text(new_text, selected))
+                .map(|selected| {
+                    range.start + selected.start..range.start + selected.end
+                })
                 .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len())
                 .into();
         }
         self.mode.update_auto_grow(&self.text_wrapper);
         self.history.start_grouping();
         self.push_history(&old_text, &range, new_text);
+        cx.emit(InputEvent::Change);
         cx.notify();
     }
 
@@ -2169,6 +2201,118 @@ impl EntityInputHandler for InputState {
         }
 
         None
+    }
+}
+
+impl InputState {
+    /// return the appkit candidate rectangle for a utf-16 text range.
+    pub fn bounds_for_utf16_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let bounds = self.last_bounds?;
+        EntityInputHandler::bounds_for_range(self, range_utf16, bounds, window, cx)
+    }
+}
+
+fn utf16_range_in_text(text: &str, range: &Range<usize>) -> Range<usize> {
+    utf16_offset_in_text(text, range.start)..utf16_offset_in_text(text, range.end)
+}
+
+fn previous_grapheme_boundary(text: &Rope, offset: usize) -> usize {
+    let offset = text.clip_offset(offset.min(text.len()), Bias::Left);
+    if offset == 0 {
+        return 0;
+    }
+
+    let mut grapheme = GraphemeCursor::new(offset, text.len(), true);
+    let mut chunk = text.chunk_cursor_at(offset);
+    loop {
+        match grapheme.prev_boundary(chunk.chunk(), chunk.byte_offset()) {
+            Ok(Some(boundary)) => return boundary,
+            Ok(None) => return 0,
+            Err(GraphemeIncomplete::PrevChunk) => {
+                assert!(chunk.prev(), "grapheme cursor requested text before offset zero");
+            }
+            Err(GraphemeIncomplete::PreContext(context_offset)) => {
+                assert!(context_offset > 0, "grapheme cursor requested context before offset zero");
+                let context = text.chunk_cursor_at(context_offset - 1);
+                grapheme.provide_context(context.chunk(), context.byte_offset());
+            }
+            Err(GraphemeIncomplete::NextChunk | GraphemeIncomplete::InvalidOffset) => {
+                unreachable!("invalid previous-grapheme chunk traversal")
+            }
+        }
+    }
+}
+
+fn next_grapheme_boundary(text: &Rope, offset: usize) -> usize {
+    let offset = text.clip_offset(offset.min(text.len()), Bias::Right);
+    if offset == text.len() {
+        return text.len();
+    }
+
+    let mut grapheme = GraphemeCursor::new(offset, text.len(), true);
+    let mut chunk = text.chunk_cursor_at(offset);
+    loop {
+        match grapheme.next_boundary(chunk.chunk(), chunk.byte_offset()) {
+            Ok(Some(boundary)) => return boundary,
+            Ok(None) => return text.len(),
+            Err(GraphemeIncomplete::NextChunk) => {
+                assert!(chunk.next(), "grapheme cursor requested text after the end");
+            }
+            Err(GraphemeIncomplete::PreContext(context_offset)) => {
+                assert!(context_offset > 0, "grapheme cursor requested context before offset zero");
+                let context = text.chunk_cursor_at(context_offset - 1);
+                grapheme.provide_context(context.chunk(), context.byte_offset());
+            }
+            Err(GraphemeIncomplete::PrevChunk | GraphemeIncomplete::InvalidOffset) => {
+                unreachable!("invalid next-grapheme chunk traversal")
+            }
+        }
+    }
+}
+
+fn utf16_offset_in_text(text: &str, target: usize) -> usize {
+    let mut utf16_offset = 0;
+    for (byte_offset, ch) in text.char_indices() {
+        if utf16_offset >= target {
+            return byte_offset;
+        }
+        let next = utf16_offset + ch.len_utf16();
+        if target < next {
+            return byte_offset;
+        }
+        utf16_offset = next;
+    }
+    text.len()
+}
+
+#[cfg(test)]
+mod rngpui_tests {
+    use super::{next_grapheme_boundary, previous_grapheme_boundary, utf16_range_in_text};
+    use ropey::Rope;
+
+    #[test]
+    fn ime_selection_range_is_relative_to_unicode_marked_text() {
+        assert_eq!(utf16_range_in_text("日本", &(1..2)), 3..6);
+        assert_eq!(utf16_range_in_text("😀x", &(2..3)), 4..5);
+    }
+
+    #[test]
+    fn cursor_boundaries_preserve_combining_graphemes() {
+        let text = Rope::from("ae\u{301}b");
+        assert_eq!(next_grapheme_boundary(&text, 1), 4);
+        assert_eq!(previous_grapheme_boundary(&text, 4), 1);
+    }
+
+    #[test]
+    fn cursor_boundaries_preserve_emoji_zwj_graphemes() {
+        let text = Rope::from("A👩‍💻B");
+        assert_eq!(next_grapheme_boundary(&text, 1), 12);
+        assert_eq!(previous_grapheme_boundary(&text, 12), 1);
     }
 }
 

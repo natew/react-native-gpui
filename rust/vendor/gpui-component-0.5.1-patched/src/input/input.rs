@@ -1,8 +1,8 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, DefiniteLength, Edges, EdgesRefinement, Entity, InteractiveElement as _,
-    IntoElement, IsZero, MouseButton, ParentElement as _, Rems, RenderOnce, StyleRefinement,
-    Styled, Window, div, px, relative,
+    Hsla, IntoElement, IsZero, MouseButton, ParentElement as _, Rems, RenderOnce,
+    StyleRefinement, Styled, Window, div, px, relative,
 };
 
 use crate::button::{Button, ButtonVariants as _};
@@ -34,6 +34,8 @@ pub struct Input {
     focus_bordered: bool,
     tab_index: isize,
     selected: bool,
+    text_color: Option<Hsla>,
+    placeholder_text_color: Option<Hsla>,
 }
 
 impl Sizable for Input {
@@ -72,6 +74,8 @@ impl Input {
             focus_bordered: true,
             tab_index: 0,
             selected: false,
+            text_color: None,
+            placeholder_text_color: None,
         }
     }
 
@@ -136,6 +140,18 @@ impl Input {
     /// Set the tab index for the input, default is 0.
     pub fn tab_index(mut self, index: isize) -> Self {
         self.tab_index = index;
+        self
+    }
+
+    /// set the editor text color.
+    pub fn input_text_color(mut self, color: Hsla) -> Self {
+        self.text_color = Some(color);
+        self
+    }
+
+    /// set the placeholder text color.
+    pub fn placeholder_text_color(mut self, color: Hsla) -> Self {
+        self.placeholder_text_color = Some(color);
         self
     }
 
@@ -245,6 +261,8 @@ impl RenderOnce for Input {
         self.state.update(cx, |state, _| {
             state.disabled = self.disabled;
             state.size = self.size;
+            state.text_color = self.text_color;
+            state.placeholder_text_color = self.placeholder_text_color;
         });
 
         let state = self.state.read(cx);

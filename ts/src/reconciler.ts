@@ -271,6 +271,7 @@ const PROP_TO_EVENT: Record<string, string> = {
     onMeasureViewport: "terminalViewport",
 };
 const handlers = new Map<number, Record<string, Function>>();
+const inputEventCounts = new Map<number, number>();
 
 function chainHandler(first: Function | undefined, next: Function) {
     return first
@@ -326,6 +327,8 @@ export function dispatchEvent(
         ctrlKey?: boolean;
         altKey?: boolean;
         metaKey?: boolean;
+        isComposing?: boolean;
+        eventCount?: number;
         button?: number;
         buttons?: number;
         pressDrag?: boolean;
@@ -344,6 +347,10 @@ export function dispatchEvent(
         rows?: number;
     },
 ) {
+    if (event === "changeText" && typeof payload.eventCount === "number") {
+        inputEventCounts.set(id, Math.max(inputEventCounts.get(id) ?? 0, payload.eventCount));
+        markSerializeDirtyById(id);
+    }
     if (event === "layout" && payload.layout && typeof payload.layout === "object") {
         const layout = payload.layout as Partial<LayoutRect>;
         if (
@@ -360,7 +367,7 @@ export function dispatchEvent(
     if (!fn) return;
     let result: unknown;
     if (event === "changeText") result = fn(payload.value ?? "");
-    else if (event === "change") result = fn(createValueEvent(event, payload.value ?? ""));
+    else if (event === "change") result = fn(createValueEvent(event, payload));
     else if (event === "message") result = fn({ nativeEvent: { data: payload.value ?? "" } });
     else if (event === "layout") result = fn({ nativeEvent: { layout: payload.layout } });
     else if (event === "keyPress") result = fn(createKeyPressEvent(payload));
@@ -538,6 +545,7 @@ function cleanupInstance(node: Instance | TextInstance) {
     node.parent = null;
     node.cached = undefined;
     handlers.delete(node.id);
+    inputEventCounts.delete(node.id);
     measuredIds.delete(node.id);
     pseudoEventIds.delete(node.id);
     layouts.delete(node.id);
@@ -665,12 +673,21 @@ function createPublicInstance(type: string, props: Record<string, unknown>): Ins
     return instance;
 }
 
-function createValueEvent(type: string, value: string) {
+function createValueEvent(
+    type: string,
+    payload: { value?: string; isComposing?: boolean; eventCount?: number },
+) {
+    const value = payload.value ?? "";
     return {
         ...createEvent(type, { value }),
         target: { value },
         currentTarget: { value },
-        nativeEvent: { text: value, value },
+        nativeEvent: {
+            text: value,
+            value,
+            isComposing: !!payload.isComposing,
+            eventCount: payload.eventCount ?? 0,
+        },
     };
 }
 
@@ -680,6 +697,7 @@ function createKeyPressEvent(payload: {
     ctrlKey?: boolean;
     altKey?: boolean;
     metaKey?: boolean;
+    isComposing?: boolean;
 }) {
     const event = createEvent("keyPress", payload);
     event.key = payload.key;
@@ -687,11 +705,13 @@ function createKeyPressEvent(payload: {
     event.ctrlKey = !!payload.ctrlKey;
     event.altKey = !!payload.altKey;
     event.metaKey = !!payload.metaKey;
+    event.isComposing = !!payload.isComposing;
     event.nativeEvent.key = payload.key;
     event.nativeEvent.shiftKey = !!payload.shiftKey;
     event.nativeEvent.ctrlKey = !!payload.ctrlKey;
     event.nativeEvent.altKey = !!payload.altKey;
     event.nativeEvent.metaKey = !!payload.metaKey;
+    event.nativeEvent.isComposing = !!payload.isComposing;
     return event;
 }
 
@@ -1043,8 +1063,12 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
         case "TextInput":
             node.type = props.multiline ? "textarea" : "textinput";
             node.placeholder = (props.placeholder as string) ?? "";
+            const placeholderTextColor = cssColorString(resolveColorValue(props.placeholderTextColor));
+            if (placeholderTextColor) node.placeholderTextColor = placeholderTextColor;
             if (props.editable === false) node.editable = false;
             if (props.secureTextEntry === true) node.secureTextEntry = true;
+            if (props.autoFocus === true) node.autoFocus = true;
+            node.mostRecentEventCount = inputEventCounts.get(inst.id) ?? 0;
             if (props.value != null) node.value = String(props.value);
             else if (props.defaultValue != null) node.value = String(props.defaultValue);
             break;

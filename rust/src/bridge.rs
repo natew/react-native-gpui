@@ -198,12 +198,26 @@ pub fn scroll_event(
     }));
 }
 
-pub fn change_text(id: u64, value: &str) {
-    emit_value(json!({ "type": "event", "id": id, "event": "changeText", "value": value }));
+pub fn change_text(id: u64, value: &str, is_composing: bool, event_count: u64) {
+    emit_value(json!({
+        "type": "event",
+        "id": id,
+        "event": "changeText",
+        "value": value,
+        "isComposing": is_composing,
+        "eventCount": event_count
+    }));
 }
 
-pub fn change(id: u64, value: &str) {
-    emit_value(json!({ "type": "event", "id": id, "event": "change", "value": value }));
+pub fn change(id: u64, value: &str, is_composing: bool, event_count: u64) {
+    emit_value(json!({
+        "type": "event",
+        "id": id,
+        "event": "change",
+        "value": value,
+        "isComposing": is_composing,
+        "eventCount": event_count
+    }));
 }
 
 pub fn key_press(
@@ -213,6 +227,7 @@ pub fn key_press(
     ctrl_key: bool,
     alt_key: bool,
     meta_key: bool,
+    is_composing: bool,
 ) {
     emit_value(json!({
         "type": "event",
@@ -222,7 +237,8 @@ pub fn key_press(
         "shiftKey": shift_key,
         "ctrlKey": ctrl_key,
         "altKey": alt_key,
-        "metaKey": meta_key
+        "metaKey": meta_key,
+        "isComposing": is_composing
     }));
 }
 

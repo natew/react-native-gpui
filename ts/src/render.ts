@@ -155,6 +155,8 @@ export function createRoot(options: RootOptions = {}): Root {
             ctrlKey: e.ctrlKey,
             altKey: e.altKey,
             metaKey: e.metaKey,
+            isComposing: e.isComposing,
+            eventCount: e.eventCount,
             button: e.button,
             buttons: e.buttons,
             pressDrag: e.pressDrag,

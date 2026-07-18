@@ -60,7 +60,7 @@ re-renders.
 
 APIs: `StyleSheet`, `Dimensions`, `useWindowDimensions`, `Platform`, `PixelRatio`, `useColorScheme`, `AppRegistry`, `createRoot` / `render`.
 
-- **Real text input** (`TextInput`) is backed by [gpui-component](https://github.com/longbridge/gpui-component)'s editor: selection, IME, copy/paste, word motion, multiline.
+- **Real text input** (`TextInput`) is backed by [gpui-component](https://github.com/longbridge/gpui-component)'s editor: selection, IME, copy/paste, word motion, multiline. Resolved `style.color` and `placeholderTextColor` paint through the native editor. `onChange.nativeEvent` includes `isComposing` and `eventCount`, so controlled inputs can preserve native marked text while React commits catch up.
 - **Text truncation** follows React Native's `numberOfLines`: one-line labels truncate with ellipsis, and multi-line labels are line-clamped.
 - **Native portals** (`PortalProvider`, `Portal`, `PortalHost`) render overlay content at the matching host during GPUI serialization, so Tamagui Dialog/Popover/Sheet can avoid extra state-driven portal fallbacks.
 - **RN-style measurement** (`measure`, `measureInWindow`, `measureLayout`) is exposed on host refs. Floating overlay libraries such as Tamagui's Popover/Select can measure trigger and content nodes without app-specific adapters.
@@ -204,6 +204,7 @@ bun run kitchen                      # the full component surface + self-validat
 bun run conformance:animation        # Animated frame progression fixture
 bun run conformance:animation:diff   # deterministic Animated PNG frame diff
 bun run conformance:input            # TextInput typing, Return submit, Shift+Return newline
+bun run conformance:input-runtime    # nonactivating focus, tab, IME, controlled state, latency
 bun run conformance:portal           # Portal overlay and TextInput-in-portal behavior
 bun run conformance:native-layout    # native layout override without React width state
 bun run conformance:text-lines       # visual fixture for Text numberOfLines

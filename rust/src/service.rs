@@ -9,10 +9,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use gpui::{
-    App, AppContext, Bounds, Context, Entity, InteractiveElement as _, IntoElement, KeyBinding,
-    Keystroke, Menu, MenuItem, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, Styled, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, actions, point, px, size,
+    AnyElement, App, AppContext, Bounds, Context, Element, ElementId, Entity, EntityInputHandler,
+    GlobalElementId, InspectorElementId, InteractiveElement as _, IntoElement, KeyBinding,
+    Keystroke, LayoutId, Menu, MenuItem, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, Styled,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, point, px, size,
 };
 use gpui_component::input::{Enter, InputEvent, InputState, Position};
 use gpui_component::theme::{Theme, ThemeMode};
@@ -323,6 +324,18 @@ fn parse_json_tree(
         .get("editable")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    let auto_focus = obj
+        .get("autoFocus")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let most_recent_event_count = obj
+        .get("mostRecentEventCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let placeholder_text_color = obj
+        .get("placeholderTextColor")
+        .and_then(|v| v.as_str())
+        .and_then(crate::style::parse_css_color);
     let events: Vec<String> = obj
         .get("events")
         .and_then(|v| v.as_array())
@@ -443,6 +456,9 @@ fn parse_json_tree(
         value,
         secure_text_entry,
         editable,
+        auto_focus,
+        placeholder_text_color,
+        most_recent_event_count,
         events,
         native_layout_key,
         native_resize,
@@ -727,7 +743,9 @@ struct ServiceApp {
     // persistent gpui-component input state, one per <TextInput>/<TextArea> id.
     inputs: HashMap<u64, Entity<InputState>>,
     input_values: HashMap<u64, Option<String>>,
+    input_placeholders: HashMap<u64, String>,
     input_secure: HashMap<u64, bool>,
+    input_event_counts: HashMap<u64, u64>,
     suppressed_input_changes: HashMap<u64, VecDeque<String>>,
     // persistent native WebView, one per <WebView> id.
     webviews: HashMap<u64, Rc<wry::WebView>>,
@@ -748,7 +766,219 @@ struct ServiceApp {
     debug_dump_scheduled: bool,
 }
 
+struct FrameMarker {
+    child: AnyElement,
+    input: PaintedInputSnapshot,
+}
+
+impl FrameMarker {
+    fn new(child: AnyElement, input: PaintedInputSnapshot) -> Self {
+        Self { child, input }
+    }
+}
+
+#[derive(Clone, Default)]
+struct PaintedInputSnapshot {
+    frame: u64,
+    focused_id: Option<u64>,
+    value: Option<String>,
+    event_count: u64,
+}
+
+static LAST_PAINTED_INPUT: Lazy<Mutex<PaintedInputSnapshot>> =
+    Lazy::new(|| Mutex::new(PaintedInputSnapshot::default()));
+
+impl Element for FrameMarker {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+        self.input.frame = anim_trace::on_frame_painted();
+        *LAST_PAINTED_INPUT.lock().unwrap() = self.input.clone();
+    }
+}
+
+impl IntoElement for FrameMarker {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
 impl ServiceApp {
+    fn set_input_focus(
+        &mut self,
+        id: u64,
+        focused: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if focused {
+            let Some(state) = self.inputs.get(&id) else {
+                return false;
+            };
+            let focused = state.update(cx, |input, cx| {
+                if input.is_disabled() {
+                    return false;
+                }
+                input.focus(window, cx);
+                true
+            });
+            if focused {
+                self.focused_input = Some(id);
+            }
+            focused
+        } else if self.focused_input == Some(id) {
+            window.focus(&self.app_focus);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn input_snapshot_for_paint(&self, cx: &App) -> PaintedInputSnapshot {
+        let focused_id = self.focused_input;
+        let value = focused_id
+            .and_then(|id| self.inputs.get(&id))
+            .map(|input| input.read(cx).value().to_string());
+        let event_count = focused_id
+            .and_then(|id| self.input_event_counts.get(&id).copied())
+            .unwrap_or(0);
+        PaintedInputSnapshot {
+            frame: 0,
+            focused_id,
+            value,
+            event_count,
+        }
+    }
+
+    fn emit_input_change(&mut self, id: u64, value: &str, is_composing: bool) -> u64 {
+        let event_count = self.input_event_counts.entry(id).or_default();
+        *event_count = event_count.saturating_add(1);
+        bridge::change_text(id, value, is_composing, *event_count);
+        bridge::change(id, value, is_composing, *event_count);
+        *event_count
+    }
+
+    fn edit_input_for_accessibility(
+        &mut self,
+        id: u64,
+        text: &str,
+        insert_at_cursor: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(state) = self.inputs.get(&id).cloned() else {
+            return false;
+        };
+        let edited = state.update(cx, |input, cx| {
+            if input.is_disabled() {
+                return false;
+            }
+            if insert_at_cursor {
+                input.focus(window, cx);
+                input.replace_text_in_range(None, text, window, cx);
+            } else {
+                let end = input.value().as_ref().encode_utf16().count();
+                input.replace_text_in_range(Some(0..end), text, window, cx);
+            }
+            true
+        });
+        if edited && insert_at_cursor {
+            self.focused_input = Some(id);
+        }
+        edited
+    }
+
+    fn debug_input_snapshot(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> serde_json::Value {
+        let Some(id) = self.focused_input else {
+            return serde_json::json!({"ok": false, "error": "no focused input"});
+        };
+        let Some(state) = self.inputs.get(&id).cloned() else {
+            return serde_json::json!({"ok": false, "error": "focused input is missing"});
+        };
+        let event_count = self.input_event_counts.get(&id).copied().unwrap_or(0);
+        let painted = LAST_PAINTED_INPUT.lock().unwrap().clone();
+        state.update(cx, |input, cx| {
+            let selected = input
+                .selected_text_range(true, window, cx)
+                .map(|selection| selection.range);
+            let marked = input.marked_text_range(window, cx);
+            let candidate_range = marked.clone().or_else(|| selected.clone());
+            let candidate_bounds = candidate_range
+                .and_then(|range| input.bounds_for_utf16_range(range, window, cx))
+                .map(|bounds| {
+                    serde_json::json!({
+                        "x": f32::from(bounds.origin.x),
+                        "y": f32::from(bounds.origin.y),
+                        "width": f32::from(bounds.size.width),
+                        "height": f32::from(bounds.size.height),
+                    })
+                });
+            serde_json::json!({
+                "ok": true,
+                "focusedId": id,
+                "value": input.value().to_string(),
+                "isComposing": input.is_composing(),
+                "selectedRange": selected.map(|range| [range.start, range.end]),
+                "markedRange": marked.map(|range| [range.start, range.end]),
+                "candidateBounds": candidate_bounds,
+                "eventCount": event_count,
+                "painted": {
+                    "frame": painted.frame,
+                    "focusedId": painted.focused_id,
+                    "value": painted.value,
+                    "eventCount": painted.event_count,
+                },
+            })
+        })
+    }
+
     fn write_debug_dump(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.dump_tree_path.as_ref() else {
             return;
@@ -782,7 +1012,16 @@ impl ServiceApp {
     }
 }
 
-type InputSpec = (u64, String, Option<String>, bool, bool);
+struct InputSpec {
+    id: u64,
+    placeholder: String,
+    value: Option<String>,
+    multiline: bool,
+    secure: bool,
+    auto_focus: bool,
+    editable: bool,
+    most_recent_event_count: u64,
+}
 
 fn schedule_inspector_activation(cx: &mut Context<ServiceApp>, token: u64) {
     cx.spawn(async move |this, cx| {
@@ -834,17 +1073,20 @@ fn schedule_inspector_menu_close(cx: &mut Context<ServiceApp>, token: u64) {
     .detach();
 }
 
-/// collect (id, placeholder, value, multiline, secure) for every text-input node in the tree.
+/// collect the native state inputs for every text-input node in the tree.
 fn collect_inputs(el: &Arc<ReactElement>, out: &mut Vec<InputSpec>) {
     if el.element_type == "textinput" || el.element_type == "textarea" {
         let multiline = el.element_type == "textarea";
-        out.push((
-            el.global_id,
-            el.text.clone().unwrap_or_default(),
-            el.value.clone(),
+        out.push(InputSpec {
+            id: el.global_id,
+            placeholder: el.text.clone().unwrap_or_default(),
+            value: el.value.clone(),
             multiline,
-            el.secure_text_entry && !multiline,
-        ));
+            secure: el.secure_text_entry && !multiline,
+            auto_focus: el.auto_focus,
+            editable: el.editable,
+            most_recent_event_count: el.most_recent_event_count,
+        });
     }
     for c in &el.children {
         collect_inputs(c, out);
@@ -1045,8 +1287,6 @@ impl Render for ServiceApp {
         if window.focused(cx).is_none() {
             window.focus(&self.app_focus);
         }
-        // per-draw counter behind frameStats / trace — one atomic + bounded ring push.
-        anim_trace::on_frame_painted();
         // reset the per-frame hit-test passthrough registry before this frame's prepaint
         // pass repopulates it (webview rects + occluder rects, for native webview events).
         hit_passthrough::begin_frame();
@@ -1181,13 +1421,36 @@ impl Render for ServiceApp {
             // it so this view re-renders (and the edit shows) when the input changes.
             let mut specs = Vec::new();
             collect_inputs(&self.root, &mut specs);
-            let present: HashSet<u64> = specs.iter().map(|(id, _, _, _, _)| *id).collect();
+            let present: HashSet<u64> = specs.iter().map(|spec| spec.id).collect();
+            if let Some(id) = self.focused_input
+                && !present.contains(&id)
+            {
+                self.focused_input = None;
+                window.focus(&self.app_focus);
+                #[cfg(target_os = "macos")]
+                ax::set_focused_text_node(id, false);
+            }
             self.inputs.retain(|id, _| present.contains(id));
             self.input_values.retain(|id, _| present.contains(id));
+            self.input_placeholders.retain(|id, _| present.contains(id));
             self.input_secure.retain(|id, _| present.contains(id));
+            self.input_event_counts.retain(|id, _| present.contains(id));
             self.suppressed_input_changes
                 .retain(|id, _| present.contains(id));
-            for (id, placeholder, value, multiline, secure) in specs {
+            for InputSpec {
+                id,
+                placeholder,
+                value,
+                multiline,
+                secure,
+                auto_focus,
+                editable,
+                most_recent_event_count,
+            } in specs
+            {
+                if !editable && self.focused_input == Some(id) {
+                    window.focus(&self.app_focus);
+                }
                 if !self.inputs.contains_key(&id) {
                     let initial_value = value.clone();
                     let state = cx.new(|cx| {
@@ -1208,7 +1471,10 @@ impl Render for ServiceApp {
                         window,
                         move |this, input, ev: &InputEvent, window, cx| match ev {
                             InputEvent::Change => {
-                                let value = input.read(cx).value().to_string();
+                                let (value, is_composing) = {
+                                    let input = input.read(cx);
+                                    (input.value().to_string(), input.is_composing())
+                                };
                                 if consume_suppressed_input_change(
                                     &mut this.suppressed_input_changes,
                                     id,
@@ -1216,23 +1482,30 @@ impl Render for ServiceApp {
                                 ) {
                                     return;
                                 }
-                                bridge::change_text(id, value.as_ref());
-                                bridge::change(id, value.as_ref());
+                                this.emit_input_change(id, value.as_ref(), is_composing);
                             }
                             InputEvent::PressEnter { secondary } => {
-                                bridge::key_press(id, "Enter", *secondary, false, false, false);
+                                let is_composing = input.read(cx).is_composing();
+                                bridge::key_press(
+                                    id,
+                                    "Enter",
+                                    *secondary,
+                                    false,
+                                    false,
+                                    false,
+                                    is_composing,
+                                );
+                                if is_composing {
+                                    return;
+                                }
                                 if multiline {
                                     if *secondary {
-                                        let value = input.read(cx).value().to_string();
-                                        bridge::change_text(id, value.as_ref());
-                                        bridge::change(id, value.as_ref());
                                         return;
                                     }
                                     let next = value_without_submit_newline(input.read(cx));
                                     if let Some((next, cursor_position)) = next {
                                         let submitted = next.clone();
-                                        bridge::change_text(id, next.as_ref());
-                                        bridge::change(id, next.as_ref());
+                                        this.emit_input_change(id, next.as_ref(), false);
                                         suppress_next_input_change(
                                             &mut this.suppressed_input_changes,
                                             id,
@@ -1240,7 +1513,10 @@ impl Render for ServiceApp {
                                         );
                                         input.update(cx, |input, cx| {
                                             input.set_value(next, window, cx);
-                                            input.set_cursor_position(cursor_position, window, cx);
+                                            input.set_cursor_position_without_focus(
+                                                cursor_position,
+                                                cx,
+                                            );
                                         });
                                         bridge::submit(id, submitted.as_ref());
                                         return;
@@ -1254,12 +1530,16 @@ impl Render for ServiceApp {
                             }
                             InputEvent::Focus => {
                                 this.focused_input = Some(id);
+                                #[cfg(target_os = "macos")]
+                                ax::set_focused_text_node(id, true);
                                 bridge::event(id, "focus");
                             }
                             InputEvent::Blur => {
                                 if this.focused_input == Some(id) {
                                     this.focused_input = None;
                                 }
+                                #[cfg(target_os = "macos")]
+                                ax::set_focused_text_node(id, false);
                                 bridge::event(id, "blur");
                             }
                         },
@@ -1269,16 +1549,36 @@ impl Render for ServiceApp {
                     // can resize the text box (and moves the caret), so veto the retained-
                     // layout fast path for the resulting frame even if it coalesces with a
                     // paint-only overlay write — force a full taffy solve.
-                    cx.observe(&state, |_this, _input, cx| {
+                    cx.observe(&state, move |_this, input, cx| {
+                        #[cfg(target_os = "macos")]
+                        {
+                            let input = input.read(cx);
+                            ax::set_text_input_state(
+                                id,
+                                input.value().to_string(),
+                                input.selected_text_value(),
+                            );
+                        }
                         crate::anim_overlay::clear_paint_only_frame();
                         cx.notify();
                     })
                     .detach();
                     self.inputs.insert(id, state);
                     self.input_values.insert(id, value);
+                    self.input_placeholders.insert(id, placeholder);
                     self.input_secure.insert(id, secure);
+                    self.input_event_counts.insert(id, 0);
+                    if auto_focus
+                        && editable
+                        && let Some(state) = self.inputs.get(&id)
+                    {
+                        state.update(cx, |input, cx| input.focus(window, cx));
+                    }
                 } else if self.input_values.get(&id) != Some(&value) {
-                    if let Some(next_value) = value.clone() {
+                    let native_event_count = self.input_event_counts.get(&id).copied().unwrap_or(0);
+                    if most_recent_event_count >= native_event_count
+                        && let Some(next_value) = value.clone()
+                    {
                         if let Some(state) = self.inputs.get(&id) {
                             state.update(cx, |input, cx| {
                                 if input.value().as_ref() != next_value.as_str() {
@@ -1290,12 +1590,20 @@ impl Render for ServiceApp {
                                         next_value.clone(),
                                     );
                                     input.set_value(next_value, window, cx);
-                                    input.set_cursor_position(cursor_position, window, cx);
+                                    input.set_cursor_position_without_focus(cursor_position, cx);
                                 }
                             });
                         }
                     }
                     self.input_values.insert(id, value);
+                }
+                if self.input_placeholders.get(&id) != Some(&placeholder) {
+                    if let Some(state) = self.inputs.get(&id) {
+                        state.update(cx, |input, cx| {
+                            input.set_placeholder(placeholder.clone(), window, cx);
+                        });
+                    }
+                    self.input_placeholders.insert(id, placeholder);
                 }
                 if self.input_secure.get(&id).copied() != Some(secure) {
                     if let Some(state) = self.inputs.get(&id) {
@@ -1551,7 +1859,7 @@ impl Render for ServiceApp {
             }
         }
 
-        frame.into_any_element()
+        FrameMarker::new(frame.into_any_element(), self.input_snapshot_for_paint(cx))
     }
 }
 
@@ -1575,6 +1883,9 @@ fn fallback_root() -> Arc<ReactElement> {
         value: None,
         secure_text_entry: false,
         editable: true,
+        auto_focus: false,
+        placeholder_text_color: None,
+        most_recent_event_count: 0,
         events: Vec::new(),
         native_layout_key: None,
         native_resize: None,
@@ -1812,6 +2123,42 @@ pub(crate) enum Incoming {
     DebugTypeText {
         text: String,
         reply: flume::Sender<serde_json::Value>,
+    },
+    DebugInputState {
+        reply: flume::Sender<serde_json::Value>,
+    },
+    DebugImeSetMarked {
+        text: String,
+        selected_range: Option<std::ops::Range<usize>>,
+        replacement_range: Option<std::ops::Range<usize>>,
+        reply: flume::Sender<serde_json::Value>,
+    },
+    DebugImeCommit {
+        text: String,
+        reply: flume::Sender<serde_json::Value>,
+    },
+    DebugImeUnmark {
+        reply: flume::Sender<serde_json::Value>,
+    },
+    DebugAccessibilityEditInput {
+        id: u64,
+        text: String,
+        insert_at_cursor: bool,
+        reply: flume::Sender<serde_json::Value>,
+    },
+    DebugAccessibilitySetInputFocus {
+        id: u64,
+        focused: bool,
+        reply: flume::Sender<serde_json::Value>,
+    },
+    AccessibilityEditInput {
+        id: u64,
+        text: String,
+        insert_at_cursor: bool,
+    },
+    AccessibilitySetInputFocus {
+        id: u64,
+        focused: bool,
     },
     DebugKeyPress {
         key: String,
@@ -2254,6 +2601,21 @@ fn main() {
     // bootstraps the window size, the rest are applied by a foreground task that calls
     // cx.notify() — no polling.
     let (tree_tx, tree_rx) = flume::unbounded::<Incoming>();
+    #[cfg(target_os = "macos")]
+    {
+        let focus_tx = tree_tx.clone();
+        ax::set_focus_input_handler(move |id, focused| {
+            let _ = focus_tx.send(Incoming::AccessibilitySetInputFocus { id, focused });
+        });
+        let edit_tx = tree_tx.clone();
+        ax::set_edit_input_handler(move |id, text, insert_at_cursor| {
+            let _ = edit_tx.send(Incoming::AccessibilityEditInput {
+                id,
+                text,
+                insert_at_cursor,
+            });
+        });
+    }
     if let Ok(path) = std::env::var("RNGPUI_CONTROL_SOCKET") {
         debug_control::start(path, tree_tx.clone());
     }
@@ -2406,7 +2768,9 @@ fn main() {
             last_h: 0.0,
             inputs: HashMap::new(),
             input_values: HashMap::new(),
+            input_placeholders: HashMap::new(),
             input_secure: HashMap::new(),
+            input_event_counts: HashMap::new(),
             suppressed_input_changes: HashMap::new(),
             webviews: HashMap::new(),
             inspector: inspector::InspectorState::from_env(),
@@ -2512,7 +2876,7 @@ fn main() {
                     let platform = event.keystroke.modifiers.platform;
                     let _ = content_for_keys.update(cx, |this, _cx| {
                         if let Some(id) = first_app_key_press_listener(&this.root) {
-                            bridge::key_press(id, &key, shift, control, alt, platform);
+                            bridge::key_press(id, &key, shift, control, alt, platform, false);
                         }
                     });
                 })
@@ -2669,14 +3033,41 @@ fn main() {
                     Incoming::FocusInput { id } => {
                         let applied = window_handle.update(cx, |_root, window, cx| {
                             pump.update(cx, |this, cx| {
-                                if let Some(state) = this.inputs.get(&id) {
-                                    // no-activate test windows cannot become the macOS key
-                                    // window, but an imperative focus still targets this input.
-                                    // retain that target so background drivers exercise the
-                                    // same TextInput change/key handlers without stealing focus.
-                                    this.focused_input = Some(id);
-                                    state.update(cx, |input, cx| input.focus(window, cx));
-                                }
+                                // no-activate test windows cannot become the macOS key
+                                // window, but an imperative focus still targets this input.
+                                // retain that target so background drivers exercise the
+                                // same TextInput change/key handlers without stealing focus.
+                                this.set_input_focus(id, true, window, cx);
+                            })
+                        });
+                        if applied.is_err() {
+                            break;
+                        }
+                    }
+                    Incoming::AccessibilityEditInput {
+                        id,
+                        text,
+                        insert_at_cursor,
+                    } => {
+                        let applied = window_handle.update(cx, |_root, window, cx| {
+                            pump.update(cx, |this, cx| {
+                                this.edit_input_for_accessibility(
+                                    id,
+                                    &text,
+                                    insert_at_cursor,
+                                    window,
+                                    cx,
+                                );
+                            })
+                        });
+                        if applied.is_err() {
+                            break;
+                        }
+                    }
+                    Incoming::AccessibilitySetInputFocus { id, focused } => {
+                        let applied = window_handle.update(cx, |_root, window, cx| {
+                            pump.update(cx, |this, cx| {
+                                this.set_input_focus(id, focused, window, cx);
                             })
                         });
                         if applied.is_err() {
@@ -3132,6 +3523,146 @@ fn main() {
                             break;
                         }
                     }
+                    Incoming::DebugInputState { reply } => {
+                        let mut snapshot = serde_json::json!({
+                            "ok": false,
+                            "error": "window is unavailable",
+                        });
+                        let applied = window_handle.update(cx, |_root, window, cx| {
+                            pump.update(cx, |this, cx| {
+                                snapshot = this.debug_input_snapshot(window, cx);
+                            })
+                        });
+                        let _ = reply.send(snapshot);
+                        if applied.is_err() {
+                            break;
+                        }
+                    }
+                    Incoming::DebugImeSetMarked {
+                        text,
+                        selected_range,
+                        replacement_range,
+                        reply,
+                    } => {
+                        let mut snapshot = serde_json::json!({
+                            "ok": false,
+                            "error": "no focused input",
+                        });
+                        let applied = window_handle.update(cx, |_root, window, cx| {
+                            pump.update(cx, |this, cx| {
+                                if let Some(id) = this.focused_input
+                                    && let Some(state) = this.inputs.get(&id).cloned()
+                                {
+                                    state.update(cx, |input, cx| {
+                                        input.replace_and_mark_text_in_range(
+                                            replacement_range.clone(),
+                                            &text,
+                                            selected_range.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                    snapshot = this.debug_input_snapshot(window, cx);
+                                }
+                            })
+                        });
+                        let _ = reply.send(snapshot);
+                        if applied.is_err() {
+                            break;
+                        }
+                    }
+                    Incoming::DebugImeCommit { text, reply } => {
+                        let mut snapshot = serde_json::json!({
+                            "ok": false,
+                            "error": "no focused input",
+                        });
+                        let applied = window_handle.update(cx, |_root, window, cx| {
+                            pump.update(cx, |this, cx| {
+                                if let Some(id) = this.focused_input
+                                    && let Some(state) = this.inputs.get(&id).cloned()
+                                {
+                                    state.update(cx, |input, cx| {
+                                        input.replace_text_in_range(None, &text, window, cx);
+                                    });
+                                    snapshot = this.debug_input_snapshot(window, cx);
+                                }
+                            })
+                        });
+                        let _ = reply.send(snapshot);
+                        if applied.is_err() {
+                            break;
+                        }
+                    }
+                    Incoming::DebugImeUnmark { reply } => {
+                        let mut snapshot = serde_json::json!({
+                            "ok": false,
+                            "error": "no focused input",
+                        });
+                        let applied = window_handle.update(cx, |_root, window, cx| {
+                            pump.update(cx, |this, cx| {
+                                if let Some(id) = this.focused_input
+                                    && let Some(state) = this.inputs.get(&id).cloned()
+                                {
+                                    state.update(cx, |input, cx| {
+                                        input.unmark_text(window, cx);
+                                    });
+                                    snapshot = this.debug_input_snapshot(window, cx);
+                                }
+                            })
+                        });
+                        let _ = reply.send(snapshot);
+                        if applied.is_err() {
+                            break;
+                        }
+                    }
+                    Incoming::DebugAccessibilityEditInput {
+                        id,
+                        text,
+                        insert_at_cursor,
+                        reply,
+                    } => {
+                        let mut snapshot = serde_json::json!({
+                            "ok": false,
+                            "error": "input is missing or disabled",
+                        });
+                        let applied = window_handle.update(cx, |_root, window, cx| {
+                            pump.update(cx, |this, cx| {
+                                if this.edit_input_for_accessibility(
+                                    id,
+                                    &text,
+                                    insert_at_cursor,
+                                    window,
+                                    cx,
+                                ) {
+                                    snapshot = this.debug_input_snapshot(window, cx);
+                                }
+                            })
+                        });
+                        let _ = reply.send(snapshot);
+                        if applied.is_err() {
+                            break;
+                        }
+                    }
+                    Incoming::DebugAccessibilitySetInputFocus {
+                        id,
+                        focused,
+                        reply,
+                    } => {
+                        let mut changed = false;
+                        let applied = window_handle.update(cx, |_root, window, cx| {
+                            pump.update(cx, |this, cx| {
+                                changed = this.set_input_focus(id, focused, window, cx);
+                            })
+                        });
+                        let _ = reply.send(serde_json::json!({
+                            "ok": applied.is_ok() && changed,
+                            "focused": focused,
+                            "id": id,
+                        }));
+                        if applied.is_err() {
+                            break;
+                        }
+                    }
                     Incoming::DebugKeyPress { key, reply } => {
                         let mut focused_id = None;
                         let applied = window_handle.update(cx, |_root, window, cx| {
@@ -3152,15 +3683,7 @@ fn main() {
                                             input.insert("\n", window, cx);
                                             cx.emit(InputEvent::PressEnter { secondary: false });
                                         }
-                                        "backspace" => {
-                                            let cursor = input.cursor();
-                                            if cursor > 0 {
-                                                let value = input.value().to_string();
-                                                let mut next = value;
-                                                next.truncate(cursor.saturating_sub(1));
-                                                input.set_value(next, window, cx);
-                                            }
-                                        }
+                                        "backspace" => input.delete_backward(window, cx),
                                         "space" => input.insert(" ", window, cx),
                                         k if k.chars().count() == 1 => {
                                             input.insert(key.clone(), window, cx)
@@ -3758,11 +4281,19 @@ fn main() {
                                 }
                             }
                             Incoming::FocusInput { .. }
+                            | Incoming::AccessibilityEditInput { .. }
+                            | Incoming::AccessibilitySetInputFocus { .. }
                             | Incoming::ClearInput { .. }
                             | Incoming::BlurInput
                             | Incoming::PickPaths { .. }
                             | Incoming::Quit
                             | Incoming::DebugTypeText { .. }
+                            | Incoming::DebugInputState { .. }
+                            | Incoming::DebugImeSetMarked { .. }
+                            | Incoming::DebugImeCommit { .. }
+                            | Incoming::DebugImeUnmark { .. }
+                            | Incoming::DebugAccessibilityEditInput { .. }
+                            | Incoming::DebugAccessibilitySetInputFocus { .. }
                             | Incoming::DebugKeyPress { .. }
                             | Incoming::DebugRealKey { .. }
                             | Incoming::DebugDispatchAction { .. }

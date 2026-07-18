@@ -52,7 +52,9 @@ export interface TextInputProps extends AccessibilityProps {
     placeholder?: string;
     placeholderTextColor?: ColorValue;
     onChangeText?: (text: string) => void;
-    onChange?: (event: { nativeEvent: { text: string } }) => void;
+    onChange?: (event: {
+        nativeEvent: { text: string; value: string; isComposing: boolean; eventCount: number };
+    }) => void;
     onClick?: (event: MouseResponderEvent) => void;
     onContextMenu?: (event: MouseResponderEvent) => void;
     onMouseDown?: (event: MouseResponderEvent) => void;
@@ -69,7 +71,22 @@ export interface TextInputProps extends AccessibilityProps {
     onResponderRelease?: (event: MouseResponderEvent) => void;
     onResponderTerminate?: (event: MouseResponderEvent) => void;
     onSubmitEditing?: (event: { nativeEvent: { text: string; value: string } }) => void;
-    onKeyPress?: (event: unknown) => void;
+    onKeyPress?: (event: {
+        key: string;
+        shiftKey: boolean;
+        ctrlKey: boolean;
+        altKey: boolean;
+        metaKey: boolean;
+        isComposing: boolean;
+        nativeEvent: {
+            key: string;
+            shiftKey: boolean;
+            ctrlKey: boolean;
+            altKey: boolean;
+            metaKey: boolean;
+            isComposing: boolean;
+        };
+    }) => void;
     onFocus?: (event: unknown) => void;
     onBlur?: (event: unknown) => void;
     onLayout?: (event: LayoutChangeEvent) => void;

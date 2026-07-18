@@ -118,8 +118,11 @@ identical on the base binary): `rounded-overflow` (capture corner-AA) and `windo
 - **`letterSpacing`** parsed+dumped, never applied (`style.rs:135,241`; `text.rs`,
   `div.rs:1394`) → text width/wrap drifts from web. Apply gpui tracking or strip from dump
   so it stops lying. **S/M**.
-- **`textAlign`** parsed+dumped, never applied (`style.rs:134,257`; only noted unused in
-  `input.rs:70`) → centered/right text renders left. Map to gpui `.text_center()`. **S**.
+- **`textAlign`** parsed+dumped, never applied (`style.rs:134,257`) → centered/right text
+  renders left. Ordinary text can map to GPUI alignment. TextInput needs one shared
+  horizontal offset across shaped-line paint, caret/selection geometry, hit testing,
+  scrolling, and IME candidate rectangles; shifting paint alone would make editing lie.
+  **S** for text / **M** for input.
 - **Linear gradients collapse to 2 stops; radial/conic unsupported** (`style.rs:641`) →
   multi-stop brand gradients flatten; radial renders as nothing. Detect+fallback, then
   N-stop. **M**.

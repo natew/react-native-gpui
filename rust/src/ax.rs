@@ -35,6 +35,7 @@ struct AxDescriptor {
     label: Option<String>,
     hint: Option<String>,
     value: Option<String>,
+    secure: bool,
     identifier: String,
     disabled: bool,
     selected: bool,
@@ -52,6 +53,8 @@ struct AxNode {
     label: Option<String>,
     hint: Option<String>,
     value: Option<String>,
+    selected_text: String,
+    secure: bool,
     identifier: String,
     disabled: bool,
     selected: bool,
@@ -70,12 +73,62 @@ struct AxNode {
 struct AxState {
     content_view: usize,
     nodes: HashMap<u64, AxNode>,
+    focused_text_id: Option<u64>,
+    input_text: HashMap<u64, (String, String)>,
 }
 
 static STATE: OnceLock<Mutex<AxState>> = OnceLock::new();
+type FocusInputHandler = Box<dyn Fn(u64, bool) + Send + Sync + 'static>;
+static FOCUS_INPUT_HANDLER: OnceLock<Mutex<Option<FocusInputHandler>>> = OnceLock::new();
+type EditInputHandler = Box<dyn Fn(u64, String, bool) + Send + Sync + 'static>;
+static EDIT_INPUT_HANDLER: OnceLock<Mutex<Option<EditInputHandler>>> = OnceLock::new();
 
 fn state() -> &'static Mutex<AxState> {
     STATE.get_or_init(|| Mutex::new(AxState::default()))
+}
+
+fn focus_input_handler() -> &'static Mutex<Option<FocusInputHandler>> {
+    FOCUS_INPUT_HANDLER.get_or_init(|| Mutex::new(None))
+}
+
+fn edit_input_handler() -> &'static Mutex<Option<EditInputHandler>> {
+    EDIT_INPUT_HANDLER.get_or_init(|| Mutex::new(None))
+}
+
+pub fn set_focus_input_handler(handler: impl Fn(u64, bool) + Send + Sync + 'static) {
+    *focus_input_handler().lock().unwrap() = Some(Box::new(handler));
+}
+
+pub fn set_edit_input_handler(handler: impl Fn(u64, String, bool) + Send + Sync + 'static) {
+    *edit_input_handler().lock().unwrap() = Some(Box::new(handler));
+}
+
+pub fn set_text_input_state(id: u64, value: String, selected_text: String) {
+    let mut state = state().lock().unwrap();
+    state
+        .input_text
+        .insert(id, (value.clone(), selected_text.clone()));
+    if let Some(node) = state.nodes.get_mut(&id) {
+        node.value = Some(if node.secure {
+            "*".repeat(value.chars().count())
+        } else {
+            value
+        });
+        node.selected_text = if node.secure {
+            String::new()
+        } else {
+            selected_text
+        };
+    }
+}
+
+pub fn set_focused_text_node(id: u64, focused: bool) {
+    let mut state = state().lock().unwrap();
+    if focused {
+        state.focused_text_id = Some(id);
+    } else if state.focused_text_id == Some(id) {
+        state.focused_text_id = None;
+    }
 }
 
 pub fn sync_tree(window: &mut Window, root: &Arc<ReactElement>) {
@@ -105,10 +158,15 @@ pub fn sync_tree(window: &mut Window, root: &Arc<ReactElement>) {
             .filter(|id| !present.contains(id))
             .collect::<Vec<_>>();
         for id in stale {
+            if state.focused_text_id == Some(id) {
+                state.focused_text_id = None;
+            }
             if let Some(node) = state.nodes.remove(&id) {
                 release_view(node.view as id);
             }
+            state.input_text.remove(&id);
         }
+        state.input_text.retain(|id, _| present.contains(id));
 
         for descriptor in descriptors {
             let (frame, applied) = state
@@ -120,6 +178,20 @@ pub fn sync_tree(window: &mut Window, root: &Arc<ReactElement>) {
                 Some(node) => node.view,
                 None => create_view(descriptor.id) as usize,
             };
+            let live_text = state.input_text.get(&descriptor.id);
+            let value = live_text
+                .map(|(value, _)| {
+                    if descriptor.secure {
+                        "*".repeat(value.chars().count())
+                    } else {
+                        value.clone()
+                    }
+                })
+                .or(descriptor.value);
+            let selected_text = live_text
+                .filter(|_| !descriptor.secure)
+                .map(|(_, selected)| selected.clone())
+                .unwrap_or_default();
 
             state.nodes.insert(
                 descriptor.id,
@@ -130,7 +202,9 @@ pub fn sync_tree(window: &mut Window, root: &Arc<ReactElement>) {
                     role: descriptor.role,
                     label: descriptor.label,
                     hint: descriptor.hint,
-                    value: descriptor.value,
+                    value,
+                    selected_text,
+                    secure: descriptor.secure,
                     identifier: descriptor.identifier,
                     disabled: descriptor.disabled,
                     selected: descriptor.selected,
@@ -281,12 +355,16 @@ fn collect_descriptors(
         label: ax_label(element),
         hint: element.accessibility.hint.clone(),
         value: ax_value(element),
+        secure: element.secure_text_entry
+            && (element.element_type == "textinput" || element.element_type == "textarea"),
         identifier: element
             .accessibility
             .identifier
             .clone()
             .unwrap_or_else(|| format!("rngpui-{}", element.global_id)),
-        disabled: element.accessibility.disabled,
+        disabled: element.accessibility.disabled
+            || ((element.element_type == "textinput" || element.element_type == "textarea")
+                && !element.editable),
         selected: element.accessibility.selected,
         checked: element.accessibility.checked.clone(),
         expanded: element.accessibility.expanded,
@@ -425,6 +503,8 @@ unsafe fn clear_state(state: &mut AxState) {
         release_view(node.view as id);
     }
     state.content_view = 0;
+    state.focused_text_id = None;
+    state.input_text.clear();
 }
 
 unsafe fn create_view(node_id: u64) -> id {
@@ -491,27 +571,25 @@ unsafe fn ns_string_to_string(value: id) -> Option<String> {
     Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
 }
 
-fn set_text_node_value(this: &Object, text: String, insert_at_cursor: bool) {
+fn edit_text_node(this: &Object, text: String, insert_at_cursor: bool) {
     let id = unsafe { node_id(this) };
-    let next = {
-        let mut state = state().lock().unwrap();
-        let Some(node) = state.nodes.get_mut(&id) else {
-            return;
-        };
-        if !is_text_node(node) || node.disabled {
-            return;
-        }
-        let next = if insert_at_cursor {
-            let mut current = node.value.clone().unwrap_or_default();
-            current.push_str(&text);
-            current
-        } else {
-            text
-        };
-        node.value = Some(next.clone());
-        next
-    };
-    crate::bridge::change_text(id, &next);
+    let can_edit = with_node(this, |node| is_text_node(node) && !node.disabled, false);
+    if !can_edit {
+        return;
+    }
+    if insert_at_cursor {
+        set_focused_text_node(id, true);
+    }
+    if let Some(handler) = edit_input_handler().lock().unwrap().as_ref() {
+        handler(id, text, insert_at_cursor);
+    }
+}
+
+fn focus_text_node(id: u64) {
+    set_focused_text_node(id, true);
+    if let Some(handler) = focus_input_handler().lock().unwrap().as_ref() {
+        handler(id, true);
+    }
 }
 
 extern "C" fn hit_test(_: &Object, _: Sel, _: NSPoint) -> id {
@@ -644,7 +722,7 @@ fn dispatch_press_action(this: &Object) -> bool {
         dispatch_press_sequence(id, &events);
         true
     } else if is_text_node {
-        crate::bridge::event(id, "focus");
+        focus_text_node(id);
         true
     } else {
         false
@@ -721,22 +799,24 @@ extern "C" fn accessibility_checked(this: &Object, _: Sel) -> id {
     }
 }
 
-extern "C" fn accessibility_selected_text(_: &Object, _: Sel) -> id {
-    unsafe { ns_string("") }
+extern "C" fn accessibility_selected_text(this: &Object, _: Sel) -> id {
+    let selected = with_node(this, |node| node.selected_text.clone(), String::new());
+    unsafe { ns_string(&selected) }
 }
 
 extern "C" fn set_accessibility_selected_text(this: &Object, _: Sel, value: id) {
     let text = unsafe { ns_string_to_string(value) }.unwrap_or_default();
-    set_text_node_value(this, text, true);
+    edit_text_node(this, text, true);
 }
 
 extern "C" fn set_accessibility_value(this: &Object, _: Sel, value: id) {
     let text = unsafe { ns_string_to_string(value) }.unwrap_or_default();
-    set_text_node_value(this, text, false);
+    edit_text_node(this, text, false);
 }
 
 extern "C" fn accessibility_focused(this: &Object, _: Sel) -> BOOL {
-    if with_node(this, is_text_node, false) {
+    let id = unsafe { node_id(this) };
+    if with_node(this, is_text_node, false) && state().lock().unwrap().focused_text_id == Some(id) {
         YES
     } else {
         NO
@@ -748,7 +828,13 @@ extern "C" fn set_accessibility_focused(this: &Object, _: Sel, focused: BOOL) {
         let id = unsafe { node_id(this) };
         let can_focus = with_node(this, |node| is_text_node(node) && !node.disabled, false);
         if can_focus {
-            crate::bridge::event(id, "focus");
+            focus_text_node(id);
+        }
+    } else {
+        let id = unsafe { node_id(this) };
+        set_focused_text_node(id, false);
+        if let Some(handler) = focus_input_handler().lock().unwrap().as_ref() {
+            handler(id, false);
         }
     }
 }
@@ -789,7 +875,9 @@ extern "C" fn accessibility_set_value_for_attribute(
 
 #[cfg(test)]
 mod tests {
-    use super::{ax_is_element, ax_label, ax_role, events_have_press_action};
+    use super::{
+        ax_is_element, ax_label, ax_role, events_have_press_action, set_focused_text_node, state,
+    };
     use crate::elements::{AccessibilityInfo, ReactElement};
     use crate::style::ElementStyle;
 
@@ -821,6 +909,9 @@ mod tests {
             value: None,
             secure_text_entry: false,
             editable: true,
+            auto_focus: false,
+            placeholder_text_color: None,
+            most_recent_event_count: 0,
             events: Vec::new(),
             native_layout_key: None,
             native_resize: None,
@@ -852,6 +943,18 @@ mod tests {
         assert!(!events_have_press_action(&events(&["mouseEnter"])));
         assert!(!events_have_press_action(&events(&["pressIn", "pressOut"])));
         assert!(!events_have_press_action(&events(&["responderGrant"])));
+    }
+
+    #[test]
+    fn focused_text_node_tracks_one_focused_input() {
+        set_focused_text_node(1, true);
+        assert_eq!(state().lock().unwrap().focused_text_id, Some(1));
+        set_focused_text_node(2, true);
+        assert_eq!(state().lock().unwrap().focused_text_id, Some(2));
+        set_focused_text_node(1, false);
+        assert_eq!(state().lock().unwrap().focused_text_id, Some(2));
+        set_focused_text_node(2, false);
+        assert_eq!(state().lock().unwrap().focused_text_id, None);
     }
 
     #[test]

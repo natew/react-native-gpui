@@ -956,15 +956,17 @@ impl Element for TextElement {
         let (display_text, text_color) = if is_empty {
             (
                 &Rope::from(placeholder.as_str()),
-                cx.theme().muted_foreground,
+                state
+                    .placeholder_text_color
+                    .unwrap_or(cx.theme().muted_foreground),
             )
         } else if state.masked {
             (
                 &Rope::from("*".repeat(text.chars().count())),
-                cx.theme().foreground,
+                state.text_color.unwrap_or(cx.theme().foreground),
             )
         } else {
-            (&text, cx.theme().foreground)
+            (&text, state.text_color.unwrap_or(cx.theme().foreground))
         };
 
         let text_style = window.text_style();

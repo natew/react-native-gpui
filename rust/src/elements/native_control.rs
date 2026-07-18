@@ -107,8 +107,8 @@ extern "C" fn text_changed(_this: &Object, _cmd: Sel, notification: id) {
         let tag: isize = msg_send![field, tag];
         let value = read_ns_string(msg_send![field, stringValue]);
         LAST_EMITTED.with(|m| m.borrow_mut().insert(tag as u64, value.clone()));
-        crate::bridge::change_text(tag as u64, &value);
-        crate::bridge::change(tag as u64, &value);
+        crate::bridge::change_text(tag as u64, &value, false, 0);
+        crate::bridge::change(tag as u64, &value, false, 0);
     }
 }
 
@@ -117,7 +117,7 @@ extern "C" fn text_submit(_this: &Object, _cmd: Sel, sender: id) {
     unsafe {
         let tag: isize = msg_send![sender, tag];
         let value = read_ns_string(msg_send![sender, stringValue]);
-        crate::bridge::key_press(tag as u64, "Enter", false, false, false, false);
+        crate::bridge::key_press(tag as u64, "Enter", false, false, false, false, false);
         crate::bridge::submit(tag as u64, &value);
     }
 }

@@ -46,13 +46,14 @@ struct Session {
 }
 
 /// Called once per `ServiceApp::render` (one gpui draw).
-pub fn on_frame_painted() {
+pub fn on_frame_painted() -> u64 {
     let frame = FRAMES_PAINTED.fetch_add(1, Ordering::Relaxed) + 1;
     let mut times = PAINT_TIMES.lock().unwrap();
     if times.len() >= 720 {
         times.pop_front();
     }
     times.push_back((frame, Instant::now()));
+    frame
 }
 
 #[inline]

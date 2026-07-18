@@ -78,7 +78,10 @@ function getFixedItemSize(item: Item) {
 
 function App() {
     const listRef = useRef<LegendListRef | null>(null);
-    const [loadLabel, setLoadLabel] = useState("loading");
+    // An empty LegendList has no cell-layout milestone and therefore is not
+    // required to call onLoad. The memory-reference launch only needs proof
+    // that the identical app shell reached its first painted React commit.
+    const [loadLabel, setLoadLabel] = useState(emptyReference ? "loaded:empty-reference" : "loading");
     const [targetLabel, setTargetLabel] = useState("top");
 
     const jumpTo = useCallback((index: number) => {

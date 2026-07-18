@@ -34,6 +34,18 @@ function scrollLatencies(log) {
     return [...log.matchAll(/^\[scroll-latency\] ([0-9.]+)ms$/gm)].map((match) => Number(match[1]));
 }
 
+function assertReferenceMatch(sample, label, tolerance = 0.75) {
+    if (!sample.ok || !Number.isFinite(sample.offsetY) || !Number.isFinite(sample.referenceOffsetY)) {
+        throw new Error(`${label} did not return both AppKit offsets: ${JSON.stringify(sample)}`);
+    }
+    const difference = Math.abs(sample.offsetY - sample.referenceOffsetY);
+    if (difference > tolerance) {
+        throw new Error(
+            `${label} diverged from stock NSScrollView by ${difference.toFixed(2)}px: ${JSON.stringify(sample)}`,
+        );
+    }
+}
+
 const previousService = process.env.RNGPUI_SERVICE;
 const previousDrawProbe = process.env.RNGPUI_DRAW_PROBE;
 const previousLatencyProbe = process.env.RNGPUI_SCROLL_LATENCY_PROBE;
@@ -114,6 +126,7 @@ try {
     if (!elastic.ok || elastic.offsetY >= -0.5) {
         throw new Error(`AppKit rubber-band offset was clamped before paint: ${JSON.stringify(elastic)}`);
     }
+    assertReferenceMatch(elastic, "nested elastic edge");
     const initial = await host.request({ $cmd: "scrollDriverStats", ...point, reset: true });
     if (!initial.ok || initial.driver !== "appkit") {
         throw new Error(`expected an AppKit scroll driver, got ${JSON.stringify(initial)}`);
@@ -121,6 +134,60 @@ try {
     if (initial.hasVerticalScroller) {
         throw new Error(`showsVerticalScrollIndicator=false still exposed a scroller: ${JSON.stringify(initial)}`);
     }
+
+    // Compare the production subclass against a stock NSScrollView hosted in the
+    // same non-activating window. Both receive the identical phased NSEvent stream.
+    await host.request({ $cmd: "scrollAt", ...point, dx: 0, dy: 1_000 });
+    await sleep(20);
+    const decaySequence = [
+        [48, "began", "none"],
+        [40, "changed", "none"],
+        [0, "ended", "began"],
+        [30, "none", "changed"],
+        [20, "none", "changed"],
+        [12, "none", "changed"],
+        [6, "none", "changed"],
+        [2, "none", "changed"],
+        [0, "none", "ended"],
+    ];
+    const decaySamples = [];
+    for (const [dy, phase, momentumPhase] of decaySequence) {
+        const sample = await wheel(point, dy, phase, momentumPhase);
+        assertReferenceMatch(sample, `distance/decay ${phase}/${momentumPhase}`);
+        decaySamples.push(sample.offsetY);
+    }
+    const momentumOffsets = decaySamples.slice(2, 8);
+    const momentumDistances = momentumOffsets.slice(1).map((offset, index) => offset - momentumOffsets[index]);
+    if (momentumDistances[0] < 20 || momentumDistances.some((distance) => distance < -0.5)) {
+        throw new Error(`stock-matched momentum distance did not advance: ${JSON.stringify(momentumDistances)}`);
+    }
+    for (let index = 1; index < momentumDistances.length; index++) {
+        if (momentumDistances[index] > momentumDistances[index - 1] + 0.75) {
+            throw new Error(`stock-matched momentum did not decay: ${JSON.stringify(momentumDistances)}`);
+        }
+    }
+
+    const reversalSamples = [];
+    for (const [dy, phase] of [[24, "began"], [18, "changed"], [-30, "changed"], [0, "ended"]]) {
+        const sample = await wheel(point, dy, phase);
+        assertReferenceMatch(sample, `reversal ${phase}`);
+        reversalSamples.push(sample.offsetY);
+    }
+    if (reversalSamples[2] >= reversalSamples[1] - 5) {
+        throw new Error(`stock-matched reversal did not change direction: ${JSON.stringify(reversalSamples)}`);
+    }
+
+    await host.request({ $cmd: "scrollAt", ...point, dx: 0, dy: -100_000 });
+    await sleep(20);
+    await wheel(point, -120, "began");
+    const referenceEdge = await wheel(point, -120, "changed");
+    assertReferenceMatch(referenceEdge, "top-edge elasticity");
+    await wheel(point, 0, "ended");
+    if (referenceEdge.offsetY >= -0.5) {
+        throw new Error(`stock-matched top edge did not remain elastic: ${JSON.stringify(referenceEdge)}`);
+    }
+    await host.request({ $cmd: "scrollAt", ...point, dx: 0, dy: -100_000 });
+    await sleep(20);
 
     const logPath = join(host.sessionDir, "service.log");
     const logStart = readFileSync(logPath, "utf8").length;

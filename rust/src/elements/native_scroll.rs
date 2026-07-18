@@ -66,6 +66,13 @@ struct Driver {
 
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
+struct ReferenceDriver {
+    scroll_view: id,
+    clip_view: id,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
 struct PendingOffset {
     driver_id: u64,
     gpui_view: id,
@@ -86,6 +93,7 @@ thread_local! {
     static LAST_NATIVE_OFFSETS: RefCell<HashMap<u64, (f64, f64)>> = RefCell::new(HashMap::new());
     static OBSERVER: RefCell<Option<id>> = RefCell::new(None);
     static ACTIVE_DRIVER: RefCell<Option<u64>> = const { RefCell::new(None) };
+    static REFERENCE_DRIVERS: RefCell<HashMap<u64, ReferenceDriver>> = RefCell::new(HashMap::new());
     static PROOF_SCROLL_HIT: RefCell<bool> = const { RefCell::new(false) };
 }
 
@@ -190,6 +198,75 @@ pub struct NativeScrollProof {
     pub dispatched: bool,
     pub offset_x: f64,
     pub offset_y: f64,
+    pub reference_offset_x: f64,
+    pub reference_offset_y: f64,
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn release_reference(reference: ReferenceDriver) {
+    let _: () = msg_send![reference.scroll_view, removeFromSuperview];
+    let _: () = msg_send![reference.scroll_view, release];
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn create_reference(driver: Driver) -> ReferenceDriver {
+    let (_, _, width, height) = driver.last_bounds;
+    let frame = NSRect::new(
+        NSPoint::new(-10_000.0, -10_000.0),
+        NSSize::new(width.max(1.0), height.max(1.0)),
+    );
+    let scroll_view: id = msg_send![class!(NSScrollView), alloc];
+    let scroll_view: id = msg_send![scroll_view, initWithFrame: frame];
+    let _: () = msg_send![scroll_view, setDrawsBackground: NO];
+    let _: () = msg_send![scroll_view, setAutohidesScrollers: YES];
+    let _: () = msg_send![scroll_view, setScrollerStyle: NS_SCROLLER_STYLE_OVERLAY];
+    let _: () = msg_send![scroll_view, setAutomaticallyAdjustsContentInsets: NO];
+    let has_horizontal_scroller = if driver.shows_horizontal_scroller == Some(true) {
+        YES
+    } else {
+        NO
+    };
+    let has_vertical_scroller = if driver.shows_vertical_scroller == Some(true) {
+        YES
+    } else {
+        NO
+    };
+    let _: () = msg_send![scroll_view, setHasHorizontalScroller: has_horizontal_scroller];
+    let _: () = msg_send![scroll_view, setHasVerticalScroller: has_vertical_scroller];
+    let horizontal_elasticity = if driver.horizontal == Some(true) {
+        NS_SCROLL_ELASTICITY_ALLOWED
+    } else {
+        NS_SCROLL_ELASTICITY_NONE
+    };
+    let vertical_elasticity = if driver.vertical == Some(true) {
+        NS_SCROLL_ELASTICITY_ALLOWED
+    } else {
+        NS_SCROLL_ELASTICITY_NONE
+    };
+    let _: () = msg_send![scroll_view, setHorizontalScrollElasticity: horizontal_elasticity];
+    let _: () = msg_send![scroll_view, setVerticalScrollElasticity: vertical_elasticity];
+
+    let document_view: id = msg_send![document_class(), alloc];
+    let document_frame = NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(
+            driver.last_content.0.max(width).max(1.0),
+            driver.last_content.1.max(height).max(1.0),
+        ),
+    );
+    let document_view: id = msg_send![document_view, initWithFrame: document_frame];
+    let _: () = msg_send![scroll_view, setDocumentView: document_view];
+    let _: () = msg_send![document_view, release];
+
+    let clip_view: id = msg_send![scroll_view, contentView];
+    let actual_bounds: NSRect = msg_send![driver.clip_view, bounds];
+    let _: () = msg_send![clip_view, scrollToPoint: actual_bounds.origin];
+    let _: () = msg_send![scroll_view, reflectScrolledClipView: clip_view];
+    let _: () = msg_send![driver.gpui_view, addSubview: scroll_view];
+    ReferenceDriver {
+        scroll_view,
+        clip_view,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -224,6 +301,8 @@ pub fn native_scroll_proof(
             dispatched: false,
             offset_x: 0.0,
             offset_y: 0.0,
+            reference_offset_x: 0.0,
+            reference_offset_y: 0.0,
         };
     };
     let Some(phase) = event_phase(phase) else {
@@ -232,6 +311,8 @@ pub fn native_scroll_proof(
             dispatched: false,
             offset_x: 0.0,
             offset_y: 0.0,
+            reference_offset_x: 0.0,
+            reference_offset_y: 0.0,
         };
     };
     let Some(momentum_phase) = event_phase(momentum_phase) else {
@@ -240,6 +321,8 @@ pub fn native_scroll_proof(
             dispatched: false,
             offset_x: 0.0,
             offset_y: 0.0,
+            reference_offset_x: 0.0,
+            reference_offset_y: 0.0,
         };
     };
     unsafe {
@@ -287,6 +370,8 @@ pub fn native_scroll_proof(
                 dispatched: false,
                 offset_x: 0.0,
                 offset_y: 0.0,
+                reference_offset_x: 0.0,
+                reference_offset_y: 0.0,
             };
         };
         let cg_event =
@@ -297,6 +382,8 @@ pub fn native_scroll_proof(
                 dispatched: false,
                 offset_x: 0.0,
                 offset_y: 0.0,
+                reference_offset_x: 0.0,
+                reference_offset_y: 0.0,
             };
         }
         CGEventSetIntegerValueField(cg_event, CG_SCROLL_WHEEL_EVENT_IS_CONTINUOUS, 1);
@@ -314,16 +401,41 @@ pub fn native_scroll_proof(
                 dispatched: false,
                 offset_x: 0.0,
                 offset_y: 0.0,
+                reference_offset_x: 0.0,
+                reference_offset_y: 0.0,
             };
         }
+        let driver = DRIVERS.with(|drivers| drivers.borrow().get(&hit_driver_id).copied());
+        let reference = driver.map(|driver| {
+            REFERENCE_DRIVERS.with(|references| {
+                let mut references = references.borrow_mut();
+                if phase == 1 || phase == 32 {
+                    if let Some(previous) = references.remove(&hit_driver_id) {
+                        release_reference(previous);
+                    }
+                }
+                *references
+                    .entry(hit_driver_id)
+                    .or_insert_with(|| create_reference(driver))
+            })
+        });
         let _: () = msg_send![hit_scroll_view, scrollWheel: ns_event];
+        if let Some(reference) = reference {
+            let _: () = msg_send![reference.scroll_view, scrollWheel: ns_event];
+        }
         let clip: id = msg_send![hit_scroll_view, contentView];
         let clip_bounds: NSRect = msg_send![clip, bounds];
+        let reference_bounds = reference.map(|reference| {
+            let bounds: NSRect = msg_send![reference.clip_view, bounds];
+            bounds
+        });
         NativeScrollProof {
             hit_driver_id: Some(hit_driver_id),
             dispatched: true,
             offset_x: clip_bounds.origin.x,
             offset_y: clip_bounds.origin.y,
+            reference_offset_x: reference_bounds.map_or(0.0, |bounds| bounds.origin.x),
+            reference_offset_y: reference_bounds.map_or(0.0, |bounds| bounds.origin.y),
         }
     }
 }
@@ -342,6 +454,8 @@ pub fn native_scroll_proof(
         dispatched: false,
         offset_x: 0.0,
         offset_y: 0.0,
+        reference_offset_x: 0.0,
+        reference_offset_y: 0.0,
     }
 }
 
@@ -659,6 +773,11 @@ pub fn sync_driver(
             LAST_NATIVE_OFFSETS.with(|offsets| {
                 offsets.borrow_mut().remove(&driver_id);
             });
+            REFERENCE_DRIVERS.with(|references| {
+                if let Some(reference) = references.borrow_mut().remove(&driver_id) {
+                    unsafe { release_reference(reference) };
+                }
+            });
         }
 
         let target_x = f64::from(offset_x).clamp(0.0, (content_width - width).max(0.0));
@@ -865,6 +984,11 @@ pub fn retain_drivers(present: &HashSet<u64>) {
             });
             LAST_NATIVE_OFFSETS.with(|offsets| {
                 offsets.borrow_mut().remove(&driver_id);
+            });
+            REFERENCE_DRIVERS.with(|references| {
+                if let Some(reference) = references.borrow_mut().remove(&driver_id) {
+                    unsafe { release_reference(reference) };
+                }
             });
         }
     });

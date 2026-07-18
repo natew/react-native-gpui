@@ -3958,6 +3958,8 @@ fn main() {
                             "hitTargetId": proof.as_ref().and_then(|proof| proof.hit_driver_id),
                             "offsetX": proof.as_ref().map(|proof| proof.offset_x),
                             "offsetY": proof.as_ref().map(|proof| proof.offset_y),
+                            "referenceOffsetX": proof.as_ref().map(|proof| proof.reference_offset_x),
+                            "referenceOffsetY": proof.as_ref().map(|proof| proof.reference_offset_y),
                             "phase": phase,
                             "momentumPhase": momentum_phase,
                         }));

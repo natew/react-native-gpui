@@ -80,6 +80,7 @@ thread_local! {
     static LAST_EMIT: RefCell<Option<Instant>> = const { RefCell::new(None) };
     static OBSERVER: RefCell<Option<id>> = RefCell::new(None);
     static SCROLL_ANCESTORS: RefCell<HashMap<u64, Option<u64>>> = RefCell::new(HashMap::new());
+    static ACTIVE_DRIVER: RefCell<Option<u64>> = const { RefCell::new(None) };
 }
 
 #[cfg(target_os = "macos")]
@@ -147,6 +148,37 @@ extern "C" fn scroll_hit_test(this: &Object, _: Sel, point: NSPoint) -> id {
             }
         }
         nil
+    }
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn scroll_wheel(this: &Object, _: Sel, event: id) {
+    unsafe {
+        let clip: id = msg_send![this, contentView];
+        let driver_id =
+            CLIP_TARGETS.with(|targets| targets.borrow().get(&(clip as usize)).map(|(id, _)| *id));
+        let Some(driver_id) = driver_id else { return };
+        let phase: u64 = msg_send![event, phase];
+        let momentum: u64 = msg_send![event, momentumPhase];
+        let phased = phase != 0 || momentum != 0;
+        let active = ACTIVE_DRIVER.with(|active| *active.borrow());
+        if phased {
+            if phase == 1 || phase == 32 {
+                ACTIVE_DRIVER.with(|active| *active.borrow_mut() = Some(driver_id));
+            }
+            if let Some(owner) = active.filter(|owner| *owner != driver_id) {
+                if let Some(view) =
+                    DRIVERS.with(|drivers| drivers.borrow().get(&owner).map(|d| d.scroll_view))
+                {
+                    let _: () = msg_send![view, scrollWheel: event];
+                    return;
+                }
+            }
+            if phase == 8 || phase == 16 {
+                ACTIVE_DRIVER.with(|active| *active.borrow_mut() = None);
+            }
+        }
+        let _: () = msg_send![super(this, class!(NSScrollView)), scrollWheel: event];
     }
 }
 
@@ -271,6 +303,10 @@ fn scroll_class() -> &'static Class {
         decl.add_method(
             sel!(hitTest:),
             scroll_hit_test as extern "C" fn(&Object, Sel, NSPoint) -> id,
+        );
+        decl.add_method(
+            sel!(scrollWheel:),
+            scroll_wheel as extern "C" fn(&Object, Sel, id),
         );
         decl.register()
     })

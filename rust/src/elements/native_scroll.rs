@@ -669,7 +669,7 @@ fn observer() -> id {
 
 #[cfg(target_os = "macos")]
 unsafe fn notification_name() -> id {
-    let name = NSString::alloc(nil).init_str("NSViewBoundsDidChangeNotification");
+    let name = unsafe { NSString::alloc(nil).init_str("NSViewBoundsDidChangeNotification") };
     let _: id = msg_send![name, autorelease];
     name
 }
@@ -701,7 +701,7 @@ unsafe fn create_driver(driver_id: u64, gpui_view: id) -> Driver {
         center,
         addObserver: observer()
         selector: sel!(rngpuiScrollBoundsChanged:)
-        name: notification_name()
+        name: unsafe { notification_name() }
         object: clip_view
     ];
     let _: () = msg_send![gpui_view, addSubview: scroll_view];
@@ -984,7 +984,7 @@ pub fn retain_drivers(present: &HashSet<u64>) {
                 let _: () = msg_send![
                     center,
                     removeObserver: observer()
-                    name: notification_name()
+                    name: unsafe { notification_name() }
                     object: driver.clip_view
                 ];
                 let _: () = msg_send![driver.scroll_view, removeFromSuperview];

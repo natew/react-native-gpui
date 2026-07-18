@@ -784,6 +784,14 @@ struct ServiceApp {
     debug_dump_scheduled: bool,
 }
 
+fn accumulate_pending_root_paint_only(
+    root_dirty: bool,
+    pending_paint_only: bool,
+    update_paint_only: bool,
+) -> bool {
+    update_paint_only && (!root_dirty || pending_paint_only)
+}
+
 struct FrameMarker {
     child: AnyElement,
     input: Option<PaintedInputSnapshot>,
@@ -4173,14 +4181,23 @@ fn main() {
                         let applied = pump.update(cx, |this, cx| match msg {
                             Incoming::Tree(t) => {
                                 let next_root = fill_root(t);
-                                let root_paint_only =
+                                let update_paint_only =
                                     elements::is_paint_only_tree_update(&this.root, &next_root);
-                                if root_paint_only {
+                                // Several React commits can arrive before GPUI renders. Keep
+                                // every pending commit's provenance: once any commit changed
+                                // geometry, a later paint-only commit cannot make replaying the
+                                // last presented frame's layout safe again.
+                                let pending_paint_only = accumulate_pending_root_paint_only(
+                                    this.root_dirty,
+                                    this.root_paint_only,
+                                    update_paint_only,
+                                );
+                                if pending_paint_only {
                                     crate::anim_overlay::arm_paint_only_frame();
                                 } else {
                                     crate::anim_overlay::clear_paint_only_frame();
                                 }
-                                this.root_paint_only = root_paint_only;
+                                this.root_paint_only = pending_paint_only;
                                 let mut node_ids = HashSet::new();
                                 collect_node_ids(&next_root, &mut node_ids);
                                 bridge::retain_layout(&node_ids);
@@ -4579,8 +4596,8 @@ fn main() {
 mod tests {
     use super::{
         AppCommandBinding, AppCommandBindingSlot, Incoming, TerminalFrameKind,
-        app_command_key_bindings, parse_incoming, parse_real_keystroke, position_for_byte_offset,
-        should_apply_input_value,
+        accumulate_pending_root_paint_only, app_command_key_bindings, parse_incoming,
+        parse_real_keystroke, position_for_byte_offset, should_apply_input_value,
     };
     use gpui::{KeyContext, Keymap, Keystroke};
     use serde_json::json;
@@ -4592,6 +4609,36 @@ mod tests {
             Some(Incoming::Tree(t)) => t,
             _ => panic!("expected Incoming::Tree"),
         }
+    }
+
+    #[test]
+    fn geometry_commit_veto_survives_later_paint_commit_before_render() {
+        let mut root_dirty = false;
+        let mut pending_paint_only = false;
+
+        pending_paint_only =
+            accumulate_pending_root_paint_only(root_dirty, pending_paint_only, false);
+        root_dirty = true;
+        assert!(
+            !pending_paint_only,
+            "geometry commit must veto retained replay"
+        );
+
+        pending_paint_only =
+            accumulate_pending_root_paint_only(root_dirty, pending_paint_only, true);
+        assert!(
+            !pending_paint_only,
+            "a coalesced paint commit must preserve the earlier geometry veto"
+        );
+
+        // Once the pending tree has rendered, a new paint-only commit is eligible.
+        root_dirty = false;
+        pending_paint_only = false;
+        assert!(accumulate_pending_root_paint_only(
+            root_dirty,
+            pending_paint_only,
+            true
+        ));
     }
 
     // The delta wire: a full commit seeds the index, then a delta with a `ref` node

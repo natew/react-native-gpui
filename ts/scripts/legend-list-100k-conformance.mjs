@@ -283,7 +283,7 @@ try {
     };
     writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 
-    assert(maxNativeNodes < 300, `native nodes stay below 300, saw ${maxNativeNodes}`);
+    assert(maxNativeNodes < 250, `native nodes stay below 250, saw ${maxNativeNodes}`);
     assert(maxMountedRows < 80, `mounted rows stay below 80, saw ${maxMountedRows}`);
     for (const [target, elapsedMs] of Object.entries(report.recycling.tapToPaintedSettledMs)) {
         assert(elapsedMs <= 100, `${target} tap-to-painted-settled <=100ms, saw ${elapsedMs}ms`);

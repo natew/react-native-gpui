@@ -173,7 +173,7 @@ try {
         memoryAfterFarJumps.physicalFootprintMb,
         memoryAfterScroll.physicalFootprintMb,
     );
-    const nativeFrameP95BudgetMs = contentionMode ? 16.67 : 8.33;
+    const wholeDrawP95BudgetMs = contentionMode ? 16.67 : 8.33;
     const report = {
         itemCount: 100_000,
         contention: {
@@ -187,7 +187,7 @@ try {
             loadAverageBefore: perfContention.loadAverageBefore,
             loadAverageAfterWarmup: perfContention.loadAverageAfterWarmup,
             loadAverageAfterBenchmark: perfContention.snapshot(),
-            nativeFrameP95BudgetMs,
+            wholeDrawP95BudgetMs,
         },
         initial,
         middle,
@@ -310,8 +310,8 @@ try {
     assert(startup.legendAppMs !== null, "captured LegendList onLoad timing");
     assert(startup.launchToUsableMs <= 200, `launch-to-usable list <=200ms, saw ${startup.launchToUsableMs}ms`);
     assert(
-        report.scroll.drawP95Ms !== null && report.scroll.drawP95Ms <= nativeFrameP95BudgetMs,
-        `whole-draw scroll p95 <=${nativeFrameP95BudgetMs}ms in ${report.contention.mode} mode, saw ${report.scroll.drawP95Ms}ms`,
+        report.scroll.drawP95Ms !== null && report.scroll.drawP95Ms <= wholeDrawP95BudgetMs,
+        `whole-draw scroll p95 <=${wholeDrawP95BudgetMs}ms in ${report.contention.mode} mode, saw ${report.scroll.drawP95Ms}ms`,
     );
     assert(
         report.scroll.commandRoundTripP95Ms !== null && report.scroll.commandRoundTripP95Ms <= 8.33,

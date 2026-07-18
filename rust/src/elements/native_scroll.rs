@@ -160,11 +160,11 @@ extern "C" fn scroll_wheel(this: &Object, _: Sel, event: id) {
         let phase: u64 = msg_send![event, phase];
         let momentum: u64 = msg_send![event, momentumPhase];
         let phased = phase != 0 || momentum != 0;
-        let active = ACTIVE_DRIVER.with(|active| *active.borrow());
         if phased {
             if phase == 1 || phase == 32 {
                 ACTIVE_DRIVER.with(|active| *active.borrow_mut() = Some(driver_id));
             }
+            let active = ACTIVE_DRIVER.with(|active| *active.borrow());
             if let Some(owner) = active.filter(|owner| *owner != driver_id) {
                 if let Some(view) =
                     DRIVERS.with(|drivers| drivers.borrow().get(&owner).map(|d| d.scroll_view))
@@ -173,7 +173,7 @@ extern "C" fn scroll_wheel(this: &Object, _: Sel, event: id) {
                     return;
                 }
             }
-            if phase == 8 || phase == 16 {
+            if momentum == 8 || momentum == 16 {
                 ACTIVE_DRIVER.with(|active| *active.borrow_mut() = None);
             }
         }

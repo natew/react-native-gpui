@@ -53,6 +53,10 @@ const VIEW_TAG_TO_GLOBAL_ID = new Map<number, number>()
 
 /** Resolve an upstream `op.shadowNodeWrapper` / viewTag down to a numeric globalId. */
 function resolveGlobalId(target: unknown): number | null {
+  if (typeof target === 'function') {
+    const resolved = (target as () => unknown)()
+    if (resolved !== target) return resolveGlobalId(resolved)
+  }
   if (typeof target === 'number') {
     return VIEW_TAG_TO_GLOBAL_ID.get(target) ?? target
   }
@@ -91,6 +95,7 @@ export function unregisterAnimatedViewTag(viewTag: number): void {
 }
 
 declare const __rngpui_setNodeStyle: ((json: string) => void) | undefined
+declare const __rngpui_scrollTo: ((json: string) => void) | undefined
 
 // =============================================================================
 // rAF coalescing. Every `_updateProps` op within one frame accumulates here; we
@@ -206,8 +211,8 @@ function installReanimatedNativeSeam(): void {
   g._measure ??= (node) => engineMeasure(node)
   g._measureFabric ??= (node) => engineMeasure(node)
   g._measurePaper ??= (node) => engineMeasure(node)
-  g._scrollTo ??= () => {}
-  g._scrollToPaper ??= () => {}
+  g._scrollTo ??= (node, x, y) => engineScrollTo(node, x, y)
+  g._scrollToPaper ??= (node, x, y) => engineScrollTo(node, x, y)
   g._dispatchCommand ??= () => {}
   g._dispatchCommandFabric ??= () => {}
   g._dispatchCommandPaper ??= () => {}
@@ -235,6 +240,21 @@ function engineMeasure(_node: unknown): MeasuredDimensions | null {
   // worklet UI runtime — Tamagui's animation driver doesn't depend on this. Return
   // null (upstream callers tolerate it) rather than guess a rect.
   return null
+}
+
+function engineScrollTo(animatedRef: unknown, x: unknown, y: unknown): void {
+  const globalId = resolveGlobalId(animatedRef)
+  if (
+    globalId == null ||
+    typeof x !== 'number' ||
+    !Number.isFinite(x) ||
+    typeof y !== 'number' ||
+    !Number.isFinite(y) ||
+    typeof __rngpui_scrollTo !== 'function'
+  ) {
+    return
+  }
+  __rngpui_scrollTo(JSON.stringify([globalId, x, y]))
 }
 
 // =============================================================================
@@ -508,7 +528,9 @@ function markWorkletBuiltin<T extends (...args: never[]) => unknown>(name: strin
   return fn
 }
 
-function scrollToImpl(): void {}
+function scrollToImpl(animatedRef: unknown, x: number, y: number, _animated: boolean): void {
+  engineScrollTo(animatedRef, x, y)
+}
 function measureImpl(animatedRef: unknown): MeasuredDimensions | null {
   return engineMeasure(animatedRef)
 }

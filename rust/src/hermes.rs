@@ -353,6 +353,33 @@ extern "C" fn host_set_node_style(ud: *mut c_void, arg: *const c_char) {
     }
 }
 
+// reanimated imperative scrolling crosses directly from either Hermes runtime to
+// the native service. it uses the same Incoming::ScrollTo path as ScrollView refs,
+// so there is one source of clamping, AppKit driver sync, and onScroll delivery.
+extern "C" fn host_scroll_to(ud: *mut c_void, arg: *const c_char) {
+    let ctx = ctx_ref(ud);
+    let s = arg_str(arg);
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) else {
+        eprintln!("[hermes] scrollTo: bad json");
+        return;
+    };
+    let Some(values) = value.as_array() else {
+        return;
+    };
+    let Some(id) = values.first().and_then(serde_json::Value::as_u64) else {
+        return;
+    };
+    let x = values
+        .get(1)
+        .and_then(serde_json::Value::as_f64)
+        .map(|value| value as f32);
+    let y = values
+        .get(2)
+        .and_then(serde_json::Value::as_f64)
+        .map(|value| value as f32);
+    let _ = ctx.tree_tx.send(crate::Incoming::ScrollTo { id, x, y });
+}
+
 // emitter fast path: a zero-commit (avoidReRenders) Tamagui driver pushes a resolved
 // target style + transition straight here instead of going through a React commit. The
 // arg is `{globalId, style: {<resolved target>}, transition: <_gpuiTransition descriptor>}`;
@@ -960,6 +987,7 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>, tree_json_tx: Sender<St
 
             install_void(rt, "__rngpui_applyTree", host_apply_tree, ud);
             install_void(rt, "__rngpui_setNodeStyle", host_set_node_style, ud);
+            install_void(rt, "__rngpui_scrollTo", host_scroll_to, ud);
             install_void(
                 rt,
                 "__rngpui_animateNodeStyle",
@@ -1049,6 +1077,7 @@ pub fn start_ui(bundle: Vec<u8>, tree_tx: Sender<Incoming>, tree_json_tx: Sender
             // Deliberately a SUBSET of the React runtime's host fns: no applyTree
             // (no React here), no fetch/ws/pickPaths/exit/reload (app concerns).
             install_void(rt, "__rngpui_setNodeStyle", host_set_node_style, ud);
+            install_void(rt, "__rngpui_scrollTo", host_scroll_to, ud);
             install_void(rt, "__rngpui_log", host_log, ud);
             install_void(rt, "__rngpui_setTimer", host_set_timer, ud);
             install_void(rt, "__rngpui_clearTimer", host_clear_timer, ud);

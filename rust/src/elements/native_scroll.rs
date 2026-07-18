@@ -79,7 +79,6 @@ thread_local! {
     static EMIT_SCHEDULED: RefCell<bool> = const { RefCell::new(false) };
     static LAST_EMIT: RefCell<Option<Instant>> = const { RefCell::new(None) };
     static OBSERVER: RefCell<Option<id>> = RefCell::new(None);
-    static SCROLL_ANCESTORS: RefCell<HashMap<u64, Option<u64>>> = RefCell::new(HashMap::new());
     static ACTIVE_DRIVER: RefCell<Option<u64>> = const { RefCell::new(None) };
 }
 
@@ -607,16 +606,6 @@ pub fn retain_drivers(present: &HashSet<u64>) {
         }
     });
 }
-
-#[cfg(target_os = "macos")]
-pub fn retain_scroll_ancestry(ancestry: &HashMap<u64, Option<u64>>) {
-    SCROLL_ANCESTORS.with(|current| {
-        *current.borrow_mut() = ancestry.clone();
-    });
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn retain_scroll_ancestry(_ancestry: &HashMap<u64, Option<u64>>) {}
 
 #[cfg(not(target_os = "macos"))]
 pub fn retain_drivers(_present: &HashSet<u64>) {}

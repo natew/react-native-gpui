@@ -243,6 +243,7 @@ impl PlatformInput {
                         modifiers: read_modifiers(native_event),
                         native_scroll_id: None,
                         native_scroll_offset: None,
+                        native_scroll_queued: None,
                     })
                 }),
                 NSEventType::NSLeftMouseDragged

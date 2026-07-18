@@ -2221,6 +2221,7 @@ fn make_scroll_wheel_event(
         touch_phase: TouchPhase::default(),
         native_scroll_id: None,
         native_scroll_offset: None,
+        native_scroll_queued: None,
     }
 }
 

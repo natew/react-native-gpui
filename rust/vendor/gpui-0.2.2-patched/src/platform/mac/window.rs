@@ -190,9 +190,9 @@ unsafe fn build_classes() {
                     handle_view_event as extern "C" fn(&Object, Sel, id),
                 );
                 decl.add_method(
-                    sel!(rngpuiScrollDriverChanged:offsetX:offsetY:),
+                    sel!(rngpuiScrollDriverChanged:offsetX:offsetY:queuedSeconds:),
                     handle_native_scroll_driver
-                        as extern "C" fn(&Object, Sel, u64, f64, f64),
+                        as extern "C" fn(&Object, Sel, u64, f64, f64, f64),
                 );
                 decl.add_method(
                     sel!(swipeWithEvent:),
@@ -1939,11 +1939,15 @@ extern "C" fn handle_native_scroll_driver(
     driver_id: u64,
     offset_x: f64,
     offset_y: f64,
+    queued_seconds: f64,
 ) {
     let window_state = unsafe { get_window_state(this) };
     let event = PlatformInput::ScrollWheel(ScrollWheelEvent {
         native_scroll_id: Some(driver_id),
         native_scroll_offset: Some(point(px(offset_x as f32), px(offset_y as f32))),
+        native_scroll_queued: Some(std::time::Duration::from_secs_f64(
+            queued_seconds.max(0.0),
+        )),
         ..Default::default()
     });
     let mut callback = window_state.lock().event_callback.take();

@@ -3,7 +3,7 @@ use crate::{
     Window, point, seal::Sealed,
 };
 use smallvec::SmallVec;
-use std::{any::Any, fmt::Debug, ops::Deref, path::PathBuf};
+use std::{any::Any, fmt::Debug, ops::Deref, path::PathBuf, time::Duration};
 
 /// An event from a platform input source.
 pub trait InputEvent: Sealed + 'static {
@@ -379,6 +379,10 @@ pub struct ScrollWheelEvent {
 
     /// absolute content offset reported by the native scroll driver.
     pub native_scroll_offset: Option<Point<Pixels>>,
+
+    /// time already spent between AppKit's clip-view notification and this event.
+    /// the host uses it only for opt-in event-to-present performance instrumentation.
+    pub native_scroll_queued: Option<Duration>,
 }
 
 impl Sealed for ScrollWheelEvent {}

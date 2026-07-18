@@ -868,6 +868,7 @@ pub struct Window {
     hovered: Rc<Cell<bool>>,
     pub(crate) needs_present: Rc<Cell<bool>>,
     pub(crate) last_input_timestamp: Rc<Cell<Instant>>,
+    pending_native_scroll_latency: Cell<Option<(Instant, Duration)>>,
     pub(crate) refreshing: bool,
     pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
     pub(crate) focus: Option<FocusId>,
@@ -1252,6 +1253,7 @@ impl Window {
             hovered,
             needs_present,
             last_input_timestamp,
+            pending_native_scroll_latency: Cell::new(None),
             refreshing: false,
             activation_observers: SubscriberSet::new(),
             focus: None,
@@ -2044,6 +2046,14 @@ impl Window {
     #[profiling::function]
     fn present(&self) {
         self.platform_window.draw(&self.rendered_frame.scene);
+        if std::env::var_os("RNGPUI_SCROLL_LATENCY_PROBE").is_some()
+            && let Some((dispatched_at, queued)) = self.pending_native_scroll_latency.take()
+        {
+            eprintln!(
+                "[scroll-latency] {:.3}ms",
+                (queued + dispatched_at.elapsed()).as_secs_f64() * 1000.0
+            );
+        }
         self.needs_present.set(false);
         profiling::finish_frame!();
     }
@@ -3790,6 +3800,10 @@ impl Window {
                 if scroll_wheel.native_scroll_id.is_none() {
                     self.mouse_position = scroll_wheel.position;
                     self.modifiers = scroll_wheel.modifiers;
+                }
+                if let Some(queued) = scroll_wheel.native_scroll_queued {
+                    self.pending_native_scroll_latency
+                        .set(Some((Instant::now(), queued)));
                 }
                 PlatformInput::ScrollWheel(scroll_wheel)
             }

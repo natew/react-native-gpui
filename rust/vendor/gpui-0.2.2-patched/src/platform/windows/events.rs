@@ -568,6 +568,7 @@ impl WindowsWindowInner {
             touch_phase: TouchPhase::Moved,
             native_scroll_id: None,
             native_scroll_offset: None,
+            native_scroll_queued: None,
         });
         let handled = !func(input).propagate;
         self.state.borrow_mut().callbacks.input = Some(func);
@@ -610,6 +611,7 @@ impl WindowsWindowInner {
             touch_phase: TouchPhase::Moved,
             native_scroll_id: None,
             native_scroll_offset: None,
+            native_scroll_queued: None,
         });
         let handled = !func(event).propagate;
         self.state.borrow_mut().callbacks.input = Some(func);

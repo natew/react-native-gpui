@@ -30,9 +30,16 @@ function drawTimes(log) {
     }));
 }
 
+function scrollLatencies(log) {
+    return [...log.matchAll(/^\[scroll-latency\] ([0-9.]+)ms$/gm)].map((match) => Number(match[1]));
+}
+
 const previousService = process.env.RNGPUI_SERVICE;
+const previousDrawProbe = process.env.RNGPUI_DRAW_PROBE;
+const previousLatencyProbe = process.env.RNGPUI_SCROLL_LATENCY_PROBE;
 process.env.RNGPUI_SERVICE = new URL("../../rust/target/release/rngpui-service", import.meta.url).pathname;
 process.env.RNGPUI_DRAW_PROBE = "1";
+process.env.RNGPUI_SCROLL_LATENCY_PROBE = "1";
 
 const frontmostBefore = frontmostProcess();
 let host;
@@ -136,6 +143,13 @@ try {
     }
     const fullLayoutDraws = draws.filter((draw) => !draw.reuse).length;
     if (fullLayoutDraws !== 0) throw new Error(`${fullLayoutDraws}/${draws.length} scroll draws ran full layout`);
+    const latencies = scrollLatencies(log);
+    if (latencies.length < 8) throw new Error(`expected event-to-present latency samples, found ${latencies.length}`);
+    const latencyP95 = percentile(latencies, 0.95);
+    const latencyBudget = contentionMode ? 1000 / 30 : 1000 / 60;
+    if (latencyP95 > latencyBudget) {
+        throw new Error(`scroll event-to-present p95 ${latencyP95.toFixed(2)}ms exceeds ${latencyBudget.toFixed(2)}ms`);
+    }
 
     const afterTree = await host.dump();
     const anchorAfter = byTestId(afterTree, "overview-row-020");
@@ -162,7 +176,8 @@ try {
             `budget=${FRAME_BUDGET_MS.toFixed(2)}ms burners=${perfContention.burnerCount} ` +
             `load=${JSON.stringify(perfContention.snapshot())} notifications=${stats.notificationCount} ` +
             `callbacks=${stats.callbackCount} ` +
-            `draws=${draws.length} p95=${p95.toFixed(2)}ms moved=${visualDelta.toFixed(0)}px`,
+            `draws=${draws.length} p95=${p95.toFixed(2)}ms latencyP95=${latencyP95.toFixed(2)}ms ` +
+            `moved=${visualDelta.toFixed(0)}px`,
     );
 } catch (error) {
     console.error(`SCROLL_PERFORMANCE_CONFORMANCE_FAIL ${error instanceof Error ? error.message : String(error)}`);
@@ -174,5 +189,9 @@ try {
         await perfContention?.stop();
         if (previousService === undefined) delete process.env.RNGPUI_SERVICE;
         else process.env.RNGPUI_SERVICE = previousService;
+        if (previousDrawProbe === undefined) delete process.env.RNGPUI_DRAW_PROBE;
+        else process.env.RNGPUI_DRAW_PROBE = previousDrawProbe;
+        if (previousLatencyProbe === undefined) delete process.env.RNGPUI_SCROLL_LATENCY_PROBE;
+        else process.env.RNGPUI_SCROLL_LATENCY_PROBE = previousLatencyProbe;
     }
 }

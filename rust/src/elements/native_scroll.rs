@@ -71,6 +71,7 @@ struct PendingOffset {
     gpui_view: id,
     offset_x: f64,
     offset_y: f64,
+    started_at: Instant,
 }
 
 #[cfg(target_os = "macos")]
@@ -401,15 +402,21 @@ extern "C" fn clip_bounds_changed(_: &Object, _: Sel, notification: id) {
             entry.offset_y = bounds.origin.y;
         });
         PENDING.with(|pending| {
-            pending.borrow_mut().insert(
-                driver_id,
-                PendingOffset {
+            let mut pending = pending.borrow_mut();
+            pending
+                .entry(driver_id)
+                .and_modify(|pending| {
+                    pending.gpui_view = gpui_view;
+                    pending.offset_x = bounds.origin.x;
+                    pending.offset_y = bounds.origin.y;
+                })
+                .or_insert(PendingOffset {
                     driver_id,
                     gpui_view,
                     offset_x: bounds.origin.x,
                     offset_y: bounds.origin.y,
-                },
-            );
+                    started_at: Instant::now(),
+                });
         });
         let should_schedule = EMIT_SCHEDULED.with(|scheduled| {
             let mut scheduled = scheduled.borrow_mut();
@@ -458,11 +465,13 @@ unsafe extern "C" fn emit_scroll_offsets(_: *mut c_void) {
                 .callback_count += 1;
         });
         unsafe {
+            let queued_seconds = pending.started_at.elapsed().as_secs_f64();
             let _: () = msg_send![
                 pending.gpui_view,
                 rngpuiScrollDriverChanged: pending.driver_id
                 offsetX: pending.offset_x
                 offsetY: pending.offset_y
+                queuedSeconds: queued_seconds
             ];
         }
     }

@@ -72,6 +72,7 @@ try {
     let snapshot = await inputSnapshot(host);
     assert(snapshot.focusedId === primary.globalId, "autoFocus did not select the primary InputState");
     assertCandidateBounds(snapshot, "initial caret", primary);
+    const initialCandidateBounds = snapshot.candidateBounds!;
 
     await realKey(host, "tab");
     await waitForStatus(host, "forward tab", (status) => status.focused === "secondary");
@@ -171,6 +172,14 @@ try {
     snapshot = await inputSnapshot(host);
     assertRange(snapshot.markedRange, [20, 23], "painted marked UTF-16 range");
     assertCandidateBounds(snapshot, "painted marked text", primary);
+    const markedCandidateBounds = snapshot.candidateBounds!;
+    assert(
+        Math.hypot(
+            markedCandidateBounds.x - initialCandidateBounds.x,
+            markedCandidateBounds.y - initialCandidateBounds.y,
+        ) >= 4,
+        `IME candidate rectangle did not follow the shaped caret: initial=${JSON.stringify(initialCandidateBounds)} marked=${JSON.stringify(markedCandidateBounds)}`,
+    );
 
     await realKey(host, "enter");
     snapshot = await inputSnapshot(host);

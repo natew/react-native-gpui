@@ -1236,7 +1236,13 @@ fn collect_snapshots(
     let snapshot_metadata = SnapshotMetadata {
         target: summary(element),
         events: element.events.clone(),
-        value: snippet(element.value.as_deref(), 120),
+        value: snippet(
+            element
+                .value
+                .as_deref()
+                .or(element.default_value.as_deref()),
+            120,
+        ),
         style: style_facts(element),
         path: path.clone(),
         rank: inspect_rank(element),
@@ -1449,7 +1455,13 @@ fn collect_hits(
             bounds,
             events: element.events.clone(),
             native_list_group: element.native_list_group.clone(),
-            value: snippet(element.value.as_deref(), 120),
+            value: snippet(
+                element
+                    .value
+                    .as_deref()
+                    .or(element.default_value.as_deref()),
+                120,
+            ),
             style: style_facts(element),
             path: path.clone(),
             rank: inspect_rank(element),
@@ -1711,6 +1723,7 @@ mod tests {
             backdrop_blur_radius: None,
             backdrop_tint: None,
             value: None,
+            default_value: None,
             secure_text_entry: false,
             editable: true,
             auto_focus: false,

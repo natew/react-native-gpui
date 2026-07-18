@@ -156,8 +156,10 @@ pub struct ReactElement {
     /// tint color composited over the blurred backdrop (defaults to the node's own
     /// background-color when only `backdropBlur` is set).
     pub backdrop_tint: Option<Hsla>,
-    /// text input value from react props.
+    /// controlled text input value from react props.
     pub value: Option<String>,
+    /// uncontrolled text input value used only when creating its native state.
+    pub default_value: Option<String>,
     /// whether text input values render as password/secret text.
     pub secure_text_entry: bool,
     /// whether text input nodes accept editing. RN TextInput defaults to editable.

@@ -1070,7 +1070,7 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
             if (props.autoFocus === true) node.autoFocus = true;
             node.mostRecentEventCount = inputEventCounts.get(inst.id) ?? 0;
             if (props.value != null) node.value = String(props.value);
-            else if (props.defaultValue != null) node.value = String(props.defaultValue);
+            if (props.defaultValue != null) node.defaultValue = String(props.defaultValue);
             break;
         case "NativeButton":
             // real AppKit NSButton underlay. `text` carries the button title (the host
@@ -1088,7 +1088,7 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
             if (props.editable === false) node.editable = false;
             if (props.secureTextEntry === true) node.secureTextEntry = true;
             if (props.value != null) node.value = String(props.value);
-            else if (props.defaultValue != null) node.value = String(props.defaultValue);
+            if (props.defaultValue != null) node.defaultValue = String(props.defaultValue);
             break;
         case "Image":
             node.type = "image";

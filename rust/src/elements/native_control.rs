@@ -310,6 +310,7 @@ fn ensure_view(id: u64, kind: NativeKind, parent_view: id, gpui_view: id) -> id 
         LAST_TITLE.with(|m| m.borrow_mut().remove(&id));
         LAST_ENABLED.with(|m| m.borrow_mut().remove(&id));
         LAST_PLACEHOLDER.with(|m| m.borrow_mut().remove(&id));
+        LAST_EMITTED.with(|m| m.borrow_mut().remove(&id));
     }
 
     let view = VIEWS.with(|v| {
@@ -327,6 +328,7 @@ fn ensure_view(id: u64, kind: NativeKind, parent_view: id, gpui_view: id) -> id 
 #[cfg(target_os = "macos")]
 unsafe fn apply_props(id: u64, view: id, kind: NativeKind, element: &ReactElement) {
     let enabled = element.editable;
+    let first_apply = LAST_ENABLED.with(|m| !m.borrow().contains_key(&id));
     let enabled_changed = LAST_ENABLED.with(|m| m.borrow().get(&id).copied() != Some(enabled));
     if enabled_changed {
         let _: () = msg_send![view, setEnabled: if enabled { YES } else { NO }];
@@ -352,9 +354,16 @@ unsafe fn apply_props(id: u64, view: id, kind: NativeKind, element: &ReactElemen
                 let _: () = msg_send![view, setPlaceholderString: placeholder_ns];
                 LAST_PLACEHOLDER.with(|m| m.borrow_mut().insert(id, placeholder));
             }
-            // controlled `value`: only push a programmatically-new value (not our own echo,
-            // not what the field already shows) so native typing isn't clobbered mid-edit.
-            if let Some(value) = element.value.clone() {
+            // defaultValue seeds a new control once; later renders only reconcile an
+            // actual controlled value prop, so unrelated commits preserve native edits.
+            let value = element.value.clone().or_else(|| {
+                if first_apply {
+                    element.default_value.clone()
+                } else {
+                    None
+                }
+            });
+            if let Some(value) = value {
                 let is_echo = LAST_EMITTED.with(|m| m.borrow().get(&id) == Some(&value));
                 let live = unsafe { read_ns_string(msg_send![view, stringValue]) };
                 if !is_echo && live != value {

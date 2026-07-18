@@ -34,6 +34,7 @@ export type SerializedNode = {
     /** RN Text `selectable`: opts into the native drag selection + Cmd+C copy. */
     selectable?: boolean;
     value?: string;
+    defaultValue?: string;
     editable?: boolean;
     secureTextEntry?: boolean;
     autoFocus?: boolean;

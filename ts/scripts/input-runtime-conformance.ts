@@ -15,6 +15,8 @@ type InputStatus = {
     primaryFocuses: number;
     secondaryFocuses: number;
     primaryEditable: boolean;
+    uncontrolledObserved: string;
+    unrelatedTick: number;
 };
 
 type InputSnapshot = {
@@ -45,12 +47,13 @@ const frameBudgetMs = Number(process.env.RNGPUI_INPUT_FRAME_BUDGET_MS ?? 16.67);
 
 let host: LaunchedHost | null = null;
 try {
-    host = await launchHost(entry, { size: "780x520" });
+    host = await launchHost(entry, { size: "780x620" });
 
     const initialTree = await host.dump();
     const primary = requireTestId(initialTree, "primary-input");
     const secondary = requireTestId(initialTree, "secondary-input");
     const placeholderColorInput = requireTestId(initialTree, "placeholder-color-input");
+    const uncontrolledInput = requireTestId(initialTree, "uncontrolled-input");
     const disablePrimary = requireTestId(initialTree, "disable-primary");
     const nodes = countNodes(initialTree);
     assert(nodes >= 1_600, `large-tree fixture only rendered ${nodes} nodes`);
@@ -273,6 +276,26 @@ try {
     assert(snapshot.value === submitted.draft, "controlled submit left the native newline behind");
     assert(snapshot.focusedId === primary.globalId, "controlled submit lost focus");
     assert((snapshot.eventCount ?? 0) === submitted.eventCount, "native and React event counters diverged");
+
+    await realTap(host, uncontrolledInput);
+    await realKey(host, "cmd-a");
+    const uncontrolledValue = "uncontrolled-edited";
+    const uncontrolledTyped = await host.request<{ ok: boolean }>({
+        $cmd: "type",
+        text: uncontrolledValue,
+    });
+    assert(uncontrolledTyped.ok, "uncontrolled native edit failed");
+    await waitForStatus(
+        host,
+        "uncontrolled edit across unrelated commit",
+        (status) => status.uncontrolledObserved === uncontrolledValue && status.unrelatedTick > 0,
+    );
+    snapshot = await inputSnapshot(host);
+    assert(snapshot.focusedId === uncontrolledInput.globalId, "unrelated commit moved uncontrolled focus");
+    assert(snapshot.value === uncontrolledValue, "defaultValue reset an uncontrolled native edit");
+
+    await realTap(host, primary);
+    await waitForStatus(host, "primary refocus before disable", (status) => status.focused === "primary");
 
     await realTap(host, disablePrimary);
     await waitForStatus(

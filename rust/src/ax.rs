@@ -460,7 +460,8 @@ fn ax_value(element: &ReactElement) -> Option<String> {
         .accessibility
         .value
         .clone()
-        .or_else(|| element.value.clone())?;
+        .or_else(|| element.value.clone())
+        .or_else(|| element.default_value.clone())?;
     if element.secure_text_entry
         && (element.element_type == "textinput" || element.element_type == "textarea")
     {
@@ -907,6 +908,7 @@ mod tests {
             backdrop_blur_radius: None,
             backdrop_tint: None,
             value: None,
+            default_value: None,
             secure_text_entry: false,
             editable: true,
             auto_focus: false,

@@ -316,6 +316,10 @@ fn parse_json_tree(
         .get("value")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let default_value = obj
+        .get("defaultValue")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let secure_text_entry = obj
         .get("secureTextEntry")
         .and_then(|v| v.as_bool())
@@ -454,6 +458,7 @@ fn parse_json_tree(
         backdrop_blur_radius,
         backdrop_tint,
         value,
+        default_value,
         secure_text_entry,
         editable,
         auto_focus,
@@ -1015,6 +1020,7 @@ struct InputSpec {
     id: u64,
     placeholder: String,
     value: Option<String>,
+    default_value: Option<String>,
     multiline: bool,
     secure: bool,
     auto_focus: bool,
@@ -1080,6 +1086,7 @@ fn collect_inputs(el: &Arc<ReactElement>, out: &mut Vec<InputSpec>) {
             id: el.global_id,
             placeholder: el.text.clone().unwrap_or_default(),
             value: el.value.clone(),
+            default_value: el.default_value.clone(),
             multiline,
             secure: el.secure_text_entry && !multiline,
             auto_focus: el.auto_focus,
@@ -1449,6 +1456,7 @@ impl Render for ServiceApp {
                 id,
                 placeholder,
                 value,
+                default_value,
                 multiline,
                 secure,
                 auto_focus,
@@ -1463,7 +1471,7 @@ impl Render for ServiceApp {
                     window.focus(&self.app_focus);
                 }
                 if !self.inputs.contains_key(&id) {
-                    let initial_value = value.clone();
+                    let initial_value = value.clone().or(default_value);
                     let state = cx.new(|cx| {
                         let mut s = InputState::new(window, cx).placeholder(placeholder.clone());
                         if multiline {
@@ -1896,6 +1904,7 @@ fn fallback_root() -> Arc<ReactElement> {
         backdrop_blur_radius: None,
         backdrop_tint: None,
         value: None,
+        default_value: None,
         secure_text_entry: false,
         editable: true,
         auto_focus: false,

@@ -1349,6 +1349,7 @@ mod tests {
             backdrop_blur_radius: None,
             backdrop_tint: None,
             value: None,
+            default_value: None,
             secure_text_entry: false,
             editable: true,
             auto_focus: false,

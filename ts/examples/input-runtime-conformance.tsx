@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Pressable, render, StyleSheet, Text, TextInput, View } from "../src/index";
 
 const LARGE_TREE_NODES = 800;
+const UNCONTROLLED_INITIAL_VALUE = "uncontrolled-seed";
 const decorationRows = Array.from({ length: LARGE_TREE_NODES }, (_, index) => index);
 
 function App() {
@@ -14,6 +15,8 @@ function App() {
     const [submitted, setSubmitted] = useState("");
     const [composingEnter, setComposingEnter] = useState(false);
     const [primaryEditable, setPrimaryEditable] = useState(true);
+    const [uncontrolledObserved, setUncontrolledObserved] = useState(UNCONTROLLED_INITIAL_VALUE);
+    const [unrelatedTick, setUnrelatedTick] = useState(0);
     const primaryFocuses = useRef(0);
     const secondaryFocuses = useRef(0);
 
@@ -21,6 +24,12 @@ function App() {
         const timer = setTimeout(() => setSecondary("programmatic"), 500);
         return () => clearTimeout(timer);
     }, []);
+
+    useEffect(() => {
+        if (uncontrolledObserved === UNCONTROLLED_INITIAL_VALUE) return;
+        const timer = setTimeout(() => setUnrelatedTick((value) => value + 1), 0);
+        return () => clearTimeout(timer);
+    }, [uncontrolledObserved]);
 
     return (
         <View style={styles.root}>
@@ -79,6 +88,12 @@ function App() {
                     placeholderTextColor="#ff4fa3"
                     style={styles.input}
                 />
+                <TextInput
+                    testID="uncontrolled-input"
+                    defaultValue={UNCONTROLLED_INITIAL_VALUE}
+                    onChangeText={setUncontrolledObserved}
+                    style={styles.input}
+                />
                 <Text testID="input-runtime-status" style={styles.status}>
                     {JSON.stringify({
                         draft,
@@ -92,6 +107,8 @@ function App() {
                         primaryFocuses: primaryFocuses.current,
                         secondaryFocuses: secondaryFocuses.current,
                         primaryEditable,
+                        uncontrolledObserved,
+                        unrelatedTick,
                     })}
                 </Text>
                 <Pressable
@@ -167,4 +184,4 @@ const styles = StyleSheet.create({
     },
 });
 
-render(<App />, { width: 780, height: 520 });
+render(<App />, { width: 780, height: 620 });

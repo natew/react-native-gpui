@@ -402,6 +402,10 @@ export interface ScrollViewHandle extends NativeHostHandle {
     // carries __nativeTag/__internalInstanceHandle/_viewConfig (see reconciler).
     getNativeScrollRef: () => NativeHostHandle | null;
     getScrollableNode: () => NativeHostHandle | null;
+    // Reanimated 4 resolves composite scroll components through this standard
+    // escape hatch before its Fabric host-instance fast path. Return the actual
+    // reconciler instance so it sees __nativeTag/_viewConfig/internal handle.
+    getAnimatableRef: () => NativeHostHandle | null;
 }
 export const ScrollView = forwardRef<ScrollViewHandle, ScrollViewProps>(function ScrollView({
     style,
@@ -449,6 +453,9 @@ export const ScrollView = forwardRef<ScrollViewHandle, ScrollViewProps>(function
                 return host.current;
             },
             getScrollableNode() {
+                return host.current;
+            },
+            getAnimatableRef() {
                 return host.current;
             },
         }),

@@ -271,15 +271,25 @@ unsafe fn create_reference(driver: Driver) -> ReferenceDriver {
 }
 
 #[cfg(target_os = "macos")]
-fn event_phase(value: &str) -> Option<i64> {
+fn cg_scroll_phase(value: &str) -> Option<i64> {
     match value {
         "none" => Some(0),
         "began" => Some(1),
-        "stationary" => Some(2),
-        "changed" => Some(4),
-        "ended" => Some(8),
-        "cancelled" => Some(16),
-        "mayBegin" => Some(32),
+        "changed" => Some(2),
+        "ended" => Some(4),
+        "cancelled" => Some(8),
+        "mayBegin" => Some(128),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn cg_momentum_phase(value: &str) -> Option<i64> {
+    match value {
+        "none" => Some(0),
+        "began" => Some(1),
+        "changed" => Some(2),
+        "ended" | "cancelled" => Some(3),
         _ => None,
     }
 }
@@ -307,7 +317,9 @@ pub fn native_scroll_proof(
             reference_offset_y: 0.0,
         };
     };
-    let Some(phase) = event_phase(phase) else {
+    let begins_gesture = matches!(phase, "began" | "mayBegin");
+    let phased_gesture = phase != "none" || momentum_phase != "none";
+    let Some(phase) = cg_scroll_phase(phase) else {
         return NativeScrollProof {
             hit_driver_id: None,
             effective_driver_id: None,
@@ -318,7 +330,7 @@ pub fn native_scroll_proof(
             reference_offset_y: 0.0,
         };
     };
-    let Some(momentum_phase) = event_phase(momentum_phase) else {
+    let Some(momentum_phase) = cg_momentum_phase(momentum_phase) else {
         return NativeScrollProof {
             hit_driver_id: None,
             effective_driver_id: None,
@@ -416,9 +428,9 @@ pub fn native_scroll_proof(
                 reference_offset_y: 0.0,
             };
         }
-        let effective_driver_id = if phase == 1 || phase == 32 {
+        let effective_driver_id = if begins_gesture {
             hit_driver_id
-        } else if phase != 0 || momentum_phase != 0 {
+        } else if phased_gesture {
             ACTIVE_DRIVER.with(|active| active.borrow().unwrap_or(hit_driver_id))
         } else {
             hit_driver_id
@@ -427,7 +439,7 @@ pub fn native_scroll_proof(
         let reference = driver.map(|driver| {
             REFERENCE_DRIVERS.with(|references| {
                 let mut references = references.borrow_mut();
-                if phase == 1 || phase == 32 {
+                if begins_gesture {
                     if let Some(previous) = references.remove(&effective_driver_id) {
                         release_reference(previous);
                     }
@@ -1017,3 +1029,21 @@ pub fn retain_drivers(present: &HashSet<u64>) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn retain_drivers(_present: &HashSet<u64>) {}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::{cg_momentum_phase, cg_scroll_phase};
+
+    #[test]
+    fn core_graphics_phase_fields_use_cg_encodings() {
+        assert_eq!(cg_scroll_phase("began"), Some(1));
+        assert_eq!(cg_scroll_phase("changed"), Some(2));
+        assert_eq!(cg_scroll_phase("ended"), Some(4));
+        assert_eq!(cg_scroll_phase("cancelled"), Some(8));
+        assert_eq!(cg_scroll_phase("mayBegin"), Some(128));
+
+        assert_eq!(cg_momentum_phase("began"), Some(1));
+        assert_eq!(cg_momentum_phase("changed"), Some(2));
+        assert_eq!(cg_momentum_phase("ended"), Some(3));
+    }
+}

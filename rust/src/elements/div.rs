@@ -86,6 +86,7 @@ struct DragReleaseTarget {
 
 static SCROLL: Lazy<Mutex<HashMap<u64, ScrollOffset>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static SCROLL_TO_END: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static PENDING_SCROLL_EVENTS: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 // ids currently hovered/pressed for the renderer→JS pseudo lane. Separate from HOVER (which is
 // maintained only for nodes with JS mouse listeners): a Tamagui node may subscribe to native
@@ -143,6 +144,14 @@ fn set_scroll(id: u64, v: ScrollOffset) {
     SCROLL.lock().unwrap().insert(id, v);
 }
 
+fn mark_scroll_event(id: u64) {
+    PENDING_SCROLL_EVENTS.lock().unwrap().insert(id);
+}
+
+fn take_scroll_event(id: u64) -> bool {
+    PENDING_SCROLL_EVENTS.lock().unwrap().remove(&id)
+}
+
 pub fn scroll_to(id: u64, x: Option<f32>, y: Option<f32>) {
     let current = get_scroll(id);
     set_scroll(
@@ -152,6 +161,7 @@ pub fn scroll_to(id: u64, x: Option<f32>, y: Option<f32>) {
             y: y.unwrap_or(current.y).max(0.0),
         },
     );
+    mark_scroll_event(id);
 }
 
 /// Apply a relative scroll delta to a scroll container's persisted offset — the
@@ -175,6 +185,7 @@ pub fn scroll_position(id: u64) -> (f32, f32) {
 
 pub fn scroll_to_end(id: u64) {
     SCROLL_TO_END.lock().unwrap().insert(id);
+    mark_scroll_event(id);
 }
 
 pub fn set_native_layout_override(
@@ -342,6 +353,15 @@ pub fn retain_native_layout_keys(keys: &HashSet<String>) {
         .lock()
         .unwrap()
         .retain(|key, _| keys.contains(key));
+}
+
+pub fn retain_scroll_state(ids: &HashSet<u64>) {
+    SCROLL.lock().unwrap().retain(|id, _| ids.contains(id));
+    SCROLL_TO_END.lock().unwrap().retain(|id| ids.contains(id));
+    PENDING_SCROLL_EVENTS
+        .lock()
+        .unwrap()
+        .retain(|id| ids.contains(id));
 }
 
 fn take_scroll_to_end(id: u64) -> bool {
@@ -1684,6 +1704,19 @@ impl Element for ReactDivElement {
                 }
             };
             set_scroll(self.element.global_id, off);
+            if take_scroll_event(self.element.global_id) && self.element.listens("scroll") {
+                let width: f32 = bounds.size.width.into();
+                let height: f32 = bounds.size.height.into();
+                crate::bridge::scroll_event(
+                    self.element.global_id,
+                    off.x,
+                    off.y,
+                    width,
+                    height,
+                    width + max_scroll_x,
+                    height + max_scroll_y,
+                );
+            }
             // viewport in content space (pre-offset child bounds live here) plus one
             // screen of overscan on every side, so a fast fling never out-runs the
             // window and pops in blank. layout_bounds is the taffy result, unaffected
@@ -2579,6 +2612,7 @@ impl IntoElement for ReactDivElement {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::{Mutex, MutexGuard};
     use std::time::{Duration, Instant};
 
@@ -2591,8 +2625,9 @@ mod tests {
         RoundedOverflowClip, animate_native_layout_override, clear_native_layout_override,
         events_have_press_action, finish_pointer_gesture, get_scroll, inner_corner_radius,
         native_layout_animation_value, native_layout_has_animations, native_layout_override,
-        press_drag_should_activate, remember_native_layout_frame, rounded_clip_radii_for_bounds,
-        scroll_to, set_native_layout_override, stacked_child_indices_for,
+        press_drag_should_activate, remember_native_layout_frame, retain_scroll_state,
+        rounded_clip_radii_for_bounds, scroll_to, scroll_to_end, set_native_layout_override,
+        stacked_child_indices_for, take_scroll_event, take_scroll_to_end,
         target_receives_captured_pointer_event, target_receives_pointer_up_event,
         update_native_resize,
     };
@@ -2606,6 +2641,7 @@ mod tests {
 
     #[test]
     fn scroll_to_updates_each_axis_independently() {
+        let _guard = native_layout_test_guard();
         let id = 900_001;
         scroll_to(id, Some(42.0), None);
         let next = get_scroll(id);
@@ -2616,6 +2652,40 @@ mod tests {
         let next = get_scroll(id);
         assert_eq!(next.x, 42.0);
         assert_eq!(next.y, 77.0);
+        assert!(take_scroll_event(id));
+        assert!(!take_scroll_event(id));
+        retain_scroll_state(&HashSet::new());
+    }
+
+    #[test]
+    fn scroll_to_end_requests_one_programmatic_scroll_event() {
+        let _guard = native_layout_test_guard();
+        let id = 900_002;
+        scroll_to_end(id);
+
+        assert!(take_scroll_event(id));
+        assert!(!take_scroll_event(id));
+        assert!(take_scroll_to_end(id));
+        retain_scroll_state(&HashSet::new());
+    }
+
+    #[test]
+    fn retain_scroll_state_drops_unmounted_offsets_and_events() {
+        let _guard = native_layout_test_guard();
+        let keep = 900_003;
+        let remove = 900_004;
+        scroll_to(keep, None, Some(30.0));
+        scroll_to(remove, None, Some(40.0));
+        scroll_to_end(remove);
+
+        retain_scroll_state(&HashSet::from([keep]));
+
+        assert_eq!(get_scroll(keep).y, 30.0);
+        assert_eq!(get_scroll(remove).y, 0.0);
+        assert!(take_scroll_event(keep));
+        assert!(!take_scroll_event(remove));
+        assert!(!take_scroll_to_end(remove));
+        retain_scroll_state(&HashSet::new());
     }
 
     #[test]

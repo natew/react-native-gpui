@@ -98,7 +98,7 @@ const PORTAL_VIEW_TYPE = "RNTPortalView";
 // guard would disable memoization forever; per-node is what makes it real.
 const isPortalType = (type: string) => type === PORTAL_HOST_TYPE || type === PORTAL_VIEW_TYPE;
 // diagnostic: cache hit/miss per commit (RNGPUI_SERIALIZE_TRACE=1)
-const SERIALIZE_TRACE = typeof process !== "undefined" && !!process.env?.RNGPUI_SERIALIZE_TRACE;
+const SERIALIZE_TRACE = typeof process !== "undefined" && !!process.env.RNGPUI_SERIALIZE_TRACE;
 let serHit = 0;
 let serMiss = 0;
 let commitUpdates = 0;

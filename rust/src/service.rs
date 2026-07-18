@@ -947,6 +947,15 @@ fn collect_native_control_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
     }
 }
 
+fn collect_scroll_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
+    if matches!(el.style.overflow.as_deref(), Some("scroll") | Some("auto")) {
+        out.insert(el.global_id);
+    }
+    for c in &el.children {
+        collect_scroll_ids(c, out);
+    }
+}
+
 /// Collect ids of every node that listens for onLayout, to GC stale dedup state.
 fn collect_layout_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
     if el.listens("layout") {
@@ -1395,6 +1404,10 @@ impl Render for ServiceApp {
             let mut native_control_ids = HashSet::new();
             collect_native_control_ids(&self.root, &mut native_control_ids);
             elements::native_control::retain_native_controls(&native_control_ids);
+
+            let mut scroll_ids = HashSet::new();
+            collect_scroll_ids(&self.root, &mut scroll_ids);
+            elements::retain_scroll_state(&scroll_ids);
 
             if self.inspector.enabled() {
                 inspector::refresh_snapshot_cache(&self.root);

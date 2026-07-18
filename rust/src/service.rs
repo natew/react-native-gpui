@@ -752,6 +752,10 @@ struct ServiceApp {
     // ran on EVERY animation frame and pinned the main thread on-screen (the freeze). The
     // element tree itself still rebuilds each frame (it reads the live overlay).
     root_dirty: bool,
+    // true only when the pending React tree is structurally identical and changed
+    // paint keys exclusively. This distinguishes it from a later paint-only overlay
+    // that may have coalesced with a geometry-changing React commit.
+    root_paint_only: bool,
     dump_tree_path: Option<String>,
     last_w: f64,
     last_h: f64,
@@ -1408,8 +1412,9 @@ impl Render for ServiceApp {
         // (ignoring the paint-only trigger), so conformance can drive the retained path on
         // every repaint and assert pixel/bounds parity. Never set in production.
         let force_reuse = std::env::var_os("RNGPUI_FORCE_RETAINED_LAYOUT").is_some();
+        let root_allows_reuse = !self.root_dirty || (self.root_paint_only && paint_only);
         let want_reuse = (paint_only || force_reuse)
-            && (!self.root_dirty || paint_only)
+            && root_allows_reuse
             && !layout_dirty
             && !viewport_changed
             && !elements::native_resize_active()
@@ -1784,6 +1789,7 @@ impl Render for ServiceApp {
                 );
             }
             self.root_dirty = false;
+            self.root_paint_only = false;
         } // end tree-lifecycle (root_dirty) gate
 
         let create_t0 = std::time::Instant::now();
@@ -2823,6 +2829,7 @@ fn main() {
             app_focus: cx.focus_handle(),
             root: app_root,
             root_dirty: true,
+            root_paint_only: false,
             dump_tree_path: std::env::var("RNGPUI_DUMP_TREE").ok(),
             last_w: 0.0,
             last_h: 0.0,
@@ -4171,6 +4178,7 @@ fn main() {
                                 } else {
                                     crate::anim_overlay::clear_paint_only_frame();
                                 }
+                                this.root_paint_only = root_paint_only;
                                 let mut node_ids = HashSet::new();
                                 collect_node_ids(&next_root, &mut node_ids);
                                 bridge::retain_layout(&node_ids);

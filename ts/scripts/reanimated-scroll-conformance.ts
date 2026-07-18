@@ -17,8 +17,14 @@ try {
         await sleep(12);
     }
     assert(intersectsWindow(target?.bounds), "Reanimated scrollTo did not paint the deep target");
+    const finalTree = await host.dump();
+    const status = findNativeId(finalTree, "reanimated-scroll-status");
+    const observedY = Number(/^y:(\d+)$/.exec(textContent(status))?.[1]);
+    assert(observedY >= 7_000, `native onScroll did not acknowledge the clamped worklet offset: ${observedY}`);
     const elapsedMs = performance.now() - started;
-    console.log(`REANIMATED_SCROLL_CONFORMANCE_PASS target=180 elapsed=${elapsedMs.toFixed(1)}ms`);
+    console.log(
+        `REANIMATED_SCROLL_CONFORMANCE_PASS target=180 offset=${observedY} elapsed=${elapsedMs.toFixed(1)}ms`,
+    );
 } catch (error) {
     console.error(
         `REANIMATED_SCROLL_CONFORMANCE_FAIL ${error instanceof Error ? error.message : String(error)}`,
@@ -35,6 +41,11 @@ function findNativeId(node: DumpNode, nativeID: string): DumpNode | null {
         if (found) return found;
     }
     return null;
+}
+
+function textContent(node: DumpNode | null): string {
+    if (!node) return "";
+    return [node.text, ...(node.children ?? []).map(textContent)].filter(Boolean).join("");
 }
 
 function intersectsWindow(bounds: DumpNode["bounds"]): boolean {

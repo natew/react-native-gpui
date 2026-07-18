@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Animated, {
     scrollTo,
     useAnimatedReaction,
@@ -14,6 +14,7 @@ const rows = Array.from({ length: 220 }, (_, index) => index);
 function App() {
     const scrollRef = useAnimatedRef<ScrollView>();
     const command = useSharedValue(0);
+    const [observedY, setObservedY] = useState(0);
 
     useAnimatedReaction(
         () => command.value,
@@ -33,7 +34,18 @@ function App() {
 
     return (
         <View style={styles.root}>
-            <Animated.ScrollView ref={scrollRef} style={styles.list}>
+            <Text nativeID="reanimated-scroll-status" style={styles.status}>
+                {`y:${observedY.toFixed(0)}`}
+            </Text>
+            <Animated.ScrollView
+                ref={scrollRef}
+                style={styles.list}
+                onScroll={(event: unknown) => {
+                    const y = (event as { nativeEvent?: { contentOffset?: { y?: number } } }).nativeEvent
+                        ?.contentOffset?.y;
+                    if (typeof y === "number") setObservedY(y);
+                }}
+            >
                 {rows.map((index) => (
                     <View
                         key={index}
@@ -50,6 +62,7 @@ function App() {
 
 const styles = StyleSheet.create({
     root: { flex: 1, backgroundColor: "#10151f", padding: 16 },
+    status: { height: 24, color: "#9fb3cb", fontSize: 12 },
     list: { flex: 1, backgroundColor: "#171f2c" },
     row: {
         height: ROW_HEIGHT,

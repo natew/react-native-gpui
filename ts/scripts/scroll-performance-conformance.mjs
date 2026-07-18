@@ -2,8 +2,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { launchHost } from "../cli/host.ts";
 import { frontmostProcess, sleep } from "./conformance-utils.mjs";
+import { hasContentionFlag, startPerfContention } from "./perf-contention.mjs";
 
-const FRAME_BUDGET_MS = 1000 / 120;
+const contentionMode = hasContentionFlag();
+const FRAME_BUDGET_MS = contentionMode ? 1000 / 60 : 1000 / 120;
 const SCROLL_STEPS = 48;
 
 function flatten(node, out = []) {
@@ -34,7 +36,9 @@ process.env.RNGPUI_DRAW_PROBE = "1";
 
 const frontmostBefore = frontmostProcess();
 let host;
+let perfContention;
 try {
+    perfContention = await startPerfContention(contentionMode);
     host = await launchHost(new URL("../examples/scroll-performance-conformance.tsx", import.meta.url).pathname, {
         size: "900x700",
     });
@@ -116,7 +120,9 @@ try {
     }
 
     console.log(
-        `SCROLL_PERFORMANCE_CONFORMANCE_PASS driver=appkit notifications=${stats.notificationCount} ` +
+        `SCROLL_PERFORMANCE_CONFORMANCE_PASS driver=appkit lane=${contentionMode ? "contention" : "idle"} ` +
+            `budget=${FRAME_BUDGET_MS.toFixed(2)}ms burners=${perfContention.burnerCount} ` +
+            `load=${JSON.stringify(perfContention.snapshot())} notifications=${stats.notificationCount} ` +
             `callbacks=${stats.callbackCount} ` +
             `draws=${draws.length} p95=${p95.toFixed(2)}ms moved=${visualDelta.toFixed(0)}px`,
     );
@@ -124,7 +130,11 @@ try {
     console.error(`SCROLL_PERFORMANCE_CONFORMANCE_FAIL ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
 } finally {
-    host?.close();
-    if (previousService === undefined) delete process.env.RNGPUI_SERVICE;
-    else process.env.RNGPUI_SERVICE = previousService;
+    try {
+        host?.close();
+    } finally {
+        await perfContention?.stop();
+        if (previousService === undefined) delete process.env.RNGPUI_SERVICE;
+        else process.env.RNGPUI_SERVICE = previousService;
+    }
 }

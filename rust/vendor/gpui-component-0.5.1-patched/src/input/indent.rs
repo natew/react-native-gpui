@@ -222,6 +222,10 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.tab_moves_focus {
+            window.focus_next();
+            return;
+        }
         // First, try to accept inline completion if present
         if self.accept_inline_completion(window, cx) {
             return;
@@ -239,6 +243,10 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.tab_moves_focus {
+            window.focus_prev();
+            return;
+        }
         self.outdent(false, window, cx);
     }
 

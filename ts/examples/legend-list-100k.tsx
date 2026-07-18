@@ -15,12 +15,12 @@ const ESTIMATED_LIST_SIZE = { height: 644, width: 900 } as const;
 const fixtureStartedAt = performance.now();
 
 type ItemKind = "compact" | "summary";
-type Item = number;
+type Item = 0;
 
-// the numeric index is the immutable item identity. deriving the short key and
-// row type only when LegendList asks avoids retaining 100,000 objects and id strings
-// before first paint while preserving stable keys and typed recycling.
-const items: readonly Item[] = Array.from({ length: ITEM_COUNT }, (_, index) => index);
+// every row is derived from LegendList's index, so the data array can share one
+// small sentinel instead of retaining 100,000 distinct item values. LegendList
+// still receives a real array and stable index-derived keys.
+const items: readonly Item[] = new Array(ITEM_COUNT).fill(0) as Item[];
 
 type RowProps = { index: number };
 
@@ -56,24 +56,24 @@ const SummaryRow = memo(function SummaryRow({ index }: RowProps) {
     );
 });
 
-function renderItem({ item }: { item: Item }) {
-    return item % 20 === 0 ? (
-        <SummaryRow index={item} />
+function renderItem({ index }: { item: Item; index: number }) {
+    return index % 20 === 0 ? (
+        <SummaryRow index={index} />
     ) : (
-        <CompactRow index={item} />
+        <CompactRow index={index} />
     );
 }
 
-function keyExtractor(item: Item) {
-    return String(item);
+function keyExtractor(_item: Item, index: number) {
+    return String(index);
 }
 
-function getItemType(item: Item): ItemKind {
-    return item % 20 === 0 ? "summary" : "compact";
+function getItemType(_item: Item, index: number): ItemKind {
+    return index % 20 === 0 ? "summary" : "compact";
 }
 
-function getFixedItemSize(item: Item) {
-    return item % 20 === 0 ? 56 : 40;
+function getFixedItemSize(_item: Item, index: number) {
+    return index % 20 === 0 ? 56 : 40;
 }
 
 function App() {

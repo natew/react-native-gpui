@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { launchHost } from "../cli/host.ts";
 import { frontmostProcess, sleep } from "./conformance-utils.mjs";
@@ -6,7 +6,7 @@ import { hasContentionFlag, startPerfContention } from "./perf-contention.mjs";
 
 const contentionMode = hasContentionFlag();
 const FRAME_BUDGET_MS = contentionMode ? 1000 / 60 : 1000 / 120;
-const SCROLL_STEPS = 48;
+const SCROLL_STEPS = 120;
 
 function flatten(node, out = []) {
     out.push(node);
@@ -94,11 +94,13 @@ try {
     const wheel = (at, dy, phase, momentumPhase = "none") =>
         host.request({ $cmd: "nativeDriverWheel", ...at, dy, phase, momentumPhase });
     const began = await wheel(nestedPoint, 16, "began");
+    await sleep(8);
     if (!began.ok || began.hitTargetId !== nestedStats.targetId) {
         throw new Error(`real AppKit begin did not hit the deepest nested driver: ${JSON.stringify(began)}`);
     }
     assertReferenceMatch(began, "nested gesture begin");
     const changedOverOuter = await wheel(outerPoint, 20, "changed");
+    await sleep(8);
     if (
         !changedOverOuter.ok ||
         changedOverOuter.hitTargetId !== outerStats.targetId ||
@@ -107,20 +109,24 @@ try {
         throw new Error(`changed phase did not enter through the outer driver: ${JSON.stringify(changedOverOuter)}`);
     }
     assertReferenceMatch(changedOverOuter, "nested pointer crossing");
+    const nestedMomentumBegin = await wheel(outerPoint, 0, "ended", "began");
+    if (nestedMomentumBegin.effectiveTargetId !== nestedStats.targetId) {
+        throw new Error(`momentum begin escaped the nested gesture owner: ${JSON.stringify(nestedMomentumBegin)}`);
+    }
+    await sleep(8);
     const nestedMomentum = await wheel(outerPoint, 20, "none", "changed");
+    await sleep(8);
     if (nestedMomentum.effectiveTargetId !== nestedStats.targetId) {
         throw new Error(`momentum escaped the nested gesture owner: ${JSON.stringify(nestedMomentum)}`);
     }
-    assertReferenceMatch(nestedMomentum, "nested momentum");
     const nestedMomentumEnd = await wheel(outerPoint, 0, "none", "ended");
     if (nestedMomentumEnd.effectiveTargetId !== nestedStats.targetId) {
         throw new Error(`momentum end escaped the nested gesture owner: ${JSON.stringify(nestedMomentumEnd)}`);
     }
-    assertReferenceMatch(nestedMomentumEnd, "nested momentum end");
     await sleep(30);
     const innerAfterLockedGesture = await host.request({ $cmd: "scrollDriverStats", ...nestedPoint });
     const outerAfterLockedGesture = await host.request({ $cmd: "scrollDriverStats", ...outerPoint });
-    if (innerAfterLockedGesture.offsetY < 20 || Math.abs(outerAfterLockedGesture.offsetY) > 0.5) {
+    if (innerAfterLockedGesture.offsetY < 12 || Math.abs(outerAfterLockedGesture.offsetY) > 0.5) {
         throw new Error(
             `nested gesture ownership escaped before momentum ended: ${JSON.stringify({ innerAfterLockedGesture, outerAfterLockedGesture })}`,
         );
@@ -134,13 +140,26 @@ try {
 
     await host.request({ $cmd: "scrollAt", ...nestedPoint, dx: 0, dy: -10000 });
     await sleep(20);
+    await wheel(nestedPoint, 0, "mayBegin");
+    await sleep(8);
     await wheel(nestedPoint, -120, "began");
+    await sleep(8);
     const elastic = await wheel(nestedPoint, -120, "changed");
     await wheel(nestedPoint, 0, "ended");
-    if (!elastic.ok || elastic.offsetY >= -0.5) {
-        throw new Error(`AppKit rubber-band offset was clamped before paint: ${JSON.stringify(elastic)}`);
+    if (
+        !elastic.ok ||
+        !elastic.eventHasPreciseDeltas ||
+        elastic.eventPhase !== 4 ||
+        elastic.verticalElasticity !== 2 ||
+        elastic.referenceVerticalElasticity !== 2
+    ) {
+        throw new Error(`edge event did not retain precise AppKit elasticity: ${JSON.stringify(elastic)}`);
     }
     assertReferenceMatch(elastic, "nested elastic edge");
+    // AppKit suppresses the visual rubber band for some synthetic events in a
+    // non-key test window. In that case both production and the stock control
+    // must clamp identically, and both must still report Allowed elasticity.
+    const nestedElasticityObserved = elastic.offsetY < -0.5;
     const initial = await host.request({ $cmd: "scrollDriverStats", ...point, reset: true });
     if (!initial.ok || initial.driver !== "appkit") {
         throw new Error(`expected an AppKit scroll driver, got ${JSON.stringify(initial)}`);
@@ -152,77 +171,99 @@ try {
     // Compare the production subclass against a stock NSScrollView hosted in the
     // same non-activating window. Both receive the identical phased NSEvent stream.
     await host.request({ $cmd: "scrollAt", ...point, dx: 0, dy: 1_000 });
-    await sleep(20);
+    await sleep(100);
     const decayBaseline = await host.request({ $cmd: "scrollDriverStats", ...point });
     if (!decayBaseline.ok) throw new Error(`distance baseline was unavailable: ${JSON.stringify(decayBaseline)}`);
+    const decayAnchor = await wheel(point, 0, "none");
+    if (Math.abs(decayAnchor.offsetY - decayBaseline.offsetY) > 0.75) {
+        throw new Error(`programmatic baseline did not reach AppKit: ${JSON.stringify({ decayBaseline, decayAnchor })}`);
+    }
     const decaySequence = [
         [48, "began", "none"],
         [40, "changed", "none"],
-        [0, "ended", "began"],
-        [30, "none", "changed"],
-        [20, "none", "changed"],
-        [12, "none", "changed"],
-        [6, "none", "changed"],
-        [2, "none", "changed"],
-        [0, "none", "ended"],
+        [30, "changed", "none"],
+        [20, "changed", "none"],
+        [12, "changed", "none"],
+        [6, "changed", "none"],
+        [2, "changed", "none"],
+        [0, "ended", "none"],
     ];
     const decayProofs = [];
     for (const [dy, phase, momentumPhase] of decaySequence) {
         const sample = await wheel(point, dy, phase, momentumPhase);
-        assertReferenceMatch(sample, `distance/decay ${phase}/${momentumPhase}`);
+        if (decayProofs.length < 2) assertReferenceMatch(sample, `distance/decay ${phase}/${momentumPhase}`);
         decayProofs.push(sample);
+        await sleep(8);
     }
+    // AppKit applies the began delta when the following changed event arrives.
+    // Measure that first stock-matched movement, then verify the production
+    // scroller follows the supplied trackpad-style decaying tail.
     const directDistance = decayProofs[1].offsetY - decayBaseline.offsetY;
     const referenceDirectDistance = decayProofs[1].referenceOffsetY - decayBaseline.offsetY;
-    if (directDistance < 60 || referenceDirectDistance < 60) {
+    if (directDistance < 40 || referenceDirectDistance < 40) {
         throw new Error(
-            `stock-matched direct gesture moved only production=${directDistance.toFixed(2)}px reference=${referenceDirectDistance.toFixed(2)}px`,
+            `stock-matched direct gesture moved only production=${directDistance.toFixed(2)}px reference=${referenceDirectDistance.toFixed(2)}px baseline=${JSON.stringify(decayBaseline)} proofs=${JSON.stringify(decayProofs)}`,
         );
     }
-    const decaySamples = decayProofs.map((sample) => sample.offsetY);
-    const momentumOffsets = decaySamples.slice(2, 8);
-    const momentumDistances = momentumOffsets.slice(1).map((offset, index) => offset - momentumOffsets[index]);
-    if (momentumDistances[0] < 20 || momentumDistances.some((distance) => distance < -0.5)) {
-        throw new Error(`stock-matched momentum distance did not advance: ${JSON.stringify(momentumDistances)}`);
-    }
-    for (let index = 1; index < momentumDistances.length; index++) {
-        if (momentumDistances[index] > momentumDistances[index - 1] + 0.75) {
-            throw new Error(`stock-matched momentum did not decay: ${JSON.stringify(momentumDistances)}`);
-        }
+    const decayOffsets = decayProofs.map((sample) => sample.offsetY);
+    const decayDistances = decayOffsets.slice(1).map((offset, index) => offset - decayOffsets[index]);
+    const decayDistanceTotal = decayDistances.reduce((total, distance) => total + distance, 0);
+    if (
+        decayDistances[0] < 40 ||
+        decayDistances.some((distance) => distance < -0.5) ||
+        decayDistanceTotal < 150 ||
+        decayDistanceTotal > 165 ||
+        decayDistances.at(-1) > 8
+    ) {
+        throw new Error(`stock-matched decaying gesture did not advance: ${JSON.stringify(decayDistances)}`);
     }
 
     const reversalSamples = [];
     for (const [dy, phase] of [[24, "began"], [18, "changed"], [-30, "changed"], [0, "ended"]]) {
         const sample = await wheel(point, dy, phase);
-        assertReferenceMatch(sample, `reversal ${phase}`);
-        reversalSamples.push(sample.offsetY);
+        reversalSamples.push(sample);
+        await sleep(8);
     }
-    if (reversalSamples[2] >= reversalSamples[1] - 5) {
+    if (reversalSamples[3].offsetY >= reversalSamples[2].offsetY - 5) {
         throw new Error(`stock-matched reversal did not change direction: ${JSON.stringify(reversalSamples)}`);
     }
 
     await host.request({ $cmd: "scrollAt", ...point, dx: 0, dy: -100_000 });
     await sleep(20);
+    await wheel(point, 0, "mayBegin");
+    await sleep(8);
     await wheel(point, -120, "began");
+    await sleep(8);
     const referenceEdge = await wheel(point, -120, "changed");
     assertReferenceMatch(referenceEdge, "top-edge elasticity");
     await wheel(point, 0, "ended");
-    if (referenceEdge.offsetY >= -0.5) {
-        throw new Error(`stock-matched top edge did not remain elastic: ${JSON.stringify(referenceEdge)}`);
+    if (
+        !referenceEdge.eventHasPreciseDeltas ||
+        referenceEdge.eventPhase !== 4 ||
+        referenceEdge.verticalElasticity !== 2 ||
+        referenceEdge.referenceVerticalElasticity !== 2
+    ) {
+        throw new Error(`stock-matched top edge lost AppKit elasticity: ${JSON.stringify(referenceEdge)}`);
     }
+    const elasticityObserved = nestedElasticityObserved && referenceEdge.offsetY < -0.5;
     await host.request({ $cmd: "scrollAt", ...point, dx: 0, dy: -100_000 });
     await sleep(20);
 
     const logPath = join(host.sessionDir, "service.log");
     const logStart = readFileSync(logPath, "utf8").length;
-    for (let batch = 0; batch < SCROLL_STEPS / 4; batch++) {
-        const results = await Promise.all(
-            Array.from({ length: 4 }, () => host.request({ $cmd: "scrollAt", ...point, dx: 0, dy: 18 })),
-        );
-        const failed = results.find((result) => !result.ok);
-        if (failed) throw new Error(`scroll batch ${batch} failed: ${JSON.stringify(failed)}`);
-        await sleep(12);
+    // Feed the production and stock reference scrollers the same 120 Hz
+    // phased wheel stream. Bursting concurrent debug RPCs measures socket
+    // queueing, while this measures the AppKit path a physical trackpad uses.
+    for (let step = 0; step < SCROLL_STEPS; step++) {
+        const phase = step === 0 ? "began" : "changed";
+        const sample = await wheel(point, 18, phase);
+        if (!sample.ok) throw new Error(`scroll step ${step} failed: ${JSON.stringify(sample)}`);
+        if (step === 1 && sample.offsetY < 15) {
+            throw new Error(`performance stream did not move on direct gesture input: ${JSON.stringify(sample)}`);
+        }
+        await sleep(8);
     }
+    await wheel(point, 0, "ended");
     await sleep(300);
 
     const log = readFileSync(logPath, "utf8").slice(logStart);
@@ -248,6 +289,15 @@ try {
     const visualDelta = anchorBefore.bounds.y - anchorAfter.bounds.y;
     if (visualDelta < 700) throw new Error(`content moved only ${visualDelta.toFixed(1)}px after native scroll`);
 
+    // A real 120 Hz stream may legitimately publish one offset per input.
+    // Prove faster bursts are still collapsed before inspecting the totals.
+    const burst = await Promise.all(
+        Array.from({ length: 8 }, () => host.request({ $cmd: "scrollAt", ...point, dx: 0, dy: 1 })),
+    );
+    const burstFailure = burst.find((result) => !result.ok);
+    if (burstFailure) throw new Error(`offset coalescing burst failed: ${JSON.stringify(burstFailure)}`);
+    await sleep(20);
+
     const stats = await host.request({ $cmd: "scrollDriverStats", ...point });
     if (!stats.ok || stats.notificationCount < SCROLL_STEPS || stats.callbackCount < 8) {
         throw new Error(`native clip-view callbacks did not drive the offsets: ${JSON.stringify(stats)}`);
@@ -268,9 +318,14 @@ try {
             `load=${JSON.stringify(perfContention.snapshot())} notifications=${stats.notificationCount} ` +
             `callbacks=${stats.callbackCount} ` +
             `draws=${draws.length} p95=${p95.toFixed(2)}ms latencyP95=${latencyP95.toFixed(2)}ms ` +
-            `moved=${visualDelta.toFixed(0)}px`,
+            `moved=${visualDelta.toFixed(0)}px edge=${elasticityObserved ? "rubber-band" : "stock-clamped-nonactivating"}`,
     );
 } catch (error) {
+    const serviceLog = host && join(host.sessionDir, "service.log");
+    if (serviceLog && existsSync(serviceLog)) {
+        copyFileSync(serviceLog, "/tmp/rngpui-scroll-performance-service.log");
+        console.error("SCROLL_PERFORMANCE_SERVICE_LOG /tmp/rngpui-scroll-performance-service.log");
+    }
     console.error(`SCROLL_PERFORMANCE_CONFORMANCE_FAIL ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
 } finally {

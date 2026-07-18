@@ -1,6 +1,8 @@
 import { performance } from "node:perf_hooks";
-import { rmSync } from "node:fs";
+import { copyFileSync, existsSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { launchHost, type DumpNode, type LaunchedHost } from "../cli/host";
+import { settledFrameCount } from "./input-perf";
 import { readPng } from "./png.mjs";
 
 type InputStatus = {
@@ -54,7 +56,6 @@ try {
     const primary = requireTestId(initialTree, "primary-input");
     const secondary = requireTestId(initialTree, "secondary-input");
     const placeholderColorInput = requireTestId(initialTree, "placeholder-color-input");
-    const uncontrolledInput = requireTestId(initialTree, "uncontrolled-input");
     const disablePrimary = requireTestId(initialTree, "disable-primary");
     const nodes = countNodes(initialTree);
     assert(nodes >= 1_600, `large-tree fixture only rendered ${nodes} nodes`);
@@ -287,8 +288,18 @@ try {
     assert(snapshot.focusedId === primary.globalId, "controlled submit lost focus");
     assert((snapshot.eventCount ?? 0) === submitted.eventCount, "native and React event counters diverged");
 
-    await realTap(host, uncontrolledInput);
+    const liveUncontrolledInput = requireTestId(await host.dump(), "uncontrolled-input");
+    const uncontrolledTap = await realTap(host, liveUncontrolledInput);
+    snapshot = await waitForInputFocus(
+        host,
+        liveUncontrolledInput.globalId,
+        `uncontrolled input bounds ${JSON.stringify(liveUncontrolledInput.bounds)}, tap ${JSON.stringify(uncontrolledTap)}`,
+    );
+    const uncontrolledInitialLength = snapshot.value?.length ?? 0;
+    assert(uncontrolledInitialLength > 0, "uncontrolled input lost its defaultValue before editing");
     await realKey(host, "cmd-a");
+    snapshot = await inputSnapshot(host);
+    assertRange(snapshot.selectedRange, [0, uncontrolledInitialLength], "uncontrolled select-all");
     const uncontrolledValue = "uncontrolled-edited";
     const uncontrolledTyped = await host.request<{ ok: boolean }>({
         $cmd: "type",
@@ -301,7 +312,7 @@ try {
         (status) => status.uncontrolledObserved === uncontrolledValue && status.unrelatedTick > 0,
     );
     snapshot = await inputSnapshot(host);
-    assert(snapshot.focusedId === uncontrolledInput.globalId, "unrelated commit moved uncontrolled focus");
+    assert(snapshot.focusedId === liveUncontrolledInput.globalId, "unrelated commit moved uncontrolled focus");
     assert(snapshot.value === uncontrolledValue, "defaultValue reset an uncontrolled native edit");
 
     await realTap(host, primary);
@@ -326,7 +337,7 @@ try {
     const key = summarize(keyLatencies);
     assert(
         focus.p95 <= frameBudgetMs,
-        `click-to-painted-focus p95 ${focus.p95.toFixed(2)}ms exceeded ${frameBudgetMs.toFixed(2)}ms`,
+        `click-to-painted-focus median/p95 ${focus.median.toFixed(2)}/${focus.p95.toFixed(2)}ms exceeded ${frameBudgetMs.toFixed(2)}ms; samples=${focusLatencies.map((value) => value.toFixed(2)).join(",")}`,
     );
     assert(
         key.p95 <= frameBudgetMs,
@@ -337,6 +348,14 @@ try {
         `INPUT_RUNTIME_CONFORMANCE_PASS nodes=${nodes} focusMedian=${focus.median.toFixed(2)}ms focusP95=${focus.p95.toFixed(2)}ms keyMedian=${key.median.toFixed(2)}ms keyP95=${key.p95.toFixed(2)}ms eventCount=${snapshot.eventCount}`,
     );
 } catch (error) {
+    if (host) {
+        const source = join(host.sessionDir, "service.log");
+        const preserved = "/tmp/rngpui-input-runtime-failure.log";
+        if (existsSync(source)) {
+            copyFileSync(source, preserved);
+            console.error(`INPUT_RUNTIME_SERVICE_LOG ${preserved}`);
+        }
+    }
     console.error(`INPUT_RUNTIME_CONFORMANCE_FAIL ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
 } finally {
@@ -349,7 +368,7 @@ async function measurePresentation(
     action: () => Promise<{ ok: boolean }>,
     isRequestedPaint: (painted: NonNullable<InputSnapshot["painted"]>) => boolean,
 ): Promise<number> {
-    const before = await frameStats(host);
+    const before = await settledFrameCount(async () => (await frameStats(host)).framesPainted);
     const started = performance.now();
     const result = await action();
     assert(result.ok, "input action failed");
@@ -358,7 +377,7 @@ async function measurePresentation(
         const snapshot = await inputSnapshot(host);
         if (
             snapshot.painted &&
-            snapshot.painted.frame > before.framesPainted &&
+            snapshot.painted.frame > before &&
             isRequestedPaint(snapshot.painted)
         ) {
             return performance.now() - started;
@@ -380,16 +399,27 @@ async function inputSnapshot(host: LaunchedHost): Promise<InputSnapshot> {
     return snapshot;
 }
 
+async function waitForInputFocus(host: LaunchedHost, id: number, label: string): Promise<InputSnapshot> {
+    const deadline = performance.now() + 5_000;
+    let latest: InputSnapshot | null = null;
+    while (performance.now() < deadline) {
+        latest = await host.request<InputSnapshot>({ $cmd: "inputState" });
+        if (latest.ok && latest.focusedId === id) return latest;
+        await sleep(12);
+    }
+    throw new Error(`${label} did not receive pointer focus; latest=${JSON.stringify(latest)}`);
+}
+
 async function realKey(host: LaunchedHost, key: string): Promise<{ ok: boolean }> {
     const result = await host.request<{ ok: boolean; error?: string }>({ $cmd: "realKey", key });
     assert(result.ok, result.error ?? `realKey ${key} failed`);
     return result;
 }
 
-async function realTap(host: LaunchedHost, node: DumpNode): Promise<{ ok: boolean }> {
+async function realTap(host: LaunchedHost, node: DumpNode): Promise<{ ok: boolean; [key: string]: unknown }> {
     const bounds = node.bounds;
     assert(bounds && bounds.width > 0 && bounds.height > 0, "input has no tappable bounds");
-    const result = await host.request<{ ok: boolean; error?: string }>({
+    const result = await host.request<{ ok: boolean; error?: string; [key: string]: unknown }>({
         $cmd: "realtap",
         x: bounds.x + bounds.width / 2,
         y: bounds.y + bounds.height / 2,

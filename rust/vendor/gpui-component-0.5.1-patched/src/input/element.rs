@@ -1264,26 +1264,33 @@ impl Element for TextElement {
             cx,
         );
 
-        // Set Root focused_input when self is focused
-        if focused {
-            let state = self.state.clone();
-            if Root::read(window, cx).focused_input.as_ref() != Some(&state) {
-                Root::update(window, cx, |root, _, cx| {
-                    root.focused_input = Some(state);
-                    cx.notify();
-                });
+        // inactive test windows still have a logical focus handle, but gpui omits
+        // their focus paths. sync the editor state from the painted handle so tab
+        // and shift-tab publish the same semantic transition as direct focus().
+        if focused && Root::read(window, cx).focused_input.as_ref() != Some(&self.state) {
+            if let Some(previous) = Root::read(window, cx).focused_input.clone() {
+                previous.update(cx, |input, cx| input.blur(window, cx));
             }
+            Root::update(window, cx, |root, _, _| {
+                root.focused_input = Some(self.state.clone());
+            });
+            self.state
+                .update(cx, |input, cx| input.on_focus(window, cx));
         }
 
-        // And reset focused_input when next_frame start
+        // delay the unmatched blur until every input has painted. a newly focused
+        // editor transitions the old state synchronously before this callback runs.
         window.on_next_frame({
             let state = self.state.clone();
             move |window, cx| {
                 if !focused && Root::read(window, cx).focused_input.as_ref() == Some(&state) {
-                    Root::update(window, cx, |root, _, cx| {
-                        root.focused_input = None;
-                        cx.notify();
-                    });
+                    if state.read(cx).is_context_menu_open(cx) {
+                        return;
+                    }
+                    state.update(cx, |input, cx| input.on_blur(window, cx));
+                    if Root::read(window, cx).focused_input.as_ref() == Some(&state) {
+                        Root::update(window, cx, |root, _, _| root.focused_input = None);
+                    }
                 }
             }
         });

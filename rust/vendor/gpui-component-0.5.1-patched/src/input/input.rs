@@ -33,6 +33,7 @@ pub struct Input {
     bordered: bool,
     focus_bordered: bool,
     tab_index: isize,
+    tab_moves_focus: bool,
     selected: bool,
     text_color: Option<Hsla>,
     placeholder_text_color: Option<Hsla>,
@@ -73,6 +74,7 @@ impl Input {
             bordered: true,
             focus_bordered: true,
             tab_index: 0,
+            tab_moves_focus: false,
             selected: false,
             text_color: None,
             placeholder_text_color: None,
@@ -140,6 +142,12 @@ impl Input {
     /// Set the tab index for the input, default is 0.
     pub fn tab_index(mut self, index: isize) -> Self {
         self.tab_index = index;
+        self
+    }
+
+    /// use tab and shift-tab for focus traversal instead of text indentation.
+    pub fn tab_moves_focus(mut self, enabled: bool) -> Self {
+        self.tab_moves_focus = enabled;
         self
     }
 
@@ -260,6 +268,7 @@ impl RenderOnce for Input {
 
         self.state.update(cx, |state, _| {
             state.disabled = self.disabled;
+            state.tab_moves_focus = self.tab_moves_focus;
             state.size = self.size;
             state.text_color = self.text_color;
             state.placeholder_text_color = self.placeholder_text_color;

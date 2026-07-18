@@ -88,7 +88,8 @@ thread_local! {
     static APPLYING: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
     static STATS: RefCell<HashMap<u64, DriverStats>> = RefCell::new(HashMap::new());
     static PENDING: RefCell<HashMap<u64, PendingOffset>> = RefCell::new(HashMap::new());
-    static EMIT_SCHEDULED: RefCell<bool> = const { RefCell::new(false) };
+    static EMIT_GENERATION: RefCell<u64> = const { RefCell::new(0) };
+    static SCHEDULED_EMIT: RefCell<Option<u64>> = const { RefCell::new(None) };
     static LAST_EMIT: RefCell<Option<Instant>> = const { RefCell::new(None) };
     static LAST_NATIVE_OFFSETS: RefCell<HashMap<u64, (f64, f64)>> = RefCell::new(HashMap::new());
     static OBSERVER: RefCell<Option<id>> = RefCell::new(None);
@@ -106,7 +107,12 @@ const NS_SCROLL_ELASTICITY_NONE: i64 = 1;
 #[cfg(target_os = "macos")]
 const NS_SCROLL_ELASTICITY_ALLOWED: i64 = 2;
 #[cfg(target_os = "macos")]
-const FRAME_INTERVAL: Duration = Duration::from_nanos(8_333_333);
+const NS_WINDOW_BELOW: i64 = -1;
+#[cfg(target_os = "macos")]
+// Synchronize the AppKit-owned offset often enough to reach the next 120 Hz
+// presentation even when the clip notification arrives just after a GPUI frame.
+// The renderer still coalesces these notifications into one paint per frame.
+const OFFSET_SYNC_INTERVAL: Duration = Duration::from_nanos(4_166_667);
 
 #[cfg(target_os = "macos")]
 const CG_SCROLL_UNIT_PIXEL: u32 = 0;
@@ -201,6 +207,12 @@ pub struct NativeScrollProof {
     pub offset_y: f64,
     pub reference_offset_x: f64,
     pub reference_offset_y: f64,
+    pub event_delta_y: f64,
+    pub event_phase: u64,
+    pub event_momentum_phase: u64,
+    pub event_has_precise_deltas: bool,
+    pub vertical_elasticity: i64,
+    pub reference_vertical_elasticity: i64,
 }
 
 #[cfg(target_os = "macos")]
@@ -212,16 +224,14 @@ unsafe fn release_reference(reference: ReferenceDriver) {
 #[cfg(target_os = "macos")]
 unsafe fn create_reference(driver: Driver) -> ReferenceDriver {
     let (_, _, width, height) = driver.last_bounds;
-    let frame = NSRect::new(
-        NSPoint::new(-10_000.0, -10_000.0),
-        NSSize::new(width.max(1.0), height.max(1.0)),
-    );
+    let frame: NSRect = msg_send![driver.scroll_view, frame];
     let scroll_view: id = msg_send![class!(NSScrollView), alloc];
     let scroll_view: id = msg_send![scroll_view, initWithFrame: frame];
     let _: () = msg_send![scroll_view, setDrawsBackground: NO];
     let _: () = msg_send![scroll_view, setAutohidesScrollers: YES];
     let _: () = msg_send![scroll_view, setScrollerStyle: NS_SCROLLER_STYLE_OVERLAY];
     let _: () = msg_send![scroll_view, setAutomaticallyAdjustsContentInsets: NO];
+    let _: () = msg_send![scroll_view, setAlphaValue: 0.001_f64];
     let has_horizontal_scroller = if driver.shows_horizontal_scroller == Some(true) {
         YES
     } else {
@@ -263,7 +273,16 @@ unsafe fn create_reference(driver: Driver) -> ReferenceDriver {
     let actual_bounds: NSRect = msg_send![driver.clip_view, bounds];
     let _: () = msg_send![clip_view, scrollToPoint: actual_bounds.origin];
     let _: () = msg_send![scroll_view, reflectScrolledClipView: clip_view];
-    let _: () = msg_send![driver.gpui_view, addSubview: scroll_view];
+    // Keep the stock comparator in the same live/composited coordinates as the
+    // production scroller. Parking it offscreen changes AppKit's momentum and
+    // elasticity behavior. It is nearly transparent and ordered below the real
+    // driver, so it cannot win hit testing or alter production input routing.
+    let _: () = msg_send![
+        driver.gpui_view,
+        addSubview: scroll_view
+        positioned: NS_WINDOW_BELOW
+        relativeTo: driver.scroll_view
+    ];
     ReferenceDriver {
         scroll_view,
         clip_view,
@@ -315,6 +334,12 @@ pub fn native_scroll_proof(
             offset_y: 0.0,
             reference_offset_x: 0.0,
             reference_offset_y: 0.0,
+            event_delta_y: 0.0,
+            event_phase: 0,
+            event_momentum_phase: 0,
+            event_has_precise_deltas: false,
+            vertical_elasticity: 0,
+            reference_vertical_elasticity: 0,
         };
     };
     let begins_gesture = matches!(phase, "began" | "mayBegin");
@@ -328,6 +353,12 @@ pub fn native_scroll_proof(
             offset_y: 0.0,
             reference_offset_x: 0.0,
             reference_offset_y: 0.0,
+            event_delta_y: 0.0,
+            event_phase: 0,
+            event_momentum_phase: 0,
+            event_has_precise_deltas: false,
+            vertical_elasticity: 0,
+            reference_vertical_elasticity: 0,
         };
     };
     let Some(momentum_phase) = cg_momentum_phase(momentum_phase) else {
@@ -339,6 +370,12 @@ pub fn native_scroll_proof(
             offset_y: 0.0,
             reference_offset_x: 0.0,
             reference_offset_y: 0.0,
+            event_delta_y: 0.0,
+            event_phase: 0,
+            event_momentum_phase: 0,
+            event_has_precise_deltas: false,
+            vertical_elasticity: 0,
+            reference_vertical_elasticity: 0,
         };
     };
     unsafe {
@@ -393,6 +430,12 @@ pub fn native_scroll_proof(
                 offset_y: 0.0,
                 reference_offset_x: 0.0,
                 reference_offset_y: 0.0,
+                event_delta_y: 0.0,
+                event_phase: 0,
+                event_momentum_phase: 0,
+                event_has_precise_deltas: false,
+                vertical_elasticity: 0,
+                reference_vertical_elasticity: 0,
             };
         };
         let cg_event =
@@ -406,6 +449,12 @@ pub fn native_scroll_proof(
                 offset_y: 0.0,
                 reference_offset_x: 0.0,
                 reference_offset_y: 0.0,
+                event_delta_y: 0.0,
+                event_phase: 0,
+                event_momentum_phase: 0,
+                event_has_precise_deltas: false,
+                vertical_elasticity: 0,
+                reference_vertical_elasticity: 0,
             };
         }
         CGEventSetIntegerValueField(cg_event, CG_SCROLL_WHEEL_EVENT_IS_CONTINUOUS, 1);
@@ -426,8 +475,18 @@ pub fn native_scroll_proof(
                 offset_y: 0.0,
                 reference_offset_x: 0.0,
                 reference_offset_y: 0.0,
+                event_delta_y: 0.0,
+                event_phase: 0,
+                event_momentum_phase: 0,
+                event_has_precise_deltas: false,
+                vertical_elasticity: 0,
+                reference_vertical_elasticity: 0,
             };
         }
+        let event_delta_y: f64 = msg_send![ns_event, scrollingDeltaY];
+        let event_phase: u64 = msg_send![ns_event, phase];
+        let event_momentum_phase: u64 = msg_send![ns_event, momentumPhase];
+        let event_has_precise_deltas: BOOL = msg_send![ns_event, hasPreciseScrollingDeltas];
         let effective_driver_id = if begins_gesture {
             hit_driver_id
         } else if phased_gesture {
@@ -460,6 +519,11 @@ pub fn native_scroll_proof(
             let bounds: NSRect = msg_send![reference.clip_view, bounds];
             bounds
         });
+        let vertical_elasticity: i64 = msg_send![effective_scroll_view, verticalScrollElasticity];
+        let reference_vertical_elasticity = reference.map_or(0, |reference| {
+            let elasticity: i64 = msg_send![reference.scroll_view, verticalScrollElasticity];
+            elasticity
+        });
         NativeScrollProof {
             hit_driver_id: Some(hit_driver_id),
             effective_driver_id: Some(effective_driver_id),
@@ -468,6 +532,12 @@ pub fn native_scroll_proof(
             offset_y: clip_bounds.origin.y,
             reference_offset_x: reference_bounds.map_or(0.0, |bounds| bounds.origin.x),
             reference_offset_y: reference_bounds.map_or(0.0, |bounds| bounds.origin.y),
+            event_delta_y,
+            event_phase,
+            event_momentum_phase,
+            event_has_precise_deltas: event_has_precise_deltas == YES,
+            vertical_elasticity,
+            reference_vertical_elasticity,
         }
     }
 }
@@ -489,6 +559,12 @@ pub fn native_scroll_proof(
         offset_y: 0.0,
         reference_offset_x: 0.0,
         reference_offset_y: 0.0,
+        event_delta_y: 0.0,
+        event_phase: 0,
+        event_momentum_phase: 0,
+        event_has_precise_deltas: false,
+        vertical_elasticity: 0,
+        reference_vertical_elasticity: 0,
     }
 }
 
@@ -515,7 +591,11 @@ extern "C" fn scroll_wheel(this: &Object, _: Sel, event: id) {
                     return;
                 }
             }
-            if momentum == 8 || momentum == 16 {
+            // A direct gesture with no momentum releases ownership at phase end.
+            // When momentum begins on the same event, retain the original owner
+            // until the momentum stream itself ends so crossing nested scrollers
+            // cannot redirect the fling.
+            if momentum == 8 || momentum == 16 || ((phase == 8 || phase == 16) && momentum == 0) {
                 ACTIVE_DRIVER.with(|active| *active.borrow_mut() = None);
             }
         }
@@ -565,36 +645,66 @@ extern "C" fn clip_bounds_changed(_: &Object, _: Sel, notification: id) {
                     started_at: Instant::now(),
                 });
         });
-        let should_schedule = EMIT_SCHEDULED.with(|scheduled| {
-            let mut scheduled = scheduled.borrow_mut();
-            if *scheduled {
-                false
-            } else {
-                *scheduled = true;
-                true
-            }
+        let delay = LAST_EMIT.with(|last| {
+            last.borrow()
+                .map(|last| {
+                    OFFSET_SYNC_INTERVAL
+                        .saturating_sub(last.elapsed())
+                        .as_secs_f64()
+                })
+                .unwrap_or(0.0)
         });
-        if should_schedule {
-            let delay = LAST_EMIT.with(|last| {
-                last.borrow()
-                    .map(|last| FRAME_INTERVAL.saturating_sub(last.elapsed()).as_secs_f64())
-                    .unwrap_or(0.0)
+        let delay_ns = (delay * 1_000_000_000.0) as i64;
+        if delay_ns == 0 {
+            // Supersede a delayed callback that the display-link run loop has not
+            // serviced yet. The next already-due AppKit event must not sit behind
+            // that stale GCD block for 100ms.
+            EMIT_GENERATION.with(|generation| {
+                let current = *generation.borrow();
+                *generation.borrow_mut() = current.wrapping_add(1).max(1);
             });
-            let delay_ns = (delay * 1_000_000_000.0) as i64;
-            let when = dispatch_time(0, delay_ns);
-            dispatch_after_f(
-                when,
-                std::ptr::addr_of_mut!(_dispatch_main_q),
-                std::ptr::null_mut(),
-                Some(emit_scroll_offsets),
-            );
+            SCHEDULED_EMIT.with(|scheduled| *scheduled.borrow_mut() = None);
+            flush_scroll_offsets();
+        } else {
+            let generation = SCHEDULED_EMIT.with(|scheduled| {
+                if scheduled.borrow().is_some() {
+                    return None;
+                }
+                let generation = EMIT_GENERATION.with(|generation| {
+                    let current = *generation.borrow();
+                    let next = current.wrapping_add(1).max(1);
+                    *generation.borrow_mut() = next;
+                    next
+                });
+                *scheduled.borrow_mut() = Some(generation);
+                Some(generation)
+            });
+            if let Some(generation) = generation {
+                let when = dispatch_time(0, delay_ns);
+                dispatch_after_f(
+                    when,
+                    std::ptr::addr_of_mut!(_dispatch_main_q),
+                    generation as usize as *mut c_void,
+                    Some(emit_scroll_offsets),
+                );
+            }
         }
     }
 }
 
 #[cfg(target_os = "macos")]
-unsafe extern "C" fn emit_scroll_offsets(_: *mut c_void) {
-    EMIT_SCHEDULED.with(|scheduled| *scheduled.borrow_mut() = false);
+unsafe extern "C" fn emit_scroll_offsets(context: *mut c_void) {
+    let generation = context as usize as u64;
+    let current = SCHEDULED_EMIT.with(|scheduled| *scheduled.borrow());
+    if current != Some(generation) {
+        return;
+    }
+    SCHEDULED_EMIT.with(|scheduled| *scheduled.borrow_mut() = None);
+    flush_scroll_offsets();
+}
+
+#[cfg(target_os = "macos")]
+fn flush_scroll_offsets() {
     LAST_EMIT.with(|last| *last.borrow_mut() = Some(Instant::now()));
     let pending = PENDING.with(|pending| pending.borrow_mut().drain().collect::<Vec<_>>());
     for (_, pending) in pending {
@@ -737,28 +847,41 @@ unsafe fn create_driver(driver_id: u64, gpui_view: id) -> Driver {
     }
 }
 
-/// Preserve an AppKit-reported elastic offset, but clamp source/programmatic state.
-/// The clip view owns transient rubber-band coordinates. A React ref, content-size
-/// change, or other source write diverges from that last report and is bounded here.
+/// Preserve AppKit's newest absolute offset while native scrolling owns the lane.
+/// A coalesced callback can already be stale by the time GPUI paints; replaying that
+/// callback into NSClipView visibly pulls the scroll backward. Programmatic/source
+/// writes explicitly leave native ownership and are clamped normally.
 #[cfg(target_os = "macos")]
-pub fn resolve_offset(driver_id: u64, x: f32, y: f32, max_x: f32, max_y: f32) -> (f32, f32) {
-    let native_owned = LAST_NATIVE_OFFSETS.with(|offsets| {
-        offsets
-            .borrow()
-            .get(&driver_id)
-            .is_some_and(|(native_x, native_y)| {
-                (native_x - f64::from(x)).abs() <= 0.01 && (native_y - f64::from(y)).abs() <= 0.01
-            })
-    });
+pub fn resolve_offset(
+    driver_id: u64,
+    x: f32,
+    y: f32,
+    max_x: f32,
+    max_y: f32,
+    native_owned: bool,
+) -> (f32, f32) {
     if native_owned {
-        (x, y)
+        LAST_NATIVE_OFFSETS.with(|offsets| {
+            offsets
+                .borrow()
+                .get(&driver_id)
+                .map(|(native_x, native_y)| (*native_x as f32, *native_y as f32))
+                .unwrap_or((x, y))
+        })
     } else {
         (x.clamp(0.0, max_x), y.clamp(0.0, max_y))
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn resolve_offset(_driver_id: u64, x: f32, y: f32, max_x: f32, max_y: f32) -> (f32, f32) {
+pub fn resolve_offset(
+    _driver_id: u64,
+    x: f32,
+    y: f32,
+    max_x: f32,
+    max_y: f32,
+    _native_owned: bool,
+) -> (f32, f32) {
     (x.clamp(0.0, max_x), y.clamp(0.0, max_y))
 }
 
@@ -951,6 +1074,22 @@ pub fn scroll_by(driver_id: u64, dx: f32, dy: f32) -> bool {
 pub fn scroll_by(_driver_id: u64, _dx: f32, _dy: f32) -> bool {
     false
 }
+
+/// Cancel any coalesced native offset that predates a source/programmatic write.
+/// Otherwise the delayed callback can arrive after scrollTo and take ownership back
+/// with an obsolete coordinate.
+#[cfg(target_os = "macos")]
+pub fn begin_programmatic_scroll(driver_id: u64) {
+    PENDING.with(|pending| {
+        pending.borrow_mut().remove(&driver_id);
+    });
+    LAST_NATIVE_OFFSETS.with(|offsets| {
+        offsets.borrow_mut().remove(&driver_id);
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn begin_programmatic_scroll(_driver_id: u64) {}
 
 #[cfg(target_os = "macos")]
 pub fn stats(driver_id: u64, reset: bool) -> Option<DriverStats> {

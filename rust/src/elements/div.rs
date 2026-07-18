@@ -85,6 +85,7 @@ struct DragReleaseTarget {
 }
 
 static SCROLL: Lazy<Mutex<HashMap<u64, ScrollOffset>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static NATIVE_SCROLL_OWNED: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static SCROLL_TO_END: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static PENDING_SCROLL_EVENTS: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
@@ -151,6 +152,11 @@ fn set_scroll(id: u64, v: ScrollOffset) {
     SCROLL.lock().unwrap().insert(id, v);
 }
 
+pub fn claim_native_scroll(id: u64) {
+    NATIVE_SCROLL_OWNED.lock().unwrap().insert(id);
+    mark_scroll_event(id);
+}
+
 fn mark_scroll_event(id: u64) {
     PENDING_SCROLL_EVENTS.lock().unwrap().insert(id);
 }
@@ -177,6 +183,8 @@ fn intersect_viewports(inherited: Option<Bounds<Pixels>>, own: Bounds<Pixels>) -
 }
 
 pub fn scroll_to(id: u64, x: Option<f32>, y: Option<f32>) {
+    NATIVE_SCROLL_OWNED.lock().unwrap().remove(&id);
+    crate::elements::native_scroll::begin_programmatic_scroll(id);
     let current = get_scroll(id);
     set_scroll(
         id,
@@ -191,7 +199,10 @@ pub fn scroll_to(id: u64, x: Option<f32>, y: Option<f32>) {
 /// Apply a relative scroll delta to a scroll container's persisted offset — the
 /// `rngpui do scroll` driver. Clamped to the painted max in paint, so over-scrolling
 /// just pins to the end.
+#[cfg(not(target_os = "macos"))]
 pub fn scroll_by(id: u64, dx: f32, dy: f32) {
+    NATIVE_SCROLL_OWNED.lock().unwrap().remove(&id);
+    crate::elements::native_scroll::begin_programmatic_scroll(id);
     let current = get_scroll(id);
     set_scroll(
         id,
@@ -200,14 +211,12 @@ pub fn scroll_by(id: u64, dx: f32, dy: f32) {
             y: (current.y + dy).max(0.0),
         },
     );
-}
-
-pub fn scroll_position(id: u64) -> (f32, f32) {
-    let offset = get_scroll(id);
-    (offset.x, offset.y)
+    mark_scroll_event(id);
 }
 
 pub fn scroll_to_end(id: u64) {
+    NATIVE_SCROLL_OWNED.lock().unwrap().remove(&id);
+    crate::elements::native_scroll::begin_programmatic_scroll(id);
     SCROLL_TO_END.lock().unwrap().insert(id);
     mark_scroll_event(id);
 }
@@ -381,6 +390,10 @@ pub fn retain_native_layout_keys(keys: &HashSet<String>) {
 
 pub fn retain_scroll_state(ids: &HashSet<u64>) {
     SCROLL.lock().unwrap().retain(|id, _| ids.contains(id));
+    NATIVE_SCROLL_OWNED
+        .lock()
+        .unwrap()
+        .retain(|id| ids.contains(id));
     SCROLL_TO_END.lock().unwrap().retain(|id| ids.contains(id));
     PENDING_SCROLL_EVENTS
         .lock()
@@ -1731,6 +1744,10 @@ impl Element for ReactDivElement {
                     current.y,
                     max_scroll_x,
                     max_scroll_y,
+                    NATIVE_SCROLL_OWNED
+                        .lock()
+                        .unwrap()
+                        .contains(&self.element.global_id),
                 );
                 ScrollOffset { x, y }
             };
@@ -1896,6 +1913,9 @@ impl Element for ReactDivElement {
                         },
                     );
                     if (next.x - cur.x).abs() > 0.01 || (next.y - cur.y).abs() > 0.01 {
+                        if native.is_some() {
+                            NATIVE_SCROLL_OWNED.lock().unwrap().insert(id);
+                        }
                         set_scroll(id, next);
                         mark_scroll_event(id);
                         // scrolling moves elements under a stationary mouse, so

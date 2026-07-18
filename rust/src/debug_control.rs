@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use crate::Incoming;
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(8);
+const CONTROL_WORKERS: usize = 8;
 
 pub(crate) fn start(path: String, tx: Sender<Incoming>) {
     std::thread::Builder::new()
@@ -27,10 +28,26 @@ pub(crate) fn start(path: String, tx: Sender<Incoming>) {
                     return;
                 }
             };
-            for stream in listener.incoming() {
+            let (stream_tx, stream_rx) = flume::unbounded::<UnixStream>();
+            for index in 0..CONTROL_WORKERS {
+                let stream_rx = stream_rx.clone();
                 let tx = tx.clone();
+                std::thread::Builder::new()
+                    .name(format!("rngpui-debug-control-{index}"))
+                    .spawn(move || {
+                        while let Ok(stream) = stream_rx.recv() {
+                            handle_stream(stream, &tx);
+                        }
+                    })
+                    .expect("spawn rngpui debug control worker");
+            }
+            for stream in listener.incoming() {
                 match stream {
-                    Ok(stream) => handle_stream(stream, &tx),
+                    Ok(stream) => {
+                        if stream_tx.send(stream).is_err() {
+                            break;
+                        }
+                    }
                     Err(error) => eprintln!("[rngpui control] accept failed: {error}"),
                 }
             }

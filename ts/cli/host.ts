@@ -123,6 +123,7 @@ function firstWebviewBounds(node: DumpNode): { x: number; y: number; width: numb
 // genuinely-empty webview just hits the budget and proceeds (best-effort).
 async function waitForWebviewContent(
     capturePath: string,
+    captureTriggerPath: string,
     bounds: { x: number; y: number; width: number; height: number },
     windowLogicalWidth: number,
 ): Promise<void> {
@@ -159,6 +160,7 @@ async function waitForWebviewContent(
         } catch {
             /* transient read of a half-written frame — retry */
         }
+        requestCapture(capturePath, captureTriggerPath);
         await sleep(150);
     }
 }
@@ -168,6 +170,7 @@ type SessionMeta = {
     servicePid: number;
     socketPath: string;
     capturePath: string;
+    captureTriggerPath?: string;
     bundlePath: string;
     appName: string;
     size: string;
@@ -269,6 +272,7 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
     const pidPath = join(workdir, "service.pid");
     const socketPath = join(workdir, "control.sock");
     const capturePath = join(workdir, "frame.png");
+    const captureTriggerPath = join(workdir, "capture.request");
     const logPath = join(workdir, "service.log");
     const size = opts.size ?? "1280x860";
     const [w, h] = size.split("x").map((value) => parseInt(value, 10));
@@ -292,6 +296,7 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
             RNGPUI_CAPTURE_ALPHA: process.env.RNGPUI_CAPTURE_ALPHA || "0.2",
             RNGPUI_WINDOW_SIZE: `${w},${h}`,
             RNGPUI_CAPTURE_PNG: capturePath,
+            RNGPUI_CAPTURE_TRIGGER: captureTriggerPath,
             RNGPUI_SERVICE_PID_FILE: pidPath,
             RNGPUI_CONTROL_SOCKET: socketPath,
             RNGPUI_APP_NAME: appName,
@@ -355,7 +360,10 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
     try {
         const probe = await requestSocket<{ ok: boolean; tree?: DumpNode }>(socketPath, { $cmd: "dump" });
         const wv = probe.tree ? firstWebviewBounds(probe.tree) : null;
-        if (wv) await waitForWebviewContent(capturePath, wv, w);
+        if (wv) {
+            requestCapture(capturePath, captureTriggerPath);
+            await waitForWebviewContent(capturePath, captureTriggerPath, wv, w);
+        }
     } catch {
         /* probe is best-effort; proceed to capture */
     }
@@ -365,6 +373,7 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
         servicePid,
         socketPath,
         capturePath,
+        captureTriggerPath,
         bundlePath,
         appName,
         size,
@@ -436,6 +445,9 @@ function makeLaunchedHost({
             return response.tree;
         },
         capture(path: string) {
+            if (meta.captureTriggerPath) {
+                requestCapture(meta.capturePath, meta.captureTriggerPath);
+            }
             waitForCapture(meta.capturePath, path);
         },
         close() {
@@ -600,6 +612,11 @@ function waitForCapture(source: string, target: string) {
         execSyncSleep(120);
     }
     throw new Error("in-service capture produced no frame (RNGPUI_CAPTURE_PNG)");
+}
+
+function requestCapture(capturePath: string, triggerPath: string) {
+    rmSync(capturePath, { force: true });
+    writeFileSync(triggerPath, "capture\n");
 }
 
 function execSyncSleep(ms: number) {

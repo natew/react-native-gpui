@@ -813,6 +813,8 @@ struct PaintedInputSnapshot {
 
 static LAST_PAINTED_INPUT: Lazy<Mutex<PaintedInputSnapshot>> =
     Lazy::new(|| Mutex::new(PaintedInputSnapshot::default()));
+static NEXT_PAINTED_INPUT: Lazy<Mutex<PaintedInputSnapshot>> =
+    Lazy::new(|| Mutex::new(PaintedInputSnapshot::default()));
 static TRACE_PAINTED_INPUT: Lazy<bool> =
     Lazy::new(|| std::env::var_os("RNGPUI_INPUT_PAINT_TRACE").is_some());
 
@@ -862,9 +864,10 @@ impl Element for FrameMarker {
     ) {
         self.child.paint(window, cx);
         let frame = anim_trace::on_frame_painted();
-        if let Some(input) = self.input.as_mut() {
+        if self.input.is_some() {
+            let mut input = NEXT_PAINTED_INPUT.lock().unwrap().clone();
             input.frame = frame;
-            *LAST_PAINTED_INPUT.lock().unwrap() = input.clone();
+            *LAST_PAINTED_INPUT.lock().unwrap() = input;
         }
     }
 }
@@ -878,6 +881,34 @@ impl IntoElement for FrameMarker {
 }
 
 impl ServiceApp {
+    fn publish_input_focus(&mut self, id: u64) {
+        if self.focused_input == Some(id) {
+            return;
+        }
+        if let Some(previous) = self.focused_input.replace(id) {
+            #[cfg(target_os = "macos")]
+            ax::set_focused_text_node(previous, false);
+            bridge::event(previous, "blur");
+        }
+        #[cfg(target_os = "macos")]
+        ax::set_focused_text_node(id, true);
+        bridge::event(id, "focus");
+        NEXT_PAINTED_INPUT.lock().unwrap().focused_id = Some(id);
+    }
+
+    fn publish_input_blur(&mut self, id: u64) {
+        if self.focused_input != Some(id) {
+            return;
+        }
+        self.focused_input = None;
+        #[cfg(target_os = "macos")]
+        ax::set_focused_text_node(id, false);
+        bridge::event(id, "blur");
+        let mut next = NEXT_PAINTED_INPUT.lock().unwrap();
+        next.focused_id = None;
+        next.value = None;
+    }
+
     fn set_input_focus(
         &mut self,
         id: u64,
@@ -897,10 +928,14 @@ impl ServiceApp {
                 true
             });
             if focused {
-                self.focused_input = Some(id);
+                self.publish_input_focus(id);
             }
             focused
         } else if self.focused_input == Some(id) {
+            if let Some(state) = self.inputs.get(&id).cloned() {
+                state.update(cx, |input, cx| input.blur(window, cx));
+            }
+            self.publish_input_blur(id);
             window.focus(&self.app_focus);
             true
         } else {
@@ -916,12 +951,14 @@ impl ServiceApp {
         let event_count = focused_id
             .and_then(|id| self.input_event_counts.get(&id).copied())
             .unwrap_or(0);
-        PaintedInputSnapshot {
+        let snapshot = PaintedInputSnapshot {
             frame: 0,
             focused_id,
             value,
             event_count,
-        }
+        };
+        *NEXT_PAINTED_INPUT.lock().unwrap() = snapshot.clone();
+        snapshot
     }
 
     fn emit_input_change(&mut self, id: u64, value: &str, is_composing: bool) -> u64 {
@@ -929,6 +966,11 @@ impl ServiceApp {
         *event_count = event_count.saturating_add(1);
         bridge::change_text(id, value, is_composing, *event_count);
         bridge::change(id, value, is_composing, *event_count);
+        let mut next = NEXT_PAINTED_INPUT.lock().unwrap();
+        if next.focused_id == Some(id) {
+            next.value = Some(value.to_string());
+            next.event_count = *event_count;
+        }
         *event_count
     }
 
@@ -945,7 +987,7 @@ impl ServiceApp {
         };
         let edited = state.update(cx, |input, cx| {
             if input.is_disabled() {
-                return false;
+                return None;
             }
             if insert_at_cursor {
                 input.focus(window, cx);
@@ -954,12 +996,17 @@ impl ServiceApp {
                 let end = input.value().as_ref().encode_utf16().count();
                 input.replace_text_in_range(Some(0..end), text, window, cx);
             }
-            true
+            Some((input.value().to_string(), input.is_composing()))
         });
-        if edited && insert_at_cursor {
-            self.focused_input = Some(id);
+        let Some((value, is_composing)) = edited else {
+            return false;
+        };
+        suppress_next_input_change(&mut self.suppressed_input_changes, id, value.clone());
+        self.emit_input_change(id, &value, is_composing);
+        if insert_at_cursor {
+            self.publish_input_focus(id);
         }
-        edited
+        true
     }
 
     fn debug_input_snapshot(
@@ -1470,10 +1517,11 @@ impl Render for ServiceApp {
             if let Some(id) = self.focused_input
                 && !present.contains(&id)
             {
-                self.focused_input = None;
+                if let Some(state) = self.inputs.get(&id).cloned() {
+                    state.update(cx, |input, cx| input.blur(window, cx));
+                }
+                self.publish_input_blur(id);
                 window.focus(&self.app_focus);
-                #[cfg(target_os = "macos")]
-                ax::set_focused_text_node(id, false);
             }
             self.inputs.retain(|id, _| present.contains(id));
             self.input_placeholders.retain(|id, _| present.contains(id));
@@ -1494,9 +1542,10 @@ impl Render for ServiceApp {
             } in specs
             {
                 if !editable && self.focused_input == Some(id) {
-                    self.focused_input = None;
-                    #[cfg(target_os = "macos")]
-                    ax::set_focused_text_node(id, false);
+                    if let Some(state) = self.inputs.get(&id).cloned() {
+                        state.update(cx, |input, cx| input.blur(window, cx));
+                    }
+                    self.publish_input_blur(id);
                     window.focus(&self.app_focus);
                 }
                 if !self.inputs.contains_key(&id) {
@@ -1577,18 +1626,10 @@ impl Render for ServiceApp {
                                 }
                             }
                             InputEvent::Focus => {
-                                this.focused_input = Some(id);
-                                #[cfg(target_os = "macos")]
-                                ax::set_focused_text_node(id, true);
-                                bridge::event(id, "focus");
+                                this.publish_input_focus(id);
                             }
                             InputEvent::Blur => {
-                                if this.focused_input == Some(id) {
-                                    this.focused_input = None;
-                                }
-                                #[cfg(target_os = "macos")]
-                                ax::set_focused_text_node(id, false);
-                                bridge::event(id, "blur");
+                                this.publish_input_blur(id);
                             }
                         },
                     )
@@ -1619,9 +1660,10 @@ impl Render for ServiceApp {
                     self.input_event_counts.insert(id, 0);
                     if auto_focus
                         && editable
-                        && let Some(state) = self.inputs.get(&id)
+                        && let Some(state) = self.inputs.get(&id).cloned()
                     {
                         state.update(cx, |input, cx| input.focus(window, cx));
+                        self.publish_input_focus(id);
                     }
                 } else {
                     let native_event_count = self.input_event_counts.get(&id).copied().unwrap_or(0);
@@ -1854,6 +1896,13 @@ impl Render for ServiceApp {
             // down-handlers that set the fresh capture, so this clears then they re-arm.
             .capture_any_mouse_down(|_event: &MouseDownEvent, _window, _cx| {
                 elements::finish_pointer_gesture();
+            })
+            // a pointer move only changes hover/press paint until a later React
+            // commit proves otherwise. Arm retained layout before GPUI schedules
+            // its hover repaint; the Tree handler clears this flag if an event
+            // callback changes geometry before that frame is drawn.
+            .capture_any_mouse_move(|_event: &MouseMoveEvent, _window, _cx| {
+                crate::anim_overlay::arm_paint_only_frame();
             })
             .child(root);
 
@@ -3031,11 +3080,21 @@ fn main() {
         // waits ~3s after the window appears.
         #[cfg(target_os = "macos")]
         if let Ok(capture_path) = std::env::var("RNGPUI_CAPTURE_PNG") {
+            let capture_trigger = std::env::var("RNGPUI_CAPTURE_TRIGGER").ok();
             cx.spawn(async move |cx| {
                 loop {
                     cx.background_executor()
-                        .timer(Duration::from_millis(250))
+                        .timer(Duration::from_millis(if capture_trigger.is_some() {
+                            25
+                        } else {
+                            250
+                        }))
                         .await;
+                    if let Some(trigger) = capture_trigger.as_deref()
+                        && std::fs::remove_file(trigger).is_err()
+                    {
+                        continue;
+                    }
                     let still_open = window_handle
                         .update(cx, |_root, window, _cx| {
                             if let Some(view_ptr) = liquid_glass::gpui_ns_view_ptr(window) {
@@ -3581,7 +3640,7 @@ fn main() {
                                 {
                                     focused_id = Some(id);
                                     state.update(cx, |input, cx| {
-                                        input.insert(text.clone(), window, cx);
+                                        input.replace(text.clone(), window, cx);
                                         // mirror real typing: keep the caret solid for the
                                         // pause window after a keystroke.
                                         input.pause_blink(cx);
@@ -3871,14 +3930,25 @@ fn main() {
                         dy,
                         reply,
                     } => {
-                        let response = pump.update(cx, |this, _cx| {
+                        let response = pump.update(cx, |this, cx| {
                             if let Some(id) = inspector::scroll_container_at(&this.root, x, y) {
                                 #[cfg(target_os = "macos")]
                                 let applied = elements::native_scroll::scroll_by(id, dx, dy);
+                                #[cfg(target_os = "macos")]
+                                if applied {
+                                    // The clip view changed synchronously; claim native
+                                    // ownership and schedule the RN onScroll paint before
+                                    // its coalesced callback, so imperative debug scrolls
+                                    // cannot leave a virtualized list on stale rows.
+                                    elements::claim_native_scroll(id);
+                                    crate::anim_overlay::arm_paint_only_frame();
+                                    cx.notify();
+                                }
                                 #[cfg(not(target_os = "macos"))]
                                 let applied = {
                                     elements::scroll_by(id, dx, dy);
-                                    _cx.notify();
+                                    crate::anim_overlay::arm_paint_only_frame();
+                                    cx.notify();
                                     true
                                 };
                                 serde_json::json!({
@@ -3979,6 +4049,12 @@ fn main() {
                             "offsetY": proof.as_ref().map(|proof| proof.offset_y),
                             "referenceOffsetX": proof.as_ref().map(|proof| proof.reference_offset_x),
                             "referenceOffsetY": proof.as_ref().map(|proof| proof.reference_offset_y),
+                            "eventDeltaY": proof.as_ref().map(|proof| proof.event_delta_y),
+                            "eventPhase": proof.as_ref().map(|proof| proof.event_phase),
+                            "eventMomentumPhase": proof.as_ref().map(|proof| proof.event_momentum_phase),
+                            "eventHasPreciseDeltas": proof.as_ref().map(|proof| proof.event_has_precise_deltas),
+                            "verticalElasticity": proof.as_ref().map(|proof| proof.vertical_elasticity),
+                            "referenceVerticalElasticity": proof.as_ref().map(|proof| proof.reference_vertical_elasticity),
                             "phase": phase,
                             "momentumPhase": momentum_phase,
                         }));
@@ -4175,6 +4251,46 @@ fn main() {
                             }
                         }
                     }
+                    Incoming::DebugTap { x, y, reply } => {
+                        let applied = window_handle.update(cx, |_root, window, cx| {
+                            pump.update(cx, |this, cx| {
+                                let target = inspector::tap_target_at(&this.root, x, y);
+                                if let Some(target) = target {
+                                    // a native AppKit control (NSButton) takes the real
+                                    // target/action route via performClick:; only fall back
+                                    // to a gpui synth-tap for ordinary gpui nodes.
+                                    if !elements::native_control::perform_native_click(target.id) {
+                                        elements::synth_tap(
+                                            target.id,
+                                            &target.events,
+                                            target.bounds,
+                                            x,
+                                            y,
+                                        );
+                                    }
+                                    if target.focusable_input {
+                                        this.set_input_focus(target.id, true, window, cx);
+                                    }
+                                    cx.notify();
+                                    let _ = reply.send(serde_json::json!({
+                                        "ok": true,
+                                        "type": "tap",
+                                        "targetId": target.id,
+                                        "focusedInput": target.focusable_input,
+                                    }));
+                                } else {
+                                    let _ = reply.send(serde_json::json!({
+                                        "ok": false,
+                                        "type": "tap",
+                                        "error": "no tappable node at point",
+                                    }));
+                                }
+                            })
+                        });
+                        if applied.is_err() {
+                            break;
+                        }
+                    }
                     msg => {
                         let mut drive_native_layout_animation = false;
                         let mut drive_gpui_tweens = false;
@@ -4273,10 +4389,12 @@ fn main() {
                             }
                             Incoming::ScrollTo { id, x, y } => {
                                 elements::scroll_to(id, x, y);
+                                crate::anim_overlay::arm_paint_only_frame();
                                 cx.notify();
                             }
                             Incoming::ScrollToEnd { id } => {
                                 elements::scroll_to_end(id);
+                                crate::anim_overlay::arm_paint_only_frame();
                                 cx.notify();
                             }
                             Incoming::TerminalSession {
@@ -4331,38 +4449,8 @@ fn main() {
                                     "paintCount": presentation.as_ref().map(|value| value.paint_count).unwrap_or(0),
                                 }));
                             }
-                            Incoming::DebugTap { x, y, reply } => {
-                                let target = inspector::tap_target_at(&this.root, x, y);
-                                if let Some(target) = target {
-                                    // a native AppKit control (NSButton) takes the real
-                                    // target/action route via performClick:; only fall back
-                                    // to a gpui synth-tap for ordinary gpui nodes.
-                                    if !elements::native_control::perform_native_click(target.id) {
-                                        elements::synth_tap(
-                                            target.id,
-                                            &target.events,
-                                            target.bounds,
-                                            x,
-                                            y,
-                                        );
-                                    }
-                                    if target.focusable_input {
-                                        this.focused_input = Some(target.id);
-                                    }
-                                    cx.notify();
-                                    let _ = reply.send(serde_json::json!({
-                                        "ok": true,
-                                        "type": "tap",
-                                        "targetId": target.id,
-                                        "focusedInput": target.focusable_input,
-                                    }));
-                                } else {
-                                    let _ = reply.send(serde_json::json!({
-                                        "ok": false,
-                                        "type": "tap",
-                                        "error": "no tappable node at point",
-                                    }));
-                                }
+                            Incoming::DebugTap { .. } => {
+                                unreachable!("debug tap is handled with window access")
                             }
                             Incoming::DebugDragAt { phase, x, y, reply } => {
                                 let target = inspector::tap_target_at(&this.root, x, y);

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Bounds, Display, Element, ElementId, Entity, GlobalElementId,
-    InteractiveElement as _, IntoElement, KeyDownEvent, LayoutId, ParentElement as _, Pixels,
-    Styled, Window, div, px,
+    InteractiveElement as _, IntoElement, KeyDownEvent, LayoutId, MouseButton, ParentElement as _,
+    Pixels, Styled, Window, div, px,
 };
 use gpui_component::input::{Input, InputState};
 
@@ -57,9 +57,11 @@ impl ReactInputElement {
                 let listens_key_press = self.element.listens("keyPress");
                 let element_id = self.element.global_id;
                 let input_state = state.clone();
+                let focus_state = state.clone();
                 let mut input = Input::new(&state)
                     .appearance(false)
                     .focus_bordered(false)
+                    .tab_moves_focus(true)
                     .disabled(!editable);
                 // Drive the input's text rendering from the node's resolved style.
                 // gpui-component's `Input` is `Styled`, and its wrapper div applies
@@ -96,6 +98,11 @@ impl ReactInputElement {
                 }
                 div()
                     .size_full()
+                    // focus through the host's resolved editor box so the fixed layout
+                    // cannot leave a dead region around gpui-component's inner hitbox.
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        focus_state.update(cx, |input, cx| input.focus(window, cx));
+                    })
                     .on_key_down(move |event: &KeyDownEvent, _: &mut Window, cx: &mut App| {
                         if !editable || !listens_key_press {
                             return;

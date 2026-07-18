@@ -32,7 +32,7 @@ use crate::input::{
     text_wrapper::LineLayout,
 };
 use crate::input::{InlineCompletion, RopeExt as _, Selection};
-use crate::{Root, history::History};
+use crate::history::History;
 use crate::{highlighter::DiagnosticSet, input::text_wrapper::LineItem};
 
 // PATCHED (react-native-gpui): allow the caret to render in an inactive window when the
@@ -275,6 +275,10 @@ impl LastLayout {
 /// InputState to keep editing state of the [`super::Input`].
 pub struct InputState {
     pub(super) focus_handle: FocusHandle,
+    // focus can be requested while the host tree is rendering, before gpui
+    // dispatches its focus observer. track whether the semantic event was already
+    // published so programmatic focus and the observer remain exactly-once.
+    focus_reported: bool,
     pub(super) mode: InputMode,
     pub(super) text: Rope,
     pub(super) text_wrapper: TextWrapper,
@@ -303,6 +307,7 @@ pub struct InputState {
     pub(super) selecting: bool,
     pub(super) size: Size,
     pub(super) disabled: bool,
+    pub(super) tab_moves_focus: bool,
     pub(super) masked: bool,
     pub(super) clean_on_escape: bool,
     pub(super) soft_wrap: bool,
@@ -385,6 +390,7 @@ impl InputState {
 
         Self {
             focus_handle: focus_handle.clone(),
+            focus_reported: false,
             text: "".into(),
             text_wrapper: TextWrapper::new(text_style.font(), window.rem_size(), None),
             blink_cursor,
@@ -398,6 +404,7 @@ impl InputState {
             input_bounds: Bounds::default(),
             selecting: false,
             disabled: false,
+            tab_moves_focus: false,
             masked: false,
             clean_on_escape: false,
             soft_wrap: true,
@@ -863,7 +870,7 @@ impl InputState {
     }
 
     /// Focus the input field.
-    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.disabled {
             return;
         }
@@ -871,6 +878,12 @@ impl InputState {
         self.blink_cursor.update(cx, |cursor, cx| {
             cursor.start(cx);
         });
+        self.report_focus(cx);
+    }
+
+    /// blur the input even when a context menu currently owns window focus.
+    pub fn blur(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_blur(cx);
     }
 
     pub(super) fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
@@ -1195,6 +1208,9 @@ impl InputState {
         // also reaches us, leave the composition intact instead of inserting a newline
         // and turning the candidate-confirmation key into onSubmitEditing.
         if self.ime_marked_range.is_some() {
+            cx.emit(InputEvent::PressEnter {
+                secondary: action.secondary,
+            });
             return;
         }
 
@@ -1261,6 +1277,7 @@ impl InputState {
     ) {
         // Clear inline completion on any mouse interaction
         self.clear_inline_completion(cx);
+        self.focus(window, cx);
 
         // If there have IME marked range and is empty (Means pressed Esc to abort IME typing)
         // Clear the marked range.
@@ -1737,18 +1754,22 @@ impl InputState {
             && (window.is_window_active() || cursor_in_inactive_window())
     }
 
-    fn on_focus(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_focus(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.blink_cursor.update(cx, |cursor, cx| {
             cursor.start(cx);
         });
-        cx.emit(InputEvent::Focus);
+        self.report_focus(cx);
     }
 
-    fn on_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_blur(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.is_context_menu_open(cx) {
             return;
         }
 
+        self.finish_blur(cx);
+    }
+
+    fn finish_blur(&mut self, cx: &mut Context<Self>) {
         // NOTE: Do not cancel select, when blur.
         // Because maybe user want to copy the selected text by AppMenuBar (will take focus handle).
 
@@ -1759,11 +1780,19 @@ impl InputState {
         self.blink_cursor.update(cx, |cursor, cx| {
             cursor.stop(cx);
         });
-        Root::update(window, cx, |root, _, _| {
-            root.focused_input = None;
-        });
-        cx.emit(InputEvent::Blur);
+        if self.focus_reported {
+            self.focus_reported = false;
+            cx.emit(InputEvent::Blur);
+        }
         cx.notify();
+    }
+
+    fn report_focus(&mut self, cx: &mut Context<Self>) {
+        if self.focus_reported {
+            return;
+        }
+        self.focus_reported = true;
+        cx.emit(InputEvent::Focus);
     }
 
     pub(super) fn pause_blink_cursor(&mut self, cx: &mut Context<Self>) {

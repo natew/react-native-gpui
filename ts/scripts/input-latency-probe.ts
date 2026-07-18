@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { launchHost, type DumpNode, type LaunchedHost } from "../cli/host";
+import { settledFrameCount } from "./input-perf";
 
 type Status = {
     draft: string;
@@ -23,6 +24,13 @@ try {
     const primary = requireTestId(tree, "primary-input");
     const secondary = requireTestId(tree, "secondary-input");
     const initial = await waitForStatus(host, (status) => status.secondary === "programmatic");
+
+    for (let index = 0; index < 4; index += 1) {
+        await tap(host, secondary);
+        await waitForStatus(host, (status) => status.focused === "secondary");
+        await tap(host, primary);
+        await waitForStatus(host, (status) => status.focused === "primary");
+    }
 
     const focusSamples: number[] = [];
     for (let index = 0; index < 20; index += 1) {
@@ -75,7 +83,7 @@ async function measurePaint(
     action: () => Promise<{ ok: boolean }>,
     isRequestedPaint: (painted: PaintedInput) => boolean,
 ) {
-    const before = await frames(host);
+    const before = await settledFrameCount(() => frames(host));
     const started = performance.now();
     const result = await action();
     if (!result.ok) throw new Error("input action failed");

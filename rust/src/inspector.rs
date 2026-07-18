@@ -1330,35 +1330,6 @@ pub fn scroll_container_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<u
     found
 }
 
-pub fn scroll_container_metrics(root: &Arc<ReactElement>, id: u64) -> Option<(f32, f32, f32, f32)> {
-    fn walk(el: &Arc<ReactElement>, id: u64) -> Option<(f32, f32, f32, f32)> {
-        if el.style.is_display_none() {
-            return None;
-        }
-        let bounds = bridge::cached_layout(el.global_id).map(Rect::from)?;
-        if el.global_id == id {
-            let mut content_width = bounds.width;
-            let mut content_height = bounds.height;
-            for child in &el.children {
-                if let Some(child_bounds) = bridge::cached_layout(child.global_id).map(Rect::from) {
-                    content_width =
-                        content_width.max(child_bounds.x + child_bounds.width - bounds.x);
-                    content_height =
-                        content_height.max(child_bounds.y + child_bounds.height - bounds.y);
-                }
-            }
-            return Some((bounds.width, bounds.height, content_width, content_height));
-        }
-        for child in &el.children {
-            if let Some(found) = walk(child, id) {
-                return Some(found);
-            }
-        }
-        None
-    }
-    walk(root, id)
-}
-
 /// The topmost WebView at a point, when no GPUI surface is painted over it. Used by
 /// `rngpui do scroll` to drive native WebView content in a kept debug session.
 pub fn webview_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<u64> {

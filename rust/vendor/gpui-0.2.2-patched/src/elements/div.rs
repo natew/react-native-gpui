@@ -272,6 +272,21 @@ impl Interactivity {
             }));
     }
 
+    /// bind the given callback to every mouse move during the capture phase. capture
+    /// runs before an occluding descendant can stop propagation, which is useful for
+    /// root-level frame bookkeeping.
+    pub fn capture_any_mouse_move(
+        &mut self,
+        listener: impl Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static,
+    ) {
+        self.mouse_move_listeners
+            .push(Box::new(move |event, phase, _hitbox, window, cx| {
+                if phase == DispatchPhase::Capture {
+                    (listener)(event, window, cx);
+                }
+            }));
+    }
+
     /// Bind the given callback to the mouse drag event of the given type. Note that this
     /// will be called for all move events, inside or outside of this element, as long as the
     /// drag was started with this element under the mouse. Useful for implementing draggable
@@ -805,6 +820,15 @@ pub trait InteractiveElement: Sized {
         listener: impl Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.interactivity().on_mouse_move(listener);
+        self
+    }
+
+    /// bind the given callback to every mouse move during the capture phase.
+    fn capture_any_mouse_move(
+        mut self,
+        listener: impl Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.interactivity().capture_any_mouse_move(listener);
         self
     }
 

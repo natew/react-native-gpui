@@ -78,6 +78,7 @@ thread_local! {
     static PENDING: RefCell<HashMap<u64, PendingOffset>> = RefCell::new(HashMap::new());
     static EMIT_SCHEDULED: RefCell<bool> = const { RefCell::new(false) };
     static LAST_EMIT: RefCell<Option<Instant>> = const { RefCell::new(None) };
+    static LAST_NATIVE_OFFSETS: RefCell<HashMap<u64, (f64, f64)>> = RefCell::new(HashMap::new());
     static OBSERVER: RefCell<Option<id>> = RefCell::new(None);
     static ACTIVE_DRIVER: RefCell<Option<u64>> = const { RefCell::new(None) };
 }
@@ -86,6 +87,10 @@ thread_local! {
 const NS_SCROLL_WHEEL_EVENT: u64 = 22;
 #[cfg(target_os = "macos")]
 const NS_SCROLLER_STYLE_OVERLAY: u64 = 1;
+#[cfg(target_os = "macos")]
+const NS_SCROLL_ELASTICITY_NONE: i64 = 1;
+#[cfg(target_os = "macos")]
+const NS_SCROLL_ELASTICITY_ALLOWED: i64 = 2;
 #[cfg(target_os = "macos")]
 const FRAME_INTERVAL: Duration = Duration::from_nanos(8_333_333);
 
@@ -194,6 +199,11 @@ extern "C" fn clip_bounds_changed(_: &Object, _: Sel, notification: id) {
             return;
         }
         let bounds: NSRect = msg_send![clip_view, bounds];
+        LAST_NATIVE_OFFSETS.with(|offsets| {
+            offsets
+                .borrow_mut()
+                .insert(driver_id, (bounds.origin.x, bounds.origin.y));
+        });
         STATS.with(|stats| {
             let mut stats = stats.borrow_mut();
             let entry = stats.entry(driver_id).or_default();
@@ -245,21 +255,11 @@ unsafe extern "C" fn emit_scroll_offsets(_: *mut c_void) {
     LAST_EMIT.with(|last| *last.borrow_mut() = Some(Instant::now()));
     let pending = PENDING.with(|pending| pending.borrow_mut().drain().collect::<Vec<_>>());
     for (_, pending) in pending {
-        let (delta_x, delta_y, max_x, max_y, previous_x, previous_y) = STATS.with(|stats| {
+        STATS.with(|stats| {
             let mut stats = stats.borrow_mut();
             let entry = stats.entry(pending.driver_id).or_default();
-            let previous = (entry.last_callback_x, entry.last_callback_y);
-            let delta = (pending.offset_x - previous.0, pending.offset_y - previous.1);
             entry.last_callback_x = pending.offset_x;
             entry.last_callback_y = pending.offset_y;
-            (
-                delta.0,
-                delta.1,
-                entry.max_x,
-                entry.max_y,
-                previous.0,
-                previous.1,
-            )
         });
         STATS.with(|stats| {
             stats
@@ -390,6 +390,31 @@ unsafe fn create_driver(driver_id: u64, gpui_view: id) -> Driver {
     }
 }
 
+/// Preserve an AppKit-reported elastic offset, but clamp source/programmatic state.
+/// The clip view owns transient rubber-band coordinates. A React ref, content-size
+/// change, or other source write diverges from that last report and is bounded here.
+#[cfg(target_os = "macos")]
+pub fn resolve_offset(driver_id: u64, x: f32, y: f32, max_x: f32, max_y: f32) -> (f32, f32) {
+    let native_owned = LAST_NATIVE_OFFSETS.with(|offsets| {
+        offsets
+            .borrow()
+            .get(&driver_id)
+            .is_some_and(|(native_x, native_y)| {
+                (native_x - f64::from(x)).abs() <= 0.01 && (native_y - f64::from(y)).abs() <= 0.01
+            })
+    });
+    if native_owned {
+        (x, y)
+    } else {
+        (x.clamp(0.0, max_x), y.clamp(0.0, max_y))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn resolve_offset(_driver_id: u64, x: f32, y: f32, max_x: f32, max_y: f32) -> (f32, f32) {
+    (x.clamp(0.0, max_x), y.clamp(0.0, max_y))
+}
+
 #[cfg(target_os = "macos")]
 pub fn sync_driver(
     window: &mut Window,
@@ -431,23 +456,9 @@ pub fn sync_driver(
             });
         }
 
-        // prepaint walks an outer scroller before its nested scrollers. keep that
-        // order in AppKit's child stack so the deepest painted driver receives the
-        // wheel when regions overlap, regardless of creation order.
-        unsafe {
-            let subviews: id = msg_send![gpui_view, subviews];
-            let count: usize = msg_send![subviews, count];
-            let topmost: id = if count > 0 {
-                msg_send![subviews, objectAtIndex: count - 1]
-            } else {
-                nil
-            };
-            if topmost != driver.scroll_view {
-                let _: () = msg_send![gpui_view, addSubview: driver.scroll_view];
-            }
-        }
-
-        APPLYING.with(|applying| applying.borrow_mut().insert(driver_id));
+        let target_x = f64::from(offset_x).clamp(0.0, (content_width - width).max(0.0));
+        let target_y = f64::from(offset_y).clamp(0.0, (content_height - height).max(0.0));
+        let mut matches_native_report = false;
         unsafe {
             let next_bounds = (x, y, width, height);
             if !bounds_close(driver.last_bounds, next_bounds) {
@@ -466,23 +477,48 @@ pub fn sync_driver(
             if driver.horizontal != Some(horizontal) {
                 let value = if horizontal { YES } else { NO };
                 let _: () = msg_send![driver.scroll_view, setHasHorizontalScroller: value];
+                let elasticity = if horizontal {
+                    NS_SCROLL_ELASTICITY_ALLOWED
+                } else {
+                    NS_SCROLL_ELASTICITY_NONE
+                };
+                let _: () =
+                    msg_send![driver.scroll_view, setHorizontalScrollElasticity: elasticity];
                 driver.horizontal = Some(horizontal);
             }
             if driver.vertical != Some(vertical) {
                 let value = if vertical { YES } else { NO };
                 let _: () = msg_send![driver.scroll_view, setHasVerticalScroller: value];
+                let elasticity = if vertical {
+                    NS_SCROLL_ELASTICITY_ALLOWED
+                } else {
+                    NS_SCROLL_ELASTICITY_NONE
+                };
+                let _: () = msg_send![driver.scroll_view, setVerticalScrollElasticity: elasticity];
                 driver.vertical = Some(vertical);
             }
             let clip_bounds: NSRect = msg_send![driver.clip_view, bounds];
-            let target_x = f64::from(offset_x).clamp(0.0, (content_width - width).max(0.0));
-            let target_y = f64::from(offset_y).clamp(0.0, (content_height - height).max(0.0));
-            if (clip_bounds.origin.x - target_x).abs() > 0.01
-                || (clip_bounds.origin.y - target_y).abs() > 0.01
+            matches_native_report = LAST_NATIVE_OFFSETS.with(|offsets| {
+                offsets.borrow().get(&driver_id).is_some_and(|(x, y)| {
+                    (x - f64::from(offset_x)).abs() <= 0.01
+                        && (y - f64::from(offset_y)).abs() <= 0.01
+                })
+            });
+            if !matches_native_report
+                && ((clip_bounds.origin.x - target_x).abs() > 0.01
+                    || (clip_bounds.origin.y - target_y).abs() > 0.01)
             {
+                APPLYING.with(|applying| applying.borrow_mut().insert(driver_id));
                 let target = NSPoint::new(target_x, target_y);
                 let _: () = msg_send![driver.clip_view, scrollToPoint: target];
                 let _: () =
                     msg_send![driver.scroll_view, reflectScrolledClipView: driver.clip_view];
+                APPLYING.with(|applying| applying.borrow_mut().remove(&driver_id));
+            }
+            if !matches_native_report {
+                LAST_NATIVE_OFFSETS.with(|offsets| {
+                    offsets.borrow_mut().insert(driver_id, (target_x, target_y));
+                });
             }
             if driver.scrollable != Some(scrollable) {
                 let hidden = if scrollable { NO } else { YES };
@@ -490,16 +526,17 @@ pub fn sync_driver(
                 driver.scrollable = Some(scrollable);
             }
         }
-        APPLYING.with(|applying| applying.borrow_mut().remove(&driver_id));
         STATS.with(|stats| {
             let mut stats = stats.borrow_mut();
             let entry = stats.entry(driver_id).or_default();
-            entry.offset_x = f64::from(offset_x);
-            entry.offset_y = f64::from(offset_y);
             entry.max_x = (content_width - width).max(0.0);
             entry.max_y = (content_height - height).max(0.0);
-            entry.last_callback_x = f64::from(offset_x);
-            entry.last_callback_y = f64::from(offset_y);
+            if !matches_native_report {
+                entry.offset_x = target_x;
+                entry.offset_y = target_y;
+                entry.last_callback_x = target_x;
+                entry.last_callback_y = target_y;
+            }
         });
     });
 }
@@ -602,6 +639,9 @@ pub fn retain_drivers(present: &HashSet<u64>) {
             });
             PENDING.with(|pending| {
                 pending.borrow_mut().remove(&driver_id);
+            });
+            LAST_NATIVE_OFFSETS.with(|offsets| {
+                offsets.borrow_mut().remove(&driver_id);
             });
         }
     });

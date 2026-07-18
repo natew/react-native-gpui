@@ -1725,10 +1725,14 @@ impl Element for ReactDivElement {
                     y: max_scroll_y,
                 }
             } else {
-                ScrollOffset {
-                    x: current.x.clamp(0.0, max_scroll_x),
-                    y: current.y.clamp(0.0, max_scroll_y),
-                }
+                let (x, y) = crate::elements::native_scroll::resolve_offset(
+                    self.element.global_id,
+                    current.x,
+                    current.y,
+                    max_scroll_x,
+                    max_scroll_y,
+                );
+                ScrollOffset { x, y }
             };
             set_scroll(self.element.global_id, off);
             scroll_offset = Some(off);
@@ -1882,8 +1886,11 @@ impl Element for ReactDivElement {
                             y: (cur.y - dy).clamp(0.0, max_scroll_y),
                         },
                         |(_, offset)| ScrollOffset {
-                            x: f32::from(offset.x).clamp(0.0, max_scroll_x),
-                            y: f32::from(offset.y).clamp(0.0, max_scroll_y),
+                            // AppKit owns transient rubber-band coordinates. Preserve
+                            // them through paint; source/programmatic offsets are
+                            // clamped by resolve_offset during prepaint.
+                            x: f32::from(offset.x),
+                            y: f32::from(offset.y),
                         },
                     );
                     if (next.x - cur.x).abs() > 0.01 || (next.y - cur.y).abs() > 0.01 {

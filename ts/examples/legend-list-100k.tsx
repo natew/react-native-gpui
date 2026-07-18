@@ -15,23 +15,18 @@ const ESTIMATED_LIST_SIZE = { height: 644, width: 900 } as const;
 const fixtureStartedAt = performance.now();
 
 type ItemKind = "compact" | "summary";
-type Item = Readonly<{
-    id: string;
-    index: number;
-    kind: ItemKind;
-}>;
+type Item = number;
 
-const items: readonly Item[] = Array.from({ length: ITEM_COUNT }, (_, index) => ({
-    id: `item-${index}`,
-    index,
-    kind: index % 20 === 0 ? "summary" : "compact",
-}));
+// the numeric index is the immutable item identity. deriving the short key and
+// row type only when LegendList asks avoids retaining 100,000 objects and id strings
+// before first paint while preserving stable keys and typed recycling.
+const items: readonly Item[] = Array.from({ length: ITEM_COUNT }, (_, index) => index);
 
-type RowProps = Pick<Item, "id" | "index">;
+type RowProps = { index: number };
 
-const CompactRow = memo(function CompactRow({ id, index }: RowProps) {
+const CompactRow = memo(function CompactRow({ index }: RowProps) {
     return (
-        <View nativeID={`legend-${id}`} style={s.compactRow}>
+        <View nativeID={`legend-item-${index}`} style={s.compactRow}>
             <Text style={s.index} numberOfLines={1}>
                 {String(index).padStart(6, "0")}
             </Text>
@@ -45,9 +40,9 @@ const CompactRow = memo(function CompactRow({ id, index }: RowProps) {
     );
 });
 
-const SummaryRow = memo(function SummaryRow({ id, index }: RowProps) {
+const SummaryRow = memo(function SummaryRow({ index }: RowProps) {
     return (
-        <View nativeID={`legend-${id}`} style={s.summaryRow}>
+        <View nativeID={`legend-item-${index}`} style={s.summaryRow}>
             <Text style={s.index} numberOfLines={1}>
                 {String(index).padStart(6, "0")}
             </Text>
@@ -62,23 +57,23 @@ const SummaryRow = memo(function SummaryRow({ id, index }: RowProps) {
 });
 
 function renderItem({ item }: { item: Item }) {
-    return item.kind === "summary" ? (
-        <SummaryRow id={item.id} index={item.index} />
+    return item % 20 === 0 ? (
+        <SummaryRow index={item} />
     ) : (
-        <CompactRow id={item.id} index={item.index} />
+        <CompactRow index={item} />
     );
 }
 
 function keyExtractor(item: Item) {
-    return item.id;
+    return String(item);
 }
 
 function getItemType(item: Item): ItemKind {
-    return item.kind;
+    return item % 20 === 0 ? "summary" : "compact";
 }
 
 function getFixedItemSize(item: Item) {
-    return item.kind === "summary" ? 56 : 40;
+    return item % 20 === 0 ? 56 : 40;
 }
 
 function App() {

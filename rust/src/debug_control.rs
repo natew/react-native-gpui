@@ -285,6 +285,7 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
             h: number(value, "h")?,
             reply,
         }),
+        "fullLayout" => Ok(Incoming::DebugFullLayout { reply }),
         "dragAt" => Ok(Incoming::DebugDragAt {
             phase: value
                 .get("phase")

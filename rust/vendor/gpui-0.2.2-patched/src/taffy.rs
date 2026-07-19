@@ -5,7 +5,7 @@ use crate::{
 use collections::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use stacksafe::{StackSafe, stacksafe};
-use std::{fmt::Debug, ops::Range};
+use std::{fmt::Debug, ops::Range, sync::OnceLock};
 use taffy::{
     TaffyTree, TraversePartialTree as _,
     geometry::{Point as TaffyPoint, Rect as TaffyRect, Size as TaffySize},
@@ -39,9 +39,9 @@ pub struct TaffyLayoutEngine {
     //
     // when the host knows a frame changed only paint-only state, the next draw replays
     // the prior tree's LayoutIds in allocation order. fresh measure closures replace the
-    // retained closures in place, then run with the prior solved sizes. no taffy nodes,
-    // styles, children, or bounds are rebuilt. a positional kind/count mismatch trips
-    // `reuse_desynced`, and the host runs a full layout on the following draw.
+    // retained closures in place, and text initializes paint state lazily in prepaint. no
+    // taffy nodes, styles, children, or bounds are rebuilt. a positional kind/count
+    // mismatch trips `reuse_desynced`, and the host runs a full layout on the following draw.
     retained: Vec<LayoutId>,
     retained_measured: Vec<bool>,
     prev_bounds: Vec<Bounds<Pixels>>,
@@ -64,9 +64,19 @@ pub struct TaffyLayoutEngine {
     // taffy's cached measure and lays out at its old size. Consumed by the next
     // `request_measured_layout`; survives intervening `request_layout` calls by design.
     measure_dirty_next: bool,
+    // per-frame counters for the opt-in incremental trace. keeping the counters on the
+    // engine avoids scanning the tree again just to explain where an incremental frame
+    // spent its time.
+    incremental_style_updates: usize,
+    incremental_measure_dirties: usize,
 }
 
 const EXPECT_MESSAGE: &str = "we should avoid taffy layout errors by construction if possible";
+
+fn incremental_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RNGPUI_INCREMENTAL_TRACE").is_some())
+}
 
 impl TaffyLayoutEngine {
     pub fn new() -> Self {
@@ -85,6 +95,8 @@ impl TaffyLayoutEngine {
             incremental: false,
             prev_styles: Vec::new(),
             measure_dirty_next: false,
+            incremental_style_updates: 0,
+            incremental_measure_dirties: 0,
         }
     }
 
@@ -126,6 +138,8 @@ impl TaffyLayoutEngine {
         self.reuse_cursor = 0;
         self.reuse_desynced = false;
         self.measure_dirty_next = false;
+        self.incremental_style_updates = 0;
+        self.incremental_measure_dirties = 0;
         true
     }
 
@@ -208,6 +222,7 @@ impl TaffyLayoutEngine {
                         // invalidation we want; clean siblings keep theirs.
                         self.taffy.set_style(id.into(), taffy_style.clone()).ok();
                         self.prev_styles[index] = taffy_style;
+                        self.incremental_style_updates += 1;
                     }
                     return id;
                 }
@@ -295,6 +310,7 @@ impl TaffyLayoutEngine {
                     if self.prev_styles[index] != taffy_style {
                         self.taffy.set_style(id.into(), taffy_style.clone()).ok();
                         self.prev_styles[index] = taffy_style;
+                        self.incremental_style_updates += 1;
                     }
                     // Swap the closure in place. Assigning THROUGH the context does not touch
                     // taffy's dirty bits, so unchanged text keeps its cached measure;
@@ -308,6 +324,7 @@ impl TaffyLayoutEngine {
                     }
                     if dirty {
                         self.taffy.mark_dirty(id.into()).ok();
+                        self.incremental_measure_dirties += 1;
                     }
                     return id;
                 }
@@ -381,24 +398,20 @@ impl TaffyLayoutEngine {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // retained-layout frame: skip the expensive flexbox solve (~6.4ms at 1300 nodes).
-        // invoke each measured node's fresh closure so gpui's text/input elements
-        // populate this frame's layout state, then keep using the retained taffy tree and
-        // absolute-bounds cache. a node-count mismatch trips `reuse_desynced`, so the host
-        // forces a full relayout next draw.
+        // retained-layout frame: skip the expensive flexbox solve (~6.4ms at 1300 nodes)
+        // and keep using the retained taffy tree + absolute-bounds cache. text populates
+        // its paint state lazily in prepaint, so this path does no measured-node sweep.
+        // a node-count mismatch trips `reuse_desynced`, so the host forces a full relayout
+        // next draw.
         if self.reuse {
-            self.compute_layout_reuse(window, cx);
+            self.compute_layout_reuse();
             return;
         }
-        // Incremental frame: taffy will re-measure ONLY the nodes we dirtied, but gpui's
-        // text/input elements populate their per-frame paint state inside the measure
-        // callback. A clean text node would therefore never run its closure and paint would
-        // panic ("measurement has not been performed"). Run every measured closure against
-        // its prior solved size first — same reason compute_layout_reuse does it — then the
-        // solve re-runs the dirty ones with real constraints and overwrites their state.
-        if self.incremental {
-            self.run_measured_closures(window, cx);
-        }
+        // incremental frames re-measure only dirty nodes. clean text nodes initialize their
+        // per-frame paint state lazily in prepaint, so no O(all-measured-nodes) sweep is
+        // needed before the solve.
+        let incremental_trace = self.incremental && incremental_trace_enabled();
+        let incremental_total_started = incremental_trace.then(std::time::Instant::now);
         // Leaving this here until we have a better instrumentation approach.
         // println!("Laying out {} children", self.count_all_children(id)?);
         // println!("Max layout depth: {}", self.max_depth(0, id)?);
@@ -439,6 +452,7 @@ impl TaffyLayoutEngine {
             transform(available_space.height),
         );
 
+        let solve_started = incremental_trace.then(std::time::Instant::now);
         self.taffy
             .compute_layout_with_measure(
                 id.into(),
@@ -472,12 +486,14 @@ impl TaffyLayoutEngine {
                 },
             )
             .expect(EXPECT_MESSAGE);
+        let solve_ms = solve_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
 
         // Capture this full-layout frame's solved geometry positionally so the NEXT draw,
         // if it's a paint-only frame, can replay it without re-solving. `layout_bounds`
         // resolves + caches each node's absolute rect; we snapshot them in the same
         // allocation order the elements requested them, which the structurally identical
         // reuse frame will replay.
+        let snapshot_started = incremental_trace.then(std::time::Instant::now);
         let nodes = std::mem::take(&mut self.retained);
         let scale = window.scale_factor();
         self.prev_bounds.clear();
@@ -487,96 +503,28 @@ impl TaffyLayoutEngine {
             self.prev_bounds.push(b);
         }
         self.retained = nodes;
-    }
-
-    /// Run each retained measured node's closure against its previously solved size, so gpui
-    /// text/input elements repopulate this frame's layout state without a solve.
-    fn run_measured_closures(&mut self, window: &mut Window, cx: &mut App) {
-        // Sweep EVERY retained measured node, not just those requested before this
-        // compute_layout. gpui lays some elements out after the first solve (deferred draws,
-        // overlays), and a text node whose closure never runs panics in prepaint with
-        // "measurement has not been performed". Re-running a node that taffy will also
-        // measure is harmless (shaping is cached and the solve overwrites it with real
-        // constraints); leaving one unmeasured is fatal.
-        let expected = self.retained.len();
-        for i in 0..expected {
-            if !self.retained_measured.get(i).copied().unwrap_or(false) {
-                continue;
-            }
-            let node = self.retained[i];
-            let known = self
-                .prev_bounds
-                .get(i)
-                .map(|b| Size {
-                    width: Some(b.size.width),
-                    height: Some(b.size.height),
-                })
-                .unwrap_or(Size {
-                    width: None,
-                    height: None,
-                });
-            let avail = Size {
-                width: known
-                    .width
-                    .map(AvailableSpace::Definite)
-                    .unwrap_or(AvailableSpace::MaxContent),
-                height: known
-                    .height
-                    .map(AvailableSpace::Definite)
-                    .unwrap_or(AvailableSpace::MaxContent),
-            };
-            if let Some(ctx) = self.taffy.get_node_context_mut(node.into()) {
-                // SAFETY of re-entrancy: the closure borrows window/cx but not the taffy tree.
-                let _ = (ctx.measure)(known, avail, window, cx);
-            }
+        if let Some(total_started) = incremental_total_started {
+            eprintln!(
+                "[incremental-layout] nodes={} style_updates={} measure_dirties={} solve={:.3}ms snapshot={:.3}ms total={:.3}ms",
+                self.retained.len(),
+                self.incremental_style_updates,
+                self.incremental_measure_dirties,
+                solve_ms.unwrap_or_default(),
+                snapshot_started
+                    .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+                    .unwrap_or_default(),
+                total_started.elapsed().as_secs_f64() * 1000.0,
+            );
         }
     }
 
-    /// run fresh closures for measured nodes with their retained solved sizes. the tree
-    /// and absolute-bounds map already contain the prior full frame, so no copies or
-    /// taffy traversal are needed.
-    fn compute_layout_reuse(&mut self, window: &mut Window, cx: &mut App) {
+    /// the tree and absolute-bounds map already contain the prior full frame, so a reuse
+    /// frame only validates the positional replay. text paint state is filled lazily by
+    /// TextLayout::prepaint; the other measured elements have pure sizing closures and need
+    /// no per-frame side effect.
+    fn compute_layout_reuse(&mut self) {
         if self.reuse_cursor != self.prev_bounds.len() {
             self.reuse_desynced = true;
-        }
-        let expected = self.reuse_cursor.min(self.retained.len());
-        for i in 0..expected {
-            if !self.retained_measured.get(i).copied().unwrap_or(false) {
-                continue;
-            }
-            let node = self.retained[i];
-            // run this node's measure closure (if any) so the gpui text/input element
-            // populates its layout state for prepaint/paint. The cached known dimensions
-            // come from the prior frame's solved size — identical geometry, so the shaping
-            // (already cached in the text system) matches exactly.
-            if self.taffy.get_node_context(node.into()).is_some() {
-                let known = self
-                    .prev_bounds
-                    .get(i)
-                    .map(|b| Size {
-                        width: Some(b.size.width),
-                        height: Some(b.size.height),
-                    })
-                    .unwrap_or(Size {
-                        width: None,
-                        height: None,
-                    });
-                let avail = Size {
-                    width: known
-                        .width
-                        .map(AvailableSpace::Definite)
-                        .unwrap_or(AvailableSpace::MaxContent),
-                    height: known
-                        .height
-                        .map(AvailableSpace::Definite)
-                        .unwrap_or(AvailableSpace::MaxContent),
-                };
-                if let Some(ctx) = self.taffy.get_node_context_mut(node.into()) {
-                    // SAFETY of re-entrancy: the measure closure borrows window/cx but not
-                    // the taffy tree, so calling it through the &mut context is fine.
-                    let _ = (ctx.measure)(known, avail, window, cx);
-                }
-            }
         }
     }
 

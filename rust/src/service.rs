@@ -2282,6 +2282,9 @@ pub(crate) enum Incoming {
         h: f32,
         reply: flume::Sender<serde_json::Value>,
     },
+    DebugFullLayout {
+        reply: flume::Sender<serde_json::Value>,
+    },
     DebugDragAt {
         phase: String,
         x: f32,
@@ -3755,6 +3758,22 @@ fn main() {
                             Err(_) => break,
                         }
                     }
+                    Incoming::DebugFullLayout { reply } => {
+                        let applied = window_handle.update(cx, |_root, window, cx| {
+                            window.prepare_layout_frame(false, false);
+                            window.refresh();
+                            cx.notify();
+                        });
+                        match applied {
+                            Ok(()) => {
+                                let _ = reply.send(serde_json::json!({
+                                    "ok": true,
+                                    "type": "fullLayout",
+                                }));
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     Incoming::PickPaths {
                         id,
                         files,
@@ -4768,6 +4787,7 @@ fn main() {
                             | Incoming::DebugRealDrag { .. }
                             | Incoming::DebugRealDragPath { .. }
                             | Incoming::DebugResize { .. }
+                            | Incoming::DebugFullLayout { .. }
                             | Incoming::DebugScrollAt { .. }
                             | Incoming::DebugScrollDriverStats { .. }
                             | Incoming::DebugNativeDriverWheel { .. }

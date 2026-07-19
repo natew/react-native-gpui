@@ -307,9 +307,21 @@ impl IntoElement for StyledText {
     }
 }
 
+type TextMeasureFn = Box<
+    dyn FnMut(
+        Size<Option<Pixels>>,
+        Size<crate::AvailableSpace>,
+        &mut Window,
+        &mut App,
+    ) -> Size<Pixels>,
+>;
+
 /// The Layout for TextElement. This can be used to map indices to pixels and vice versa.
 #[derive(Default, Clone)]
-pub struct TextLayout(Rc<RefCell<Option<TextLayoutInner>>>);
+pub struct TextLayout(
+    Rc<RefCell<Option<TextLayoutInner>>>,
+    Rc<RefCell<Option<TextMeasureFn>>>,
+);
 
 struct TextLayoutInner {
     len: usize,
@@ -368,9 +380,8 @@ impl TextLayout {
             vec![text_style.to_run(text.len())]
         };
 
-        window.request_measured_layout(Default::default(), {
-            let element_state = self.clone();
-
+        let element_state = self.0.clone();
+        let measure: TextMeasureFn = Box::new(
             move |known_dimensions, available_space, window, cx| {
                 // react-native-gpui patch: taffy invokes this closure several times per
                 // solve (min-content probe, then the definite-width pass). truncate_line
@@ -379,8 +390,8 @@ impl TextLayout {
                 // definite-width pass then shapes the full string against runs covering
                 // only the truncated prefix, and the shaper silently drops every glyph
                 // past the runs (the "Mac.lan · ~/agentbus paints as Mac" flicker, and
-                // its multi-line numberOfLines cousin). Work on a pristine copy per call.
-                let mut runs = runs.clone();
+                // its multi-line numberOfLines cousin). work on a pristine copy per cache
+                // miss; cache hits must not allocate a Vec they immediately discard.
                 let wrap_width = if text_style.white_space == WhiteSpace::Normal {
                     known_dimensions.width.or(match available_space.width {
                         crate::AvailableSpace::Definite(x) => Some(x),
@@ -407,12 +418,14 @@ impl TextLayout {
                         (None, "".into())
                     };
 
-                if let Some(text_layout) = element_state.0.borrow().as_ref()
+                if let Some(text_layout) = element_state.borrow().as_ref()
                     && text_layout.size.is_some()
                     && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
                 {
                     return text_layout.size.unwrap();
                 }
+
+                let mut runs = runs.clone();
 
                 // react-native-gpui patch: a single-line truncating node (text_overflow +
                 // nowrap, no wrapping clamp) is re-truncated to its FINAL box width at
@@ -474,7 +487,7 @@ impl TextLayout {
                     )
                     .log_err()
                 else {
-                    element_state.0.borrow_mut().replace(TextLayoutInner {
+                    element_state.borrow_mut().replace(TextLayoutInner {
                         lines: Default::default(),
                         len: 0,
                         line_height,
@@ -494,7 +507,7 @@ impl TextLayout {
                     size.width = size.width.max(line_size.width).ceil();
                 }
 
-                element_state.0.borrow_mut().replace(TextLayoutInner {
+                element_state.borrow_mut().replace(TextLayoutInner {
                     lines,
                     len,
                     line_height,
@@ -506,11 +519,44 @@ impl TextLayout {
                 });
 
                 size
-            }
-        })
+            },
+        );
+        self.1.borrow_mut().replace(measure);
+        let lazy_measure = self.1.clone();
+        window.request_measured_layout(
+            Default::default(),
+            move |known_dimensions, available_space, window, cx| {
+                let mut slot = lazy_measure.borrow_mut();
+                let measure = slot
+                    .as_mut()
+                    .expect("text measure closure must exist through prepaint");
+                measure(known_dimensions, available_space, window, cx)
+            },
+        )
     }
 
     fn prepaint(&self, bounds: Bounds<Pixels>, text: &str, window: &mut Window, cx: &mut App) {
+        // incremental and retained-layout frames can reuse taffy's cached geometry without
+        // invoking this frame's fresh measure closure. populate the paint state only when
+        // prepaint actually needs it, using the final content-box width directly. this
+        // replaces the renderer-wide measured-node sweep and avoids shaping hidden or
+        // deferred text that is never painted.
+        if self.0.borrow().is_none() {
+            let mut slot = self.1.borrow_mut();
+            let measure = slot
+                .as_mut()
+                .with_context(|| format!("text measure closure is missing for {text}"))
+                .unwrap();
+            let _ = measure(
+                Size {
+                    width: None,
+                    height: None,
+                },
+                bounds.size.into(),
+                window,
+                cx,
+            );
+        }
         let mut element_state = self.0.borrow_mut();
         let element_state = element_state
             .as_mut()

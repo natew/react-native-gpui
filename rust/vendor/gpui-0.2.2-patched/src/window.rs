@@ -3524,6 +3524,16 @@ impl Window {
         }
     }
 
+    /// whether the current frame is replaying the retained taffy tree with incremental
+    /// invalidation. callers use this to avoid incremental-only bookkeeping on ordinary
+    /// full and paint-only frames. returns false from inside a measure closure because
+    /// compute_layout temporarily moves the engine out of the window.
+    pub fn layout_frame_is_incremental(&self) -> bool {
+        self.layout_engine
+            .as_ref()
+            .is_some_and(TaffyLayoutEngine::is_incremental)
+    }
+
     /// calls to the [`Element::request_layout`] trait method and enables any element to participate in layout.
     ///
     /// This method should only be called as part of the request_layout or prepaint phase of element drawing.

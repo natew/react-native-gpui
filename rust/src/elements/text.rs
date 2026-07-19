@@ -206,6 +206,15 @@ impl Element for ReactTextElement {
             return (window.request_layout(style, [], cx), ());
         }
 
+        // only an incremental frame consumes this one-shot marker at the next measured
+        // child. full and reuse frames must not leave a marker behind.
+        if window.layout_frame_is_incremental()
+            && crate::elements::text_changed(self.element.global_id)
+        {
+            // build_child wraps StyledText in ordinary div layout nodes. the dirty marker
+            // deliberately survives those nodes and applies to the next measured child.
+            window.mark_next_measured_dirty();
+        }
         let mut child = self.build_child(window);
         let layout_id = child.request_layout(window, cx);
         self.child = Some(child);

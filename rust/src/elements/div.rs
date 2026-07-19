@@ -1582,8 +1582,11 @@ impl Element for ReactDivElement {
         } else {
             None
         };
-        let text_dirty =
-            text_index.is_some() && crate::elements::text_changed(self.element.global_id);
+        // only an incremental frame has a retained measured node to invalidate. gating
+        // here also prevents an unconsumed one-shot marker on full and reuse frames.
+        let text_dirty = text_index.is_some()
+            && window.layout_frame_is_incremental()
+            && crate::elements::text_changed(self.element.global_id);
         let mut child_ids: Vec<LayoutId> = Vec::with_capacity(self.children.len());
         for (index, child) in self.children.iter_mut().enumerate() {
             if text_dirty && Some(index) == text_index {

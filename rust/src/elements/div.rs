@@ -150,6 +150,7 @@ pub struct DivPrepaintState {
     hitbox: Option<Hitbox>,
     max_scroll_x: f32,
     max_scroll_y: f32,
+    scroll_offset: Option<ScrollOffset>,
     // child indices an ancestor scroll viewport windowed out this frame: their laid-out
     // bounds fell outside the viewport (+ one screen of overscan each side), so
     // prepaint skipped them and paint must skip the exact same set. `None` for
@@ -1764,6 +1765,7 @@ impl Element for ReactDivElement {
                 hitbox,
                 max_scroll_x,
                 max_scroll_y,
+                scroll_offset: None,
                 culled,
             };
         }
@@ -1880,6 +1882,7 @@ impl Element for ReactDivElement {
             hitbox,
             max_scroll_x,
             max_scroll_y,
+            scroll_offset,
             culled,
         }
     }
@@ -2705,22 +2708,34 @@ impl Element for ReactDivElement {
                     // this frame (see DivPrepaintState::culled); painting them now would
                     // hit gpui's "paint without prepaint" assert, so skip the same set.
                     let culled = prepaint.culled.as_ref();
-                    if let Some(mask) = overflow_mask {
-                        window.with_content_mask(Some(mask), |window| {
+                    let paint_children = |window: &mut Window| {
+                        if let Some(mask) = overflow_mask {
+                            window.with_content_mask(Some(mask), |window| {
+                                for index in order.iter() {
+                                    if culled.is_some_and(|c| c.contains(&index)) {
+                                        continue;
+                                    }
+                                    self.children[index].element.paint(window, cx);
+                                }
+                            });
+                        } else {
                             for index in order.iter() {
                                 if culled.is_some_and(|c| c.contains(&index)) {
                                     continue;
                                 }
                                 self.children[index].element.paint(window, cx);
                             }
-                        });
-                    } else {
-                        for index in order.iter() {
-                            if culled.is_some_and(|c| c.contains(&index)) {
-                                continue;
-                            }
-                            self.children[index].element.paint(window, cx);
                         }
+                    };
+                    if let Some(offset) = prepaint.scroll_offset {
+                        window.with_scroll_region(
+                            self.element.global_id,
+                            bounds,
+                            point(px(offset.x), px(offset.y)),
+                            paint_children,
+                        );
+                    } else {
+                        paint_children(window);
                     }
                 });
             });

@@ -25,6 +25,9 @@ pub(crate) struct Scene {
     pub(crate) paint_operations: Vec<PaintOperation>,
     primitive_bounds: BoundsTree<ScaledPixels>,
     layer_stack: Vec<DrawOrder>,
+    pub(crate) content_epoch: u64,
+    pub(crate) scroll_regions: Vec<ScrollRegion>,
+    scroll_region_stack: Vec<usize>,
     pub(crate) shadows: Vec<Shadow>,
     pub(crate) quads: Vec<Quad>,
     pub(crate) paths: Vec<Path<ScaledPixels>>,
@@ -40,6 +43,9 @@ impl Scene {
         self.paint_operations.clear();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
+        self.content_epoch = 0;
+        self.scroll_regions.clear();
+        self.scroll_region_stack.clear();
         self.paths.clear();
         self.shadows.clear();
         self.quads.clear();
@@ -52,6 +58,208 @@ impl Scene {
 
     pub fn len(&self) -> usize {
         self.paint_operations.len()
+    }
+
+    pub fn set_content_epoch(&mut self, epoch: u64) {
+        self.content_epoch = epoch;
+    }
+
+    pub fn begin_scroll_region(
+        &mut self,
+        id: u64,
+        bounds: Bounds<ScaledPixels>,
+        offset: Point<ScaledPixels>,
+    ) {
+        let operation_start = self.paint_operations.len();
+        let region_index = self.scroll_regions.len();
+        self.scroll_regions.push(ScrollRegion {
+            id,
+            bounds,
+            offset,
+            operation_start,
+            operation_end: operation_start,
+        });
+        self.scroll_region_stack.push(region_index);
+    }
+
+    pub fn end_scroll_region(&mut self) {
+        let operation_end = self.paint_operations.len();
+        if let Some(region_index) = self.scroll_region_stack.pop()
+            && let Some(region) = self.scroll_regions.get_mut(region_index)
+        {
+            region.operation_end = operation_end;
+        }
+    }
+
+    pub(crate) fn damage_since(&self, previous: &SceneSnapshot) -> SceneDamage {
+        if self.paint_operations.len() != previous.paint_operations.len() {
+            return SceneDamage::Full(SceneDamageReason::Structure);
+        }
+
+        let mut damage = None;
+        for (current, previous) in self
+            .paint_operations
+            .iter()
+            .zip(&previous.paint_operations)
+        {
+            if current.visual_eq(previous) {
+                continue;
+            }
+            let Some((current_bounds, previous_bounds)) = current.changed_bounds(previous) else {
+                return SceneDamage::Full(SceneDamageReason::Structure);
+            };
+            if let Some(bounds) = current_bounds {
+                damage = Some(damage.map_or(bounds, |damage: Bounds<ScaledPixels>| {
+                    damage.union(&bounds)
+                }));
+            }
+            if let Some(bounds) = previous_bounds {
+                damage = Some(damage.map_or(bounds, |damage: Bounds<ScaledPixels>| {
+                    damage.union(&bounds)
+                }));
+            }
+        }
+
+        let Some(mut damage) = damage else {
+            return SceneDamage::None;
+        };
+
+        // A partial repaint that slices a backdrop sampler leaves a seam because the
+        // shader reads retained pixels outside the clip. Expand to the entire sampler
+        // footprint, repeating because overlapping blur regions can chain.
+        loop {
+            let before = damage;
+            for blur in self
+                .backdrop_blurs
+                .iter()
+                .chain(previous.backdrop_blurs.iter())
+            {
+                let bounds = blur.bounds.intersect(&blur.content_mask.bounds);
+                if !bounds.intersect(&damage).is_empty() {
+                    damage = damage.union(&bounds);
+                }
+            }
+            if damage == before {
+                break;
+            }
+        }
+
+        SceneDamage::Bounds(damage)
+    }
+
+    pub(crate) fn snapshot(&self) -> SceneSnapshot {
+        SceneSnapshot {
+            paint_operations: self.paint_operations.clone(),
+            content_epoch: self.content_epoch,
+            scroll_regions: self.scroll_regions.clone(),
+            backdrop_blurs: self.backdrop_blurs.clone(),
+        }
+    }
+
+    pub(crate) fn scroll_blit_is_volatile(&self, viewport: Bounds<ScaledPixels>) -> bool {
+        self.paths
+            .iter()
+            .any(|path| !path.bounds.intersect(&viewport).is_empty())
+            || self
+                .surfaces
+                .iter()
+                .any(|surface| !surface.bounds.intersect(&viewport).is_empty())
+            || self
+                .backdrop_blurs
+                .iter()
+                .any(|blur| !blur.bounds.intersect(&viewport).is_empty())
+            || self.quads.iter().any(|quad| {
+                quad.background.is_smoke() && !quad.bounds.intersect(&viewport).is_empty()
+            })
+    }
+
+    pub(crate) fn scroll_blit_fixed_content_repairs(
+        &self,
+        region: &ScrollRegion,
+        delta: Point<ScaledPixels>,
+    ) -> Vec<Bounds<ScaledPixels>> {
+        let vertical = delta.y.0 != 0.0;
+        let mut repairs = Vec::new();
+        for (index, operation) in self.paint_operations.iter().enumerate() {
+            if index >= region.operation_start && index < region.operation_end {
+                continue;
+            }
+            let PaintOperation::Primitive(primitive) = operation else {
+                continue;
+            };
+            if primitive.clipped_bounds().intersect(&region.bounds).is_empty() {
+                continue;
+            }
+            if let Some(extent) = primitive.scroll_backdrop_repair_extent(region.bounds, vertical) {
+                if extent > 0.0 {
+                    let repair = if delta.y.0 > 0.0 {
+                        Bounds::new(
+                            region.bounds.origin,
+                            Size {
+                                width: region.bounds.size.width,
+                                height: ScaledPixels(extent),
+                            },
+                        )
+                    } else if delta.y.0 < 0.0 {
+                        Bounds::new(
+                            point(
+                                region.bounds.origin.x,
+                                ScaledPixels(region.bounds.bottom().0 - extent),
+                            ),
+                            Size {
+                                width: region.bounds.size.width,
+                                height: ScaledPixels(extent),
+                            },
+                        )
+                    } else if delta.x.0 > 0.0 {
+                        Bounds::new(
+                            region.bounds.origin,
+                            Size {
+                                width: ScaledPixels(extent),
+                                height: region.bounds.size.height,
+                            },
+                        )
+                    } else {
+                        Bounds::new(
+                            point(
+                                ScaledPixels(region.bounds.right().0 - extent),
+                                region.bounds.origin.y,
+                            ),
+                            Size {
+                                width: ScaledPixels(extent),
+                                height: region.bounds.size.height,
+                            },
+                        )
+                    };
+                    repairs.push(repair.intersect(&region.bounds));
+                }
+                continue;
+            }
+            let bounds = primitive.clipped_bounds();
+            let shifted = Bounds::new(
+                point(
+                    ScaledPixels(bounds.origin.x.0 - delta.x.0),
+                    ScaledPixels(bounds.origin.y.0 - delta.y.0),
+                ),
+                bounds.size,
+            );
+            repairs.push(bounds.union(&shifted).intersect(&region.bounds));
+        }
+
+        let mut merged: Vec<Bounds<ScaledPixels>> = Vec::new();
+        for repair in repairs.into_iter().filter(|repair| !repair.is_empty()) {
+            let mut repair = repair;
+            let mut index = 0;
+            while index < merged.len() {
+                if !merged[index].intersect(&repair).is_empty() {
+                    repair = repair.union(&merged.remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            merged.push(repair);
+        }
+        merged
     }
 
     pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {
@@ -199,6 +407,34 @@ impl Scene {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ScrollRegion {
+    pub(crate) id: u64,
+    pub(crate) bounds: Bounds<ScaledPixels>,
+    pub(crate) offset: Point<ScaledPixels>,
+    pub(crate) operation_start: usize,
+    pub(crate) operation_end: usize,
+}
+
+pub(crate) struct SceneSnapshot {
+    pub(crate) paint_operations: Vec<PaintOperation>,
+    pub(crate) content_epoch: u64,
+    pub(crate) scroll_regions: Vec<ScrollRegion>,
+    pub(crate) backdrop_blurs: Vec<BackdropBlur>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SceneDamageReason {
+    Structure,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SceneDamage {
+    None,
+    Bounds(Bounds<ScaledPixels>),
+    Full(SceneDamageReason),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Default)]
 #[cfg_attr(
     all(
@@ -221,10 +457,37 @@ pub(crate) enum PrimitiveKind {
     BackdropBlur,
 }
 
+#[derive(Clone)]
 pub(crate) enum PaintOperation {
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
+}
+
+impl PaintOperation {
+    fn visual_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Primitive(a), Self::Primitive(b)) => a.visual_eq(b),
+            (Self::StartLayer(a), Self::StartLayer(b)) => a == b,
+            (Self::EndLayer, Self::EndLayer) => true,
+            _ => false,
+        }
+    }
+
+    fn changed_bounds(
+        &self,
+        other: &Self,
+    ) -> Option<(Option<Bounds<ScaledPixels>>, Option<Bounds<ScaledPixels>>)> {
+        match (self, other) {
+            (Self::Primitive(a), Self::Primitive(b)) if a.kind() == b.kind() => Some((
+                Some(a.clipped_bounds()),
+                Some(b.clipped_bounds()),
+            )),
+            (Self::StartLayer(a), Self::StartLayer(b)) => Some((Some(*a), Some(*b))),
+            (Self::EndLayer, Self::EndLayer) => Some((None, None)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -240,6 +503,73 @@ pub(crate) enum Primitive {
 }
 
 impl Primitive {
+    fn kind(&self) -> PrimitiveKind {
+        match self {
+            Self::Shadow(_) => PrimitiveKind::Shadow,
+            Self::Quad(_) => PrimitiveKind::Quad,
+            Self::Path(_) => PrimitiveKind::Path,
+            Self::Underline(_) => PrimitiveKind::Underline,
+            Self::MonochromeSprite(_) => PrimitiveKind::MonochromeSprite,
+            Self::PolychromeSprite(_) => PrimitiveKind::PolychromeSprite,
+            Self::Surface(_) => PrimitiveKind::Surface,
+            Self::BackdropBlur(_) => PrimitiveKind::BackdropBlur,
+        }
+    }
+
+    fn scroll_backdrop_repair_extent(
+        &self,
+        viewport: Bounds<ScaledPixels>,
+        vertical: bool,
+    ) -> Option<f32> {
+        let Self::Quad(quad) = self else {
+            return None;
+        };
+        let bounds = quad.bounds.intersect(&quad.content_mask.bounds);
+        if bounds.intersect(&viewport) != viewport
+            || !quad.background.is_opaque_solid()
+            || quad.border_widths != Edges::default()
+            || quad.transformation != TransformationMatrix::unit()
+        {
+            return None;
+        }
+        let extent = if vertical {
+            quad.corner_radii
+                .top_left
+                .0
+                .max(quad.corner_radii.top_right.0)
+                .max(quad.corner_radii.bottom_left.0)
+                .max(quad.corner_radii.bottom_right.0)
+        } else {
+            quad.corner_radii
+                .top_left
+                .0
+                .max(quad.corner_radii.bottom_left.0)
+                .max(quad.corner_radii.top_right.0)
+                .max(quad.corner_radii.bottom_right.0)
+        };
+        Some(extent)
+    }
+
+    fn clipped_bounds(&self) -> Bounds<ScaledPixels> {
+        self.bounds().intersect(&self.content_mask().bounds)
+    }
+
+    fn visual_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Shadow(a), Self::Shadow(b)) => a == b,
+            (Self::Quad(a), Self::Quad(b)) => a == b,
+            (Self::Path(a), Self::Path(b)) => a == b,
+            (Self::Underline(a), Self::Underline(b)) => a == b,
+            (Self::MonochromeSprite(a), Self::MonochromeSprite(b)) => a == b,
+            (Self::PolychromeSprite(a), Self::PolychromeSprite(b)) => a == b,
+            // Pixel buffers can update in place while retaining their object identity.
+            // Treat every hosted surface frame as changed rather than risking stale video.
+            (Self::Surface(_), Self::Surface(_)) => false,
+            (Self::BackdropBlur(a), Self::BackdropBlur(b)) => a == b,
+            _ => false,
+        }
+    }
+
     pub fn bounds(&self) -> &Bounds<ScaledPixels> {
         match self {
             Primitive::Shadow(shadow) => &shadow.bounds,
@@ -507,7 +837,7 @@ pub(crate) enum PrimitiveBatch<'a> {
     BackdropBlurs(&'a [BackdropBlur]),
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq)]
 #[repr(C)]
 pub(crate) struct Quad {
     pub order: DrawOrder,
@@ -528,7 +858,7 @@ impl From<Quad> for Primitive {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[repr(C)]
 pub(crate) struct Underline {
     pub order: DrawOrder,
@@ -546,7 +876,7 @@ impl From<Underline> for Primitive {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[repr(C)]
 pub(crate) struct Shadow {
     pub order: DrawOrder,
@@ -575,7 +905,7 @@ impl From<Shadow> for Primitive {
 /// `NSVisualEffectView`, which only blurs the desktop BEHIND the window, never in-app
 /// content (the Metal layer sits above it). `blur_radius` is the Gaussian sigma in
 /// scaled (device) px.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[repr(C)]
 pub(crate) struct BackdropBlur {
     pub order: DrawOrder,
@@ -707,7 +1037,7 @@ impl Default for TransformationMatrix {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 #[repr(C)]
 pub(crate) struct MonochromeSprite {
     pub order: DrawOrder,
@@ -725,7 +1055,7 @@ impl From<MonochromeSprite> for Primitive {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 #[repr(C)]
 pub(crate) struct PolychromeSprite {
     pub order: DrawOrder,
@@ -746,7 +1076,7 @@ impl From<PolychromeSprite> for Primitive {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PaintSurface {
     pub order: DrawOrder,
     pub bounds: Bounds<ScaledPixels>,
@@ -765,7 +1095,7 @@ impl From<PaintSurface> for Primitive {
 pub(crate) struct PathId(pub(crate) usize);
 
 /// A line made up of a series of vertices and control points.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Path<P: Clone + Debug + Default + PartialEq> {
     pub(crate) id: PathId,
     pub(crate) order: DrawOrder,
@@ -907,7 +1237,7 @@ impl From<Path<ScaledPixels>> for Primitive {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 #[repr(C)]
 pub(crate) struct PathVertex<P: Clone + Debug + Default + PartialEq> {
     pub(crate) xy_position: Point<P>,

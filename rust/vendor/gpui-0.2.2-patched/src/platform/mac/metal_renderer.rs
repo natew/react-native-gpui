@@ -1,8 +1,8 @@
 use super::metal_atlas::MetalAtlas;
 use crate::{
     AtlasTextureId, BackdropBlur, Background, Bounds, ContentMask, DevicePixels, MonochromeSprite,
-    PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow,
-    Size, Surface, Underline, point, size,
+    PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene,
+    SceneDamage, SceneSnapshot, Shadow, Size, Surface, Underline, point, size,
 };
 use anyhow::Result;
 use block::ConcreteBlock;
@@ -19,8 +19,8 @@ use core_video::{
 };
 use foreign_types::{ForeignType, ForeignTypeRef};
 use metal::{
-    CAMetalLayer, CommandQueue, MTLPixelFormat, MTLResourceOptions, NSRange,
-    RenderPassColorAttachmentDescriptorRef,
+    CAMetalLayer, CommandQueue, MTLPixelFormat, MTLOrigin, MTLResourceOptions, MTLScissorRect,
+    MTLSize, NSRange, RenderPassColorAttachmentDescriptorRef,
 };
 use objc::{self, msg_send, sel, sel_impl};
 use parking_lot::Mutex;
@@ -29,6 +29,45 @@ use std::{cell::Cell, ffi::c_void, mem, ptr, sync::Arc};
 
 // Exported to metal
 pub(crate) type PointF = crate::Point<f32>;
+
+#[derive(Clone, Copy, Debug)]
+struct ScrollBlitPlan {
+    viewport: MTLScissorRect,
+    delta_x: i64,
+    delta_y: i64,
+    damage: MTLScissorRect,
+    repairs: [Option<MTLScissorRect>; 4],
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RetainedPlan {
+    Full(&'static str),
+    Damage(MTLScissorRect),
+    Reuse,
+    ScrollBlit(ScrollBlitPlan),
+}
+
+fn scissor_for_bounds(
+    bounds: Bounds<ScaledPixels>,
+    viewport_size: Size<DevicePixels>,
+) -> Option<MTLScissorRect> {
+    let viewport_w = i32::from(viewport_size.width).max(0);
+    let viewport_h = i32::from(viewport_size.height).max(0);
+    let x0 = (bounds.origin.x.0.floor() as i32).clamp(0, viewport_w);
+    let y0 = (bounds.origin.y.0.floor() as i32).clamp(0, viewport_h);
+    let x1 = ((bounds.origin.x.0 + bounds.size.width.0).ceil() as i32).clamp(0, viewport_w);
+    let y1 = ((bounds.origin.y.0 + bounds.size.height.0).ceil() as i32).clamp(0, viewport_h);
+    (x1 > x0 && y1 > y0).then_some(MTLScissorRect {
+        x: x0 as u64,
+        y: y0 as u64,
+        width: (x1 - x0) as u64,
+        height: (y1 - y0) as u64,
+    })
+}
+
+fn scissor_area(rect: MTLScissorRect) -> u64 {
+    rect.width.saturating_mul(rect.height)
+}
 
 // rngpui debug: RNGPUI_SPRITE_TRACE="x0,y0,x1,y1" (device px) dumps, per frame,
 // every monochrome sprite intersecting that band (order/texture/tile/bounds) plus
@@ -195,6 +234,7 @@ pub(crate) struct MetalRenderer {
     path_sprites_pipeline_state: metal::RenderPipelineState,
     shadows_pipeline_state: metal::RenderPipelineState,
     quads_pipeline_state: metal::RenderPipelineState,
+    clear_quads_pipeline_state: metal::RenderPipelineState,
     underlines_pipeline_state: metal::RenderPipelineState,
     monochrome_sprites_pipeline_state: metal::RenderPipelineState,
     polychrome_sprites_pipeline_state: metal::RenderPipelineState,
@@ -212,6 +252,10 @@ pub(crate) struct MetalRenderer {
     path_intermediate_msaa_texture: Option<metal::Texture>,
     // full-viewport sampleable scratch target for the backdrop-blur horizontal pass.
     scratch_texture: Option<metal::Texture>,
+    retained_texture: Option<metal::Texture>,
+    scroll_scratch_texture: Option<metal::Texture>,
+    retained_valid: bool,
+    previous_scene: Option<SceneSnapshot>,
     path_sample_count: u32,
 }
 
@@ -315,6 +359,15 @@ impl MetalRenderer {
             "quad_fragment",
             MTLPixelFormat::BGRA8Unorm,
         );
+        let clear_quads_pipeline_state = build_pipeline_state_with_blending(
+            &device,
+            &library,
+            "clear_quads",
+            "quad_vertex",
+            "quad_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+            false,
+        );
         let underlines_pipeline_state = build_pipeline_state(
             &device,
             &library,
@@ -384,6 +437,7 @@ impl MetalRenderer {
             path_sprites_pipeline_state,
             shadows_pipeline_state,
             quads_pipeline_state,
+            clear_quads_pipeline_state,
             underlines_pipeline_state,
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
@@ -397,6 +451,10 @@ impl MetalRenderer {
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
             scratch_texture: None,
+            retained_texture: None,
+            scroll_scratch_texture: None,
+            retained_valid: false,
+            previous_scene: None,
             path_sample_count: PATH_SAMPLE_COUNT,
         }
     }
@@ -445,6 +503,10 @@ impl MetalRenderer {
             self.path_intermediate_texture = None;
             self.path_intermediate_msaa_texture = None;
             self.scratch_texture = None;
+            self.retained_texture = None;
+            self.scroll_scratch_texture = None;
+            self.retained_valid = false;
+            self.previous_scene = None;
             return;
         }
 
@@ -458,6 +520,10 @@ impl MetalRenderer {
         // full-viewport scratch for the backdrop-blur horizontal pass — same format/usage
         // as the path intermediate (render target + shader read).
         self.scratch_texture = Some(self.device.new_texture(&texture_descriptor));
+        self.retained_texture = Some(self.device.new_texture(&texture_descriptor));
+        self.scroll_scratch_texture = Some(self.device.new_texture(&texture_descriptor));
+        self.retained_valid = false;
+        self.previous_scene = None;
 
         if self.path_sample_count > 1 {
             let mut msaa_descriptor = texture_descriptor;
@@ -476,6 +542,244 @@ impl MetalRenderer {
 
     pub fn destroy(&self) {
         // nothing to do
+    }
+
+    fn retained_plan(&self, scene: &Scene, viewport_size: Size<DevicePixels>) -> RetainedPlan {
+        if !self.retained_valid || self.previous_scene.is_none() {
+            return RetainedPlan::Full("cold");
+        }
+        let previous = self.previous_scene.as_ref().unwrap();
+
+        if scene.content_epoch == previous.content_epoch {
+            match self.scroll_blit_plan(scene, previous, viewport_size) {
+                Ok(Some(plan)) => return RetainedPlan::ScrollBlit(plan),
+                Ok(None) => {}
+                Err(reason) => {
+                    if std::env::var_os("RNGPUI_COMPOSITOR_TRACE").is_some() {
+                        eprintln!("[compositor] blitBlocked={reason}");
+                    }
+                }
+            }
+        }
+
+        match scene.damage_since(previous) {
+            SceneDamage::None => RetainedPlan::Reuse,
+            SceneDamage::Bounds(bounds) => {
+                let Some(scissor) = scissor_for_bounds(bounds, viewport_size) else {
+                    return RetainedPlan::Reuse;
+                };
+                let full_area = u64::from(i32::from(viewport_size.width).max(0) as u32)
+                    .saturating_mul(u64::from(
+                        i32::from(viewport_size.height).max(0) as u32,
+                    ));
+                if full_area == 0 || scissor_area(scissor).saturating_mul(5) >= full_area * 4 {
+                    RetainedPlan::Full("damage-threshold")
+                } else {
+                    RetainedPlan::Damage(scissor)
+                }
+            }
+            SceneDamage::Full(_) => RetainedPlan::Full("structure"),
+        }
+    }
+
+    fn scroll_blit_plan(
+        &self,
+        scene: &Scene,
+        previous: &SceneSnapshot,
+        viewport_size: Size<DevicePixels>,
+    ) -> std::result::Result<Option<ScrollBlitPlan>, &'static str> {
+        if scene.scroll_regions.len() != previous.scroll_regions.len() {
+            return Err("scroll-region-structure");
+        }
+        let mut changed = None;
+        for region in &scene.scroll_regions {
+            let Some(prior) = previous.scroll_regions.iter().find(|prior| prior.id == region.id)
+            else {
+                return Err("scroll-region-identity");
+            };
+            if region.bounds != prior.bounds {
+                return Err("scroll-region-resized");
+            }
+            if region.offset != prior.offset {
+                if changed.is_some() {
+                    return Err("multiple-scroll-regions");
+                }
+                changed = Some((region, prior));
+            }
+        }
+        let Some((region, prior)) = changed else {
+            return Ok(None);
+        };
+        if region.operation_end <= region.operation_start {
+            return Err("empty-scroll-layer");
+        }
+        if scene.scroll_blit_is_volatile(region.bounds) {
+            return Err("volatile-scroll-content");
+        }
+        let Some(viewport) = scissor_for_bounds(region.bounds, viewport_size) else {
+            return Err("empty-scroll-viewport");
+        };
+
+        let dx = region.offset.x.0 - prior.offset.x.0;
+        let dy = region.offset.y.0 - prior.offset.y.0;
+        let rounded_x = dx.round();
+        let rounded_y = dy.round();
+        if (dx - rounded_x).abs() > 0.01 || (dy - rounded_y).abs() > 0.01 {
+            return Err("fractional-device-delta");
+        }
+        let delta_x = rounded_x as i64;
+        let delta_y = rounded_y as i64;
+        if delta_x != 0 && delta_y != 0 {
+            return Err("diagonal-delta");
+        }
+        if delta_x == 0 && delta_y == 0 {
+            return Ok(None);
+        }
+        if delta_x.unsigned_abs() >= viewport.width || delta_y.unsigned_abs() >= viewport.height {
+            return Err("delta-exceeds-viewport");
+        }
+
+        let damage = if delta_y > 0 {
+            let amount = delta_y as u64;
+            MTLScissorRect {
+                x: viewport.x,
+                y: viewport.y + viewport.height - amount,
+                width: viewport.width,
+                height: amount,
+            }
+        } else if delta_y < 0 {
+            MTLScissorRect {
+                x: viewport.x,
+                y: viewport.y,
+                width: viewport.width,
+                height: delta_y.unsigned_abs(),
+            }
+        } else if delta_x > 0 {
+            let amount = delta_x as u64;
+            MTLScissorRect {
+                x: viewport.x + viewport.width - amount,
+                y: viewport.y,
+                width: amount,
+                height: viewport.height,
+            }
+        } else {
+            MTLScissorRect {
+                x: viewport.x,
+                y: viewport.y,
+                width: delta_x.unsigned_abs(),
+                height: viewport.height,
+            }
+        };
+        let mut repairs = [None; 4];
+        let repair_bounds = scene.scroll_blit_fixed_content_repairs(
+            region,
+            point(ScaledPixels(rounded_x), ScaledPixels(rounded_y)),
+        );
+        if repair_bounds.len() > repairs.len() {
+            return Err("too-many-fixed-repairs");
+        }
+        let mut repair_area = 0_u64;
+        for (slot, bounds) in repairs.iter_mut().zip(repair_bounds) {
+            *slot = scissor_for_bounds(bounds, viewport_size);
+            if let Some(scissor) = *slot {
+                repair_area = repair_area.saturating_add(scissor_area(scissor));
+            }
+        }
+        if repair_area.saturating_mul(5) >= scissor_area(viewport).saturating_mul(4) {
+            return Err("fixed-repair-too-large");
+        }
+        Ok(Some(ScrollBlitPlan {
+            viewport,
+            delta_x,
+            delta_y,
+            damage,
+            repairs,
+        }))
+    }
+
+    fn encode_scroll_blit(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        retained_texture: &metal::TextureRef,
+        plan: ScrollBlitPlan,
+    ) -> Result<()> {
+        let scratch = self
+            .scroll_scratch_texture
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("scroll scratch texture unavailable"))?;
+        let viewport = plan.viewport;
+        let copy_size = MTLSize {
+            width: viewport.width,
+            height: viewport.height,
+            depth: 1,
+        };
+
+        // Metal does not define overlapping copies within one texture. Snapshot the
+        // scroll layer first, then copy its still-valid portion back at the new offset.
+        let snapshot = command_buffer.new_blit_command_encoder();
+        snapshot.copy_from_texture(
+            retained_texture,
+            0,
+            0,
+            MTLOrigin {
+                x: viewport.x,
+                y: viewport.y,
+                z: 0,
+            },
+            copy_size,
+            scratch,
+            0,
+            0,
+            MTLOrigin {
+                x: viewport.x,
+                y: viewport.y,
+                z: 0,
+            },
+        );
+        snapshot.end_encoding();
+
+        let abs_x = plan.delta_x.unsigned_abs();
+        let abs_y = plan.delta_y.unsigned_abs();
+        let mut source = MTLOrigin {
+            x: viewport.x,
+            y: viewport.y,
+            z: 0,
+        };
+        let mut destination = source;
+        let size = MTLSize {
+            width: viewport.width - abs_x,
+            height: viewport.height - abs_y,
+            depth: 1,
+        };
+
+        // Scroll offsets grow toward the content end while painted children move in
+        // the opposite direction. A positive y offset therefore copies lower source
+        // pixels upward and exposes a strip at the bottom.
+        if plan.delta_x > 0 {
+            source.x += abs_x;
+        } else if plan.delta_x < 0 {
+            destination.x += abs_x;
+        }
+        if plan.delta_y > 0 {
+            source.y += abs_y;
+        } else if plan.delta_y < 0 {
+            destination.y += abs_y;
+        }
+
+        let shift = command_buffer.new_blit_command_encoder();
+        shift.copy_from_texture(
+            scratch,
+            0,
+            0,
+            source,
+            size,
+            retained_texture,
+            0,
+            0,
+            destination,
+        );
+        shift.end_encoding();
+        Ok(())
     }
 
     pub fn draw(&mut self, scene: &Scene) {
@@ -509,11 +813,17 @@ impl MetalRenderer {
             return;
         };
 
+        let mut retained_plan = self.retained_plan(scene, viewport_size);
         loop {
             let mut instance_buffer = self.instance_buffer_pool.lock().acquire(&self.device);
 
-            let command_buffer =
-                self.draw_primitives(scene, &mut instance_buffer, drawable, viewport_size);
+            let command_buffer = self.draw_primitives(
+                scene,
+                &mut instance_buffer,
+                drawable,
+                viewport_size,
+                retained_plan,
+            );
 
             match command_buffer {
                 Ok(command_buffer) => {
@@ -562,6 +872,35 @@ impl MetalRenderer {
                         command_buffer.present_drawable(drawable);
                         command_buffer.commit();
                     }
+                    self.retained_valid = true;
+                    self.previous_scene = Some(scene.snapshot());
+                    if std::env::var_os("RNGPUI_COMPOSITOR_TRACE").is_some() {
+                        match retained_plan {
+                            RetainedPlan::Full(reason) => {
+                                eprintln!("[compositor] mode=record-full reason={reason}")
+                            }
+                            RetainedPlan::Damage(rect) => eprintln!(
+                                "[compositor] mode=record-damage damage={},{},{}x{}",
+                                rect.x, rect.y, rect.width, rect.height
+                            ),
+                            RetainedPlan::Reuse => {
+                                eprintln!("[compositor] mode=replay damage=none")
+                            }
+                            RetainedPlan::ScrollBlit(plan) => {
+                                let repair_count = plan.repairs.iter().flatten().count();
+                                eprintln!(
+                                    "[compositor] mode=scroll-blit delta={},{} damage={},{},{}x{} repairs={}",
+                                    plan.delta_x,
+                                    plan.delta_y,
+                                    plan.damage.x,
+                                    plan.damage.y,
+                                    plan.damage.width,
+                                    plan.damage.height,
+                                    repair_count,
+                                )
+                            }
+                        }
+                    }
                     return;
                 }
                 Err(err) => {
@@ -576,6 +915,8 @@ impl MetalRenderer {
                         break;
                     }
                     instance_buffer_pool.reset(buffer_size * 2);
+                    self.retained_valid = false;
+                    retained_plan = RetainedPlan::Full("instance-buffer-retry");
                     log::info!(
                         "increased instance buffer size to {}",
                         instance_buffer_pool.buffer_size
@@ -591,160 +932,236 @@ impl MetalRenderer {
         instance_buffer: &mut InstanceBuffer,
         drawable: &metal::MetalDrawableRef,
         viewport_size: Size<DevicePixels>,
+        retained_plan: RetainedPlan,
     ) -> Result<metal::CommandBuffer> {
         let command_queue = self.command_queue.clone();
         let command_buffer = command_queue.new_command_buffer();
         let alpha = if self.layer.is_opaque() { 1. } else { 0. };
         let mut instance_offset = 0;
+        let retained_texture = self
+            .retained_texture
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("retained texture unavailable"))?;
 
         if let Some(band) = sprite_trace_band() {
             trace_scene_sprites(scene, band);
         }
 
-        let mut command_encoder = new_command_encoder(
-            command_buffer,
-            drawable,
-            viewport_size,
-            |color_attachment| {
-                color_attachment.set_load_action(metal::MTLLoadAction::Clear);
-                color_attachment.set_clear_color(metal::MTLClearColor::new(0., 0., 0., alpha));
-            },
-        );
+        if let RetainedPlan::ScrollBlit(plan) = retained_plan {
+            self.encode_scroll_blit(command_buffer, &retained_texture, plan)?;
+        }
 
-        for batch in scene.batches() {
-            let ok = match batch {
-                PrimitiveBatch::Shadows(shadows) => self.draw_shadows(
-                    shadows,
+        let damage_scissors = match retained_plan {
+            RetainedPlan::Full(_) => vec![None],
+            RetainedPlan::Damage(scissor) => vec![Some(scissor)],
+            RetainedPlan::Reuse => Vec::new(),
+            RetainedPlan::ScrollBlit(plan) => {
+                let mut scissors = vec![Some(plan.damage)];
+                scissors.extend(plan.repairs.into_iter().flatten().map(Some));
+                scissors
+            }
+        };
+
+        for damage_scissor in damage_scissors {
+            let mut command_encoder = new_command_encoder(
+                command_buffer,
+                &retained_texture,
+                viewport_size,
+                damage_scissor,
+                |color_attachment| match (retained_plan, damage_scissor) {
+                    (RetainedPlan::Full(_), None) => {
+                        color_attachment.set_load_action(metal::MTLLoadAction::Clear);
+                        color_attachment
+                            .set_clear_color(metal::MTLClearColor::new(0., 0., 0., alpha));
+                    }
+                    _ => color_attachment.set_load_action(metal::MTLLoadAction::Load),
+                },
+            );
+
+            if let Some(scissor) = damage_scissor {
+                let clear_bounds = Bounds::new(
+                    point(
+                        ScaledPixels(scissor.x as f32),
+                        ScaledPixels(scissor.y as f32),
+                    ),
+                    size(
+                        ScaledPixels(scissor.width as f32),
+                        ScaledPixels(scissor.height as f32),
+                    ),
+                );
+                let clear_quad = Quad {
+                    bounds: clear_bounds,
+                    content_mask: ContentMask {
+                        bounds: clear_bounds,
+                    },
+                    ..Quad::default()
+                };
+                if !self.draw_quads_with_pipeline(
+                    std::slice::from_ref(&clear_quad),
+                    &self.clear_quads_pipeline_state,
                     instance_buffer,
                     &mut instance_offset,
                     viewport_size,
                     command_encoder,
-                ),
-                PrimitiveBatch::Quads(quads) => self.draw_quads(
-                    quads,
-                    instance_buffer,
-                    &mut instance_offset,
-                    viewport_size,
-                    command_encoder,
-                ),
-                PrimitiveBatch::Paths(paths) => {
+                ) {
                     command_encoder.end_encoding();
+                    anyhow::bail!("scene too large while clearing damage");
+                }
+            }
 
-                    let did_draw = self.draw_paths_to_intermediate(
-                        paths,
+            for batch in scene.batches() {
+                let ok = match batch {
+                    PrimitiveBatch::Shadows(shadows) => self.draw_shadows(
+                        shadows,
                         instance_buffer,
                         &mut instance_offset,
                         viewport_size,
-                        command_buffer,
-                    );
-
-                    command_encoder = new_command_encoder(
-                        command_buffer,
-                        drawable,
+                        command_encoder,
+                    ),
+                    PrimitiveBatch::Quads(quads) => self.draw_quads(
+                        quads,
+                        instance_buffer,
+                        &mut instance_offset,
                         viewport_size,
-                        |color_attachment| {
-                            color_attachment.set_load_action(metal::MTLLoadAction::Load);
-                        },
-                    );
+                        command_encoder,
+                    ),
+                    PrimitiveBatch::Paths(paths) => {
+                        command_encoder.end_encoding();
 
-                    if did_draw {
-                        self.draw_paths_from_intermediate(
+                        let did_draw = self.draw_paths_to_intermediate(
                             paths,
                             instance_buffer,
                             &mut instance_offset,
                             viewport_size,
-                            command_encoder,
-                        )
-                    } else {
-                        false
-                    }
-                }
-                PrimitiveBatch::Underlines(underlines) => self.draw_underlines(
-                    underlines,
-                    instance_buffer,
-                    &mut instance_offset,
-                    viewport_size,
-                    command_encoder,
-                ),
-                PrimitiveBatch::MonochromeSprites {
-                    texture_id,
-                    sprites,
-                } => self.draw_monochrome_sprites(
-                    texture_id,
-                    sprites,
-                    instance_buffer,
-                    &mut instance_offset,
-                    viewport_size,
-                    command_encoder,
-                ),
-                PrimitiveBatch::PolychromeSprites {
-                    texture_id,
-                    sprites,
-                } => self.draw_polychrome_sprites(
-                    texture_id,
-                    sprites,
-                    instance_buffer,
-                    &mut instance_offset,
-                    viewport_size,
-                    command_encoder,
-                ),
-                PrimitiveBatch::Surfaces(surfaces) => self.draw_surfaces(
-                    surfaces,
-                    instance_buffer,
-                    &mut instance_offset,
-                    viewport_size,
-                    command_encoder,
-                ),
-                PrimitiveBatch::BackdropBlurs(blurs) => {
-                    // each blur is its own encoder split: end the main pass, run an H pass
-                    // into scratch + a composite pass back onto the drawable, then reopen
-                    // the main pass with Load. processed sequentially so a higher-z glass
-                    // samples a lower-z glass already composited onto the drawable.
-                    command_encoder.end_encoding();
+                            command_buffer,
+                        );
 
-                    let did_draw = self.draw_backdrop_blurs(
-                        blurs,
+                        command_encoder = new_command_encoder(
+                            command_buffer,
+                            &retained_texture,
+                            viewport_size,
+                            damage_scissor,
+                            |color_attachment| {
+                                color_attachment.set_load_action(metal::MTLLoadAction::Load);
+                            },
+                        );
+
+                        if did_draw {
+                            self.draw_paths_from_intermediate(
+                                paths,
+                                instance_buffer,
+                                &mut instance_offset,
+                                viewport_size,
+                                command_encoder,
+                            )
+                        } else {
+                            false
+                        }
+                    }
+                    PrimitiveBatch::Underlines(underlines) => self.draw_underlines(
+                        underlines,
                         instance_buffer,
                         &mut instance_offset,
                         viewport_size,
-                        drawable,
-                        command_buffer,
-                    );
-
-                    command_encoder = new_command_encoder(
-                        command_buffer,
-                        drawable,
+                        command_encoder,
+                    ),
+                    PrimitiveBatch::MonochromeSprites {
+                        texture_id,
+                        sprites,
+                    } => self.draw_monochrome_sprites(
+                        texture_id,
+                        sprites,
+                        instance_buffer,
+                        &mut instance_offset,
                         viewport_size,
-                        |color_attachment| {
-                            color_attachment.set_load_action(metal::MTLLoadAction::Load);
-                        },
-                    );
+                        command_encoder,
+                    ),
+                    PrimitiveBatch::PolychromeSprites {
+                        texture_id,
+                        sprites,
+                    } => self.draw_polychrome_sprites(
+                        texture_id,
+                        sprites,
+                        instance_buffer,
+                        &mut instance_offset,
+                        viewport_size,
+                        command_encoder,
+                    ),
+                    PrimitiveBatch::Surfaces(surfaces) => self.draw_surfaces(
+                        surfaces,
+                        instance_buffer,
+                        &mut instance_offset,
+                        viewport_size,
+                        command_encoder,
+                    ),
+                    PrimitiveBatch::BackdropBlurs(blurs) => {
+                        command_encoder.end_encoding();
 
-                    did_draw
+                        let did_draw = self.draw_backdrop_blurs(
+                            blurs,
+                            instance_buffer,
+                            &mut instance_offset,
+                            viewport_size,
+                            &retained_texture,
+                            command_buffer,
+                        );
+
+                        command_encoder = new_command_encoder(
+                            command_buffer,
+                            &retained_texture,
+                            viewport_size,
+                            damage_scissor,
+                            |color_attachment| {
+                                color_attachment.set_load_action(metal::MTLLoadAction::Load);
+                            },
+                        );
+
+                        did_draw
+                    }
+                };
+                if !ok {
+                    command_encoder.end_encoding();
+                    anyhow::bail!(
+                        "scene too large: {} paths, {} shadows, {} quads, {} underlines, {} mono, {} poly, {} surfaces, {} backdrop_blurs",
+                        scene.paths.len(),
+                        scene.shadows.len(),
+                        scene.quads.len(),
+                        scene.underlines.len(),
+                        scene.monochrome_sprites.len(),
+                        scene.polychrome_sprites.len(),
+                        scene.surfaces.len(),
+                        scene.backdrop_blurs.len(),
+                    );
                 }
-            };
-            if !ok {
-                command_encoder.end_encoding();
-                anyhow::bail!(
-                    "scene too large: {} paths, {} shadows, {} quads, {} underlines, {} mono, {} poly, {} surfaces, {} backdrop_blurs",
-                    scene.paths.len(),
-                    scene.shadows.len(),
-                    scene.quads.len(),
-                    scene.underlines.len(),
-                    scene.monochrome_sprites.len(),
-                    scene.polychrome_sprites.len(),
-                    scene.surfaces.len(),
-                    scene.backdrop_blurs.len(),
-                );
             }
+
+            command_encoder.end_encoding();
         }
 
-        command_encoder.end_encoding();
+        let blit = command_buffer.new_blit_command_encoder();
+        blit.copy_from_texture(
+            &retained_texture,
+            0,
+            0,
+            MTLOrigin { x: 0, y: 0, z: 0 },
+            MTLSize {
+                width: i32::from(viewport_size.width).max(0) as u64,
+                height: i32::from(viewport_size.height).max(0) as u64,
+                depth: 1,
+            },
+            drawable.texture(),
+            0,
+            0,
+            MTLOrigin { x: 0, y: 0, z: 0 },
+        );
+        blit.end_encoding();
 
-        instance_buffer.metal_buffer.did_modify_range(NSRange {
-            location: 0,
-            length: instance_offset as NSUInteger,
-        });
+        if instance_offset > 0 {
+            instance_buffer.metal_buffer.did_modify_range(NSRange {
+                location: 0,
+                length: instance_offset as NSUInteger,
+            });
+        }
         Ok(command_buffer.to_owned())
     }
 
@@ -905,12 +1322,31 @@ impl MetalRenderer {
         viewport_size: Size<DevicePixels>,
         command_encoder: &metal::RenderCommandEncoderRef,
     ) -> bool {
+        self.draw_quads_with_pipeline(
+            quads,
+            &self.quads_pipeline_state,
+            instance_buffer,
+            instance_offset,
+            viewport_size,
+            command_encoder,
+        )
+    }
+
+    fn draw_quads_with_pipeline(
+        &self,
+        quads: &[Quad],
+        pipeline: &metal::RenderPipelineStateRef,
+        instance_buffer: &mut InstanceBuffer,
+        instance_offset: &mut usize,
+        viewport_size: Size<DevicePixels>,
+        command_encoder: &metal::RenderCommandEncoderRef,
+    ) -> bool {
         if quads.is_empty() {
             return true;
         }
         align_offset(instance_offset);
 
-        command_encoder.set_render_pipeline_state(&self.quads_pipeline_state);
+        command_encoder.set_render_pipeline_state(pipeline);
         command_encoder.set_vertex_buffer(
             QuadInputIndex::Vertices as u64,
             Some(&self.unit_vertices),
@@ -1362,7 +1798,7 @@ impl MetalRenderer {
         instance_buffer: &mut InstanceBuffer,
         instance_offset: &mut usize,
         viewport_size: Size<DevicePixels>,
-        drawable: &metal::MetalDrawableRef,
+        target_texture: &metal::TextureRef,
         command_buffer: &metal::CommandBufferRef,
     ) -> bool {
         if blurs.is_empty() {
@@ -1466,7 +1902,7 @@ impl MetalRenderer {
                 );
                 encoder.set_fragment_texture(
                     BackdropBlurInputIndex::InputTexture as u64,
-                    Some(drawable.texture()),
+                    Some(target_texture),
                 );
                 encoder.draw_primitives_instanced(metal::MTLPrimitiveType::Triangle, 0, 6, 1);
                 encoder.end_encoding();
@@ -1479,7 +1915,7 @@ impl MetalRenderer {
                     .color_attachments()
                     .object_at(0)
                     .unwrap();
-                color_attachment.set_texture(Some(drawable.texture()));
+                color_attachment.set_texture(Some(target_texture));
                 color_attachment.set_load_action(metal::MTLLoadAction::Load);
                 color_attachment.set_store_action(metal::MTLStoreAction::Store);
                 let encoder =
@@ -1539,8 +1975,9 @@ impl MetalRenderer {
 
 fn new_command_encoder<'a>(
     command_buffer: &'a metal::CommandBufferRef,
-    drawable: &'a metal::MetalDrawableRef,
+    target_texture: &'a metal::TextureRef,
     viewport_size: Size<DevicePixels>,
+    scissor: Option<MTLScissorRect>,
     configure_color_attachment: impl Fn(&RenderPassColorAttachmentDescriptorRef),
 ) -> &'a metal::RenderCommandEncoderRef {
     let render_pass_descriptor = metal::RenderPassDescriptor::new();
@@ -1548,7 +1985,7 @@ fn new_command_encoder<'a>(
         .color_attachments()
         .object_at(0)
         .unwrap();
-    color_attachment.set_texture(Some(drawable.texture()));
+    color_attachment.set_texture(Some(target_texture));
     color_attachment.set_store_action(metal::MTLStoreAction::Store);
     configure_color_attachment(color_attachment);
 
@@ -1561,6 +1998,9 @@ fn new_command_encoder<'a>(
         znear: 0.0,
         zfar: 1.0,
     });
+    if let Some(scissor) = scissor {
+        command_encoder.set_scissor_rect(scissor);
+    }
     command_encoder
 }
 
@@ -1571,6 +2011,26 @@ fn build_pipeline_state(
     vertex_fn_name: &str,
     fragment_fn_name: &str,
     pixel_format: metal::MTLPixelFormat,
+) -> metal::RenderPipelineState {
+    build_pipeline_state_with_blending(
+        device,
+        library,
+        label,
+        vertex_fn_name,
+        fragment_fn_name,
+        pixel_format,
+        true,
+    )
+}
+
+fn build_pipeline_state_with_blending(
+    device: &metal::DeviceRef,
+    library: &metal::LibraryRef,
+    label: &str,
+    vertex_fn_name: &str,
+    fragment_fn_name: &str,
+    pixel_format: metal::MTLPixelFormat,
+    blending: bool,
 ) -> metal::RenderPipelineState {
     let vertex_fn = library
         .get_function(vertex_fn_name, None)
@@ -1585,7 +2045,7 @@ fn build_pipeline_state(
     descriptor.set_fragment_function(Some(fragment_fn.as_ref()));
     let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
     color_attachment.set_pixel_format(pixel_format);
-    color_attachment.set_blending_enabled(true);
+    color_attachment.set_blending_enabled(blending);
     color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
     color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
     color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::SourceAlpha);

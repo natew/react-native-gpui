@@ -867,6 +867,10 @@ impl Background {
         self.tag == BackgroundTag::Smoke
     }
 
+    pub(crate) fn is_opaque_solid(&self) -> bool {
+        self.tag == BackgroundTag::Solid && self.solid.a >= 0.999
+    }
+
     /// Stamp the animation time (seconds) for a smoke background — called at paint,
     /// each frame, so the shader animates without any global uniform.
     pub fn with_time(mut self, seconds: f32) -> Self {

@@ -2882,6 +2882,34 @@ impl Window {
         result
     }
 
+    /// Stamp renderer-owned content identity for this frame. Platform compositors use this
+    /// to distinguish a pure native scroll from a concurrent content mutation.
+    pub fn set_scene_content_epoch(&mut self, epoch: u64) {
+        self.invalidator.debug_assert_paint();
+        self.next_frame.scene.set_content_epoch(epoch);
+    }
+
+    /// Describe a scroll viewport and its absolute content offset in the scene. The macOS
+    /// compositor may reuse retained pixels only when the content epoch is unchanged.
+    pub fn with_scroll_region<R>(
+        &mut self,
+        id: u64,
+        bounds: Bounds<Pixels>,
+        offset: Point<Pixels>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint();
+        let scale_factor = self.scale_factor();
+        self.next_frame.scene.begin_scroll_region(
+            id,
+            bounds.scale(scale_factor),
+            offset.scale(scale_factor),
+        );
+        let result = f(self);
+        self.next_frame.scene.end_scroll_region();
+        result
+    }
+
     /// Paint one or more drop shadows into the scene for the next frame at the current z-index.
     ///
     /// This method should only be called as part of the paint phase of element drawing.

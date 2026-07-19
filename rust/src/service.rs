@@ -797,11 +797,16 @@ fn accumulate_pending_root_paint_only(
 struct FrameMarker {
     child: AnyElement,
     input: Option<PaintedInputSnapshot>,
+    content_epoch: u64,
 }
 
 impl FrameMarker {
-    fn new(child: AnyElement, input: Option<PaintedInputSnapshot>) -> Self {
-        Self { child, input }
+    fn new(child: AnyElement, input: Option<PaintedInputSnapshot>, content_epoch: u64) -> Self {
+        Self {
+            child,
+            input,
+            content_epoch,
+        }
     }
 }
 
@@ -865,6 +870,7 @@ impl Element for FrameMarker {
         window: &mut Window,
         cx: &mut App,
     ) {
+        window.set_scene_content_epoch(self.content_epoch);
         self.child.paint(window, cx);
         bridge::flush_layout_frame();
         let frame = anim_trace::on_frame_painted();
@@ -1986,6 +1992,7 @@ impl Render for ServiceApp {
         FrameMarker::new(
             frame.into_any_element(),
             TRACE_PAINTED_INPUT.then(|| self.input_snapshot_for_paint(cx)),
+            crate::anim_overlay::mutation_epoch(),
         )
     }
 }
@@ -2400,6 +2407,7 @@ fn schedule_debug_native_driver_sequence(
             schedule_debug_native_driver_sequence(window, state.clone());
         }
     });
+    crate::anim_overlay::arm_paint_only_frame();
     window.refresh();
 }
 
@@ -4119,14 +4127,16 @@ fn main() {
                     } => {
                         let proof = window_handle
                             .update(cx, |_root, window, _cx| {
-                                elements::native_scroll::native_scroll_proof(
+                                let proof = elements::native_scroll::native_scroll_proof(
                                     window,
                                     x as f64,
                                     y as f64,
                                     dy as f64,
                                     &phase,
                                     &momentum_phase,
-                                )
+                                );
+                                crate::anim_overlay::arm_paint_only_frame();
+                                proof
                             })
                             .ok();
                         let _ = reply.send(serde_json::json!({
@@ -4451,6 +4461,7 @@ fn main() {
                                 this.root_lifecycle_dirty |= lifecycle_changed;
                                 this.tree_metadata = next_metadata;
                                 this.root = next_root;
+                                crate::anim_overlay::mark_content_mutation();
                                 this.root_dirty = true;
                                 this.write_debug_dump(cx);
                                 let debugged_at = std::time::Instant::now();

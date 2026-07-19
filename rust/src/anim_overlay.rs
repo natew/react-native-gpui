@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use once_cell::sync::Lazy;
 use serde_json::Value;
@@ -50,6 +50,15 @@ static OVERLAY: Lazy<Mutex<HashMap<u64, OverlayEntry>>> = Lazy::new(|| Mutex::ne
 /// common case (a static frame). All accesses are on the main thread (apply_ops runs on
 /// the pump; the reads run during paint), so a relaxed mirror is exact.
 static OVERLAY_COUNT: AtomicUsize = AtomicUsize::new(0);
+static MUTATION_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+pub fn mutation_epoch() -> u64 {
+    MUTATION_EPOCH.load(Ordering::Relaxed)
+}
+
+pub fn mark_content_mutation() {
+    MUTATION_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
 
 /// globalId → (overlay rev, committed-style identity, built style) for the last merge.
 /// A STEADY overlay (e.g. Tamagui's avoidReRenders hover path leaves a permanent entry
@@ -286,6 +295,9 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
         PAINT_ONLY_FRAME.store(false, std::sync::atomic::Ordering::Relaxed);
     }
     OVERLAY_COUNT.store(overlay.len(), Ordering::Relaxed);
+    if changed {
+        mark_content_mutation();
+    }
     changed
 }
 

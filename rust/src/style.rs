@@ -69,6 +69,8 @@ pub struct ElementStyle {
     pub max_width: Option<Dim>,
     pub min_height: Option<Dim>,
     pub max_height: Option<Dim>,
+    // width/height ratio (RN aspectRatio); taffy computes the missing dimension.
+    pub aspect_ratio: Option<f32>,
 
     // Flexbox
     pub flex: Option<f32>,
@@ -250,6 +252,7 @@ impl ElementStyle {
         f!(line_height, "lineHeight");
         f!(letter_spacing, "letterSpacing");
         f!(opacity, "opacity");
+        f!(aspect_ratio, "aspectRatio");
         f!(edge_fade_top, "edgeFadeTop");
         f!(edge_fade_bottom, "edgeFadeBottom");
 
@@ -375,6 +378,15 @@ impl ElementStyle {
         }
         if let Some(mh) = self.max_height {
             style.max_size.height = bb(mh, pad_v);
+        }
+
+        // aspectRatio (RN): taffy derives the unset dimension from the set one. The
+        // gpui->taffy conversion already forwards `aspect_ratio` (taffy.rs); it was
+        // just never populated from the JS style, so `aspectRatio` was a silent no-op.
+        if let Some(ratio) = self.aspect_ratio {
+            if ratio.is_finite() && ratio > 0.0 {
+                style.aspect_ratio = Some(ratio);
+            }
         }
 
         // Flexbox — RN's `flex: <n>` shorthand expands first, so an explicit

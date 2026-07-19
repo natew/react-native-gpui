@@ -66,7 +66,16 @@ export interface Container {
     children: Array<Instance | TextInstance>;
 }
 
-let commit: ((tree: SerializedNode) => void) | null = null;
+export type ReconcilerCommitDiagnostics = {
+    mutationMs: number;
+    serializeMs: number;
+    updates: number;
+    creates: number;
+    serializeHits: number;
+    serializeMisses: number;
+};
+
+let commit: ((tree: SerializedNode, diagnostics?: ReconcilerCommitDiagnostics) => void) | null = null;
 let currentContainer: Container | null = null;
 const measuredIds = new Set<number>();
 const layouts = new Map<number, LayoutRect>();
@@ -99,10 +108,20 @@ const PORTAL_VIEW_TYPE = "RNTPortalView";
 const isPortalType = (type: string) => type === PORTAL_HOST_TYPE || type === PORTAL_VIEW_TYPE;
 // diagnostic: cache hit/miss per commit (RNGPUI_SERIALIZE_TRACE=1)
 const SERIALIZE_TRACE = typeof process !== "undefined" && !!process.env?.RNGPUI_SERIALIZE_TRACE;
+const COMMIT_TRACE = typeof process !== "undefined" && !!process.env?.RNGPUI_COMMIT_TRACE;
+const TRACK_COMMIT = SERIALIZE_TRACE || COMMIT_TRACE;
 let serHit = 0;
 let serMiss = 0;
 let commitUpdates = 0;
 let creates = 0;
+let commitStartedAt = 0;
+let lastSerializeDiagnostics: Omit<ReconcilerCommitDiagnostics, "mutationMs"> = {
+    serializeMs: 0,
+    updates: 0,
+    creates: 0,
+    serializeHits: 0,
+    serializeMisses: 0,
+};
 const serMissByGroup: Record<string, number> = {};
 
 // Serialized output bakes in values that depend on global state outside props —
@@ -286,7 +305,9 @@ function chainHandler(first: Function | undefined, next: Function) {
 // native signal changes a node's serialized output (e.g. a measured layout grants the
 // 'layout' event). hover/press no longer take this path; they're resolved natively in the host.
 function requestRecommit() {
-    if (commit && currentContainer) commit(serializeContainer(currentContainer));
+    if (!commit || !currentContainer) return;
+    const tree = serializeContainer(currentContainer);
+    commit(tree, { mutationMs: 0, ...lastSerializeDiagnostics });
 }
 
 /** The platform driver opts a node into (or out of) the renderer→JS pseudo lane by
@@ -1023,10 +1044,10 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
     // style/object work. `cached` is only ever set for non-portal nodes, so this
     // never returns stale portal content.
     if (!inst.dirty && inst.cached !== undefined && inst.cachedListGroup === inheritedListGroup) {
-        if (SERIALIZE_TRACE) serHit++;
+        if (TRACK_COMMIT) serHit++;
         return inst.cached;
     }
-    if (SERIALIZE_TRACE) serMiss++;
+    if (TRACK_COMMIT) serMiss++;
     const previousCached = inst.cached;
 
     const props = inst.props;
@@ -1276,16 +1297,19 @@ function imageSource(source: unknown): string | undefined {
 }
 
 export function serializeContainer(c: Container): SerializedNode {
+    const startedAt = TRACK_COMMIT ? performance.now() : 0;
     currentContainer = c;
     // commitUpdate/createInstance fire during the React commit phase BEFORE this
     // serialize runs, so capture them now, then reset for the next commit.
     const updThisCommit = commitUpdates;
     const creThisCommit = creates;
-    if (SERIALIZE_TRACE) {
+    if (TRACK_COMMIT) {
         serHit = 0;
         serMiss = 0;
         commitUpdates = 0;
         creates = 0;
+    }
+    if (SERIALIZE_TRACE) {
         for (const k of Object.keys(serMissByGroup)) delete serMissByGroup[k];
     }
     const byHost = new Map<string, Instance[]>();
@@ -1306,10 +1330,19 @@ export function serializeContainer(c: Container): SerializedNode {
             .join(" ");
         console.error(`[ser] updates=${updThisCommit} creates=${creThisCommit} miss=${serMiss} hit=${serHit} | ${groups}`);
     }
+    if (TRACK_COMMIT) {
+        lastSerializeDiagnostics = {
+            serializeMs: performance.now() - startedAt,
+            updates: updThisCommit,
+            creates: creThisCommit,
+            serializeHits: serHit,
+            serializeMisses: serMiss,
+        };
+    }
     return root;
 }
 
-export function setCommitSink(fn: (tree: SerializedNode) => void) {
+export function setCommitSink(fn: (tree: SerializedNode, diagnostics?: ReconcilerCommitDiagnostics) => void) {
     commit = fn;
 }
 
@@ -1331,7 +1364,7 @@ const hostConfig: any = {
     scheduleMicrotask: queueMicrotask,
 
     createInstance(type: string, props: Record<string, unknown>): Instance {
-        if (SERIALIZE_TRACE) creates++;
+        if (TRACK_COMMIT) creates++;
         const inst = createPublicInstance(type, props);
         registerHandlers(inst.id, props);
         return inst;
@@ -1402,7 +1435,7 @@ const hostConfig: any = {
             instance.layoutDirty = true;
             markSerializeDirty(instance);
         }
-        if (SERIALIZE_TRACE) commitUpdates++;
+        if (TRACK_COMMIT) commitUpdates++;
     },
     commitTextUpdate(textInstance: TextInstance, _old: string, next: string) {
         textInstance.text = next;
@@ -1432,9 +1465,20 @@ const hostConfig: any = {
     getPublicInstance: (i: Instance) => i,
     getRootHostContext: () => ({}),
     getChildHostContext: () => ({}),
-    prepareForCommit: () => null,
+    prepareForCommit() {
+        if (TRACK_COMMIT) commitStartedAt = performance.now();
+        return null;
+    },
     resetAfterCommit(container: Container) {
-        if (commit) commit(serializeContainer(container));
+        if (!commit) return;
+        const serializeStartedAt = TRACK_COMMIT ? performance.now() : 0;
+        const tree = serializeContainer(container);
+        commit(tree, TRACK_COMMIT
+            ? {
+                  mutationMs: Math.max(0, serializeStartedAt - commitStartedAt),
+                  ...lastSerializeDiagnostics,
+              }
+            : undefined);
     },
     preparePortalMount: () => {},
     clearContainer(container: Container) {

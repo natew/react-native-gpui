@@ -157,17 +157,25 @@ export type BridgeEvent =
       };
 
 export interface Bridge {
-    update(tree: SerializedNode): void;
+    initialUpdate: BridgeUpdateDiagnostics;
+    update(tree: SerializedNode): BridgeUpdateDiagnostics;
     /** send an imperative command (host → frame), e.g. a WebView eval/reload */
     command(cmd: object): void;
     onEvent(cb: (e: BridgeEvent) => void): void;
     close(): void;
 }
 
+export type BridgeUpdateDiagnostics = {
+    bytes: number;
+    stringifyMs: number;
+};
+
 export interface BridgeOptions {
     /** Enables the native Option-key element inspector in the host. */
     inspector?: boolean;
 }
+
+const COMMIT_TRACE = typeof process !== "undefined" && !!process.env?.RNGPUI_COMMIT_TRACE;
 
 // host fns installed by the Rust host before this bundle is evaluated.
 declare const __rngpui_applyTree: (json: string) => void;
@@ -215,17 +223,22 @@ export function startBridge(initial: SerializedNode, options: BridgeOptions = {}
         else run();
     };
 
-    const send = (obj: object) => {
-        __rngpui_applyTree(JSON.stringify(obj));
+    const send = (obj: object): BridgeUpdateDiagnostics => {
+        const startedAt = COMMIT_TRACE ? performance.now() : 0;
+        const json = JSON.stringify(obj);
+        const stringifyMs = COMMIT_TRACE ? performance.now() - startedAt : 0;
+        __rngpui_applyTree(json);
+        return { bytes: json.length, stringifyMs };
     };
 
     // push the first tree during bundle evaluation so the native host can size the window.
-    send(initial);
+    const initialUpdate = send(initial);
     if (options.inspector) {
         send({ $cmd: "inspector", enabled: true });
     }
 
     return {
+        initialUpdate,
         update: send,
         command: send,
         onEvent: (cb) => listeners.push(cb),

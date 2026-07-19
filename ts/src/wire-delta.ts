@@ -13,9 +13,15 @@ let nextSourceId = 1;
 // path + cheap refs. `sent` is a WeakSet of the exact objects the host currently holds
 // (per root); membership tests the CURRENT cached object, so a changed node (new object)
 // is never a false ref. The root is always a fresh object, so it's always sent in full.
-export function toWireDelta(node: SerializedNode, sent: WeakSet<SerializedNode>): SerializedNode {
+export type WireDeltaStats = { refs: number; full: number };
+
+export function toWireDelta(
+    node: SerializedNode,
+    sent: WeakSet<SerializedNode>,
+    stats?: WireDeltaStats,
+): SerializedNode {
     const sources: Record<string, string> = {};
-    const wire = toWireDeltaInner(node, sent, sources);
+    const wire = toWireDeltaInner(node, sent, sources, stats);
     return Object.keys(sources).length > 0 ? { ...wire, sources } : wire;
 }
 
@@ -23,12 +29,19 @@ function toWireDeltaInner(
     node: SerializedNode,
     sent: WeakSet<SerializedNode>,
     sources: Record<string, string>,
+    stats?: WireDeltaStats,
 ): SerializedNode {
-    if (sent.has(node)) return { globalId: node.globalId, ref: true };
+    if (sent.has(node)) {
+        if (stats) stats.refs++;
+        return { globalId: node.globalId, ref: true };
+    }
+    if (stats) stats.full++;
     sent.add(node);
     const source = node.source;
     const kids = node.children;
-    let wire = kids?.length ? { ...node, children: kids.map((kid) => toWireDeltaInner(kid, sent, sources)) } : node;
+    let wire = kids?.length
+        ? { ...node, children: kids.map((kid) => toWireDeltaInner(kid, sent, sources, stats)) }
+        : node;
     if (source) {
         const match = /^(.*):(\d+):(\d+)$/.exec(source);
         if (!match) throw new Error(`invalid rngsSource location: ${source}`);

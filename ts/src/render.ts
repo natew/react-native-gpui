@@ -5,9 +5,16 @@
  */
 import { createElement, type ReactElement, type ComponentType } from "react";
 import { isHotUpdateEvaluating } from "./refresh";
-import Reconciler, { setCommitSink, serializeContainer, invalidateSerializeCaches, dispatchEvent, type Container } from "./reconciler";
+import Reconciler, {
+    setCommitSink,
+    serializeContainer,
+    invalidateSerializeCaches,
+    dispatchEvent,
+    type Container,
+    type ReconcilerCommitDiagnostics,
+} from "./reconciler";
 import { setEventBatcher, startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type SerializedNode } from "./runtime";
-import { toWireDelta } from "./wire-delta";
+import { toWireDelta, type WireDeltaStats } from "./wire-delta";
 
 // coalesced event batches (resize/layout/scroll floods) dispatch inside one React update so
 // a window resize produces one re-render per batch instead of one per event.
@@ -19,6 +26,7 @@ import { dispatchPseudo } from "./platform-driver";
 
 const EMPTY_NODES: ReadonlyArray<SerializedNode> = [];
 const EMPTY_STYLE: Readonly<Record<string, unknown>> = {};
+const COMMIT_TRACE = typeof process !== "undefined" && !!process.env?.RNGPUI_COMMIT_TRACE;
 
 export type DevtoolsOptions = {
     /** hold Option to inspect native GPUI nodes; Option-click copies a node snapshot. */
@@ -84,18 +92,38 @@ export function createRoot(options: RootOptions = {}): Root {
         for (const k of ak) if ((as as Record<string, unknown>)[k] !== (bs as Record<string, unknown>)[k]) return false;
         return true;
     };
-    const pushTree = (tree: SerializedNode) => {
+    const pushTree = (tree: SerializedNode, diagnostics?: ReconcilerCommitDiagnostics) => {
+        const bridgeStartedAt = COMMIT_TRACE ? performance.now() : 0;
         // sameTree compares the MEMOIZED tree (cheap O(top-children) ref check) to skip
         // no-op commits entirely; toWireDelta runs only when we actually send, and lastTree
         // stays the memoized tree so the next sameTree/delta sees real object identity.
         if (!bridge) {
-            bridge = startBridge(toWireDelta(tree, sentNodes), bridgeOptions);
+            const wireStats: WireDeltaStats | undefined = COMMIT_TRACE ? { refs: 0, full: 0 } : undefined;
+            const deltaStartedAt = COMMIT_TRACE ? performance.now() : 0;
+            const wire = toWireDelta(tree, sentNodes, wireStats);
+            const deltaMs = COMMIT_TRACE ? performance.now() - deltaStartedAt : 0;
+            bridge = startBridge(wire, bridgeOptions);
             bridge.onEvent(handleEvent);
             lastTree = tree;
+            if (COMMIT_TRACE) {
+                console.error(
+                    `[commit] mutation=${(diagnostics?.mutationMs ?? 0).toFixed(2)} serialize=${(diagnostics?.serializeMs ?? 0).toFixed(2)} delta=${deltaMs.toFixed(2)} stringify=${bridge.initialUpdate.stringifyMs.toFixed(2)} bridge=${(performance.now() - bridgeStartedAt).toFixed(2)} bytes=${bridge.initialUpdate.bytes} updates=${diagnostics?.updates ?? 0} creates=${diagnostics?.creates ?? 0} miss=${diagnostics?.serializeMisses ?? 0} hit=${diagnostics?.serializeHits ?? 0} full=${wireStats?.full ?? 0} refs=${wireStats?.refs ?? 0} initial=1`,
+                );
+            }
             return;
         }
-        if (lastTree && sameTree(tree, lastTree)) return;
-        const wire = toWireDelta(tree, sentNodes);
+        if (lastTree && sameTree(tree, lastTree)) {
+            if (COMMIT_TRACE) {
+                console.error(
+                    `[commit] mutation=${(diagnostics?.mutationMs ?? 0).toFixed(2)} serialize=${(diagnostics?.serializeMs ?? 0).toFixed(2)} delta=0.00 stringify=0.00 bridge=${(performance.now() - bridgeStartedAt).toFixed(2)} bytes=0 updates=${diagnostics?.updates ?? 0} creates=${diagnostics?.creates ?? 0} miss=${diagnostics?.serializeMisses ?? 0} hit=${diagnostics?.serializeHits ?? 0} full=0 refs=0 skipped=1`,
+                );
+            }
+            return;
+        }
+        const wireStats: WireDeltaStats | undefined = COMMIT_TRACE ? { refs: 0, full: 0 } : undefined;
+        const deltaStartedAt = COMMIT_TRACE ? performance.now() : 0;
+        const wire = toWireDelta(tree, sentNodes, wireStats);
+        const deltaMs = COMMIT_TRACE ? performance.now() - deltaStartedAt : 0;
         if (typeof process !== "undefined" && process.env?.RNGPUI_WIRE_TRACE) {
             // diagnostic: how much of the wire crossed as refs vs full nodes —
             // pairs with RNGPUI_SERIALIZE_TRACE to localize delta regressions
@@ -113,8 +141,13 @@ export function createRoot(options: RootOptions = {}): Root {
             count(wire);
             console.error(`[wire] refs=${refs} full=${full}`);
         }
-        bridge.update(wire);
+        const update = bridge.update(wire);
         lastTree = tree;
+        if (COMMIT_TRACE) {
+            console.error(
+                `[commit] mutation=${(diagnostics?.mutationMs ?? 0).toFixed(2)} serialize=${(diagnostics?.serializeMs ?? 0).toFixed(2)} delta=${deltaMs.toFixed(2)} stringify=${update.stringifyMs.toFixed(2)} bridge=${(performance.now() - bridgeStartedAt).toFixed(2)} bytes=${update.bytes} updates=${diagnostics?.updates ?? 0} creates=${diagnostics?.creates ?? 0} miss=${diagnostics?.serializeMisses ?? 0} hit=${diagnostics?.serializeHits ?? 0} full=${wireStats?.full ?? 0} refs=${wireStats?.refs ?? 0}`,
+            );
+        }
     };
 
     const handleEvent = (e: BridgeEvent) => {
@@ -177,8 +210,8 @@ export function createRoot(options: RootOptions = {}): Root {
     };
 
     // The reconciler calls this after every commit with the serialized tree.
-    setCommitSink((tree: SerializedNode) => {
-        pushTree(tree);
+    setCommitSink((tree: SerializedNode, diagnostics?: ReconcilerCommitDiagnostics) => {
+        pushTree(tree, diagnostics);
     });
     setAppearanceUpdateSink(() => {
         // the scheme changed: every cached serialization may hold stale

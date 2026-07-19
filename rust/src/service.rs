@@ -738,6 +738,7 @@ fn root_theme_mode(root: &ReactElement) -> ThemeMode {
 
 struct ServiceApp {
     root: Arc<ReactElement>,
+    tree_metadata: TreeMetadata,
     // the app-level focus anchor. tracked by the root frame div so the key-dispatch
     // path always includes the frame's "App" key context: gpui matches context-gated
     // bindings against the focused node's dispatch path, and with NO focus the path is
@@ -745,13 +746,14 @@ struct ServiceApp {
     // for pure negations like "!Input". render() re-focuses this whenever the window
     // has no focus (startup, input blur), so negation-gated app bindings always work.
     app_focus: gpui::FocusHandle,
-    // true when `root` changed since the last full render. The per-frame `render` only
-    // re-walks the tree for the input/webview/system/ax/layout lifecycle when this is set
-    // — an overlay-only animation frame (`SetNodeStyle`) leaves `root` untouched, so it
-    // skips all those whole-tree walks AND the native WebView repositioning that otherwise
-    // ran on EVERY animation frame and pinned the main thread on-screen (the freeze). The
-    // element tree itself still rebuilds each frame (it reads the live overlay).
+    // true when `root` changed since the last render. native lifecycle state is derived
+    // once into `tree_metadata` when the tree arrives; paint-only commits can skip the
+    // input/webview/accessibility lifecycle while the element tree still repaints.
     root_dirty: bool,
+    // controlled input values are geometry-stable but still need native reconciliation.
+    // metadata comparison keeps that lifecycle work while paint-only terminal/style commits
+    // skip it.
+    root_lifecycle_dirty: bool,
     // true only when the pending React tree is structurally identical and changed
     // paint keys exclusively. This distinguishes it from a later paint-only overlay
     // that may have coalesced with a geometry-changing React commit.
@@ -1093,6 +1095,7 @@ impl ServiceApp {
     }
 }
 
+#[derive(Clone, PartialEq)]
 struct InputSpec {
     id: u64,
     placeholder: String,
@@ -1103,6 +1106,70 @@ struct InputSpec {
     auto_focus: bool,
     editable: bool,
     most_recent_event_count: u64,
+}
+
+#[derive(Clone, PartialEq)]
+struct WebViewSpec {
+    id: u64,
+    content: String,
+    is_html: bool,
+    hidden: bool,
+}
+
+#[derive(PartialEq)]
+struct LayoutSpec {
+    id: u64,
+    width: Option<f32>,
+    height: Option<f32>,
+}
+
+#[derive(Default, PartialEq)]
+struct TreeMetadata {
+    node_ids: HashSet<u64>,
+    native_layout_keys: HashSet<String>,
+    layout_ids: HashSet<u64>,
+    layout_specs: Vec<LayoutSpec>,
+    input_ids: HashSet<u64>,
+    inputs: Vec<InputSpec>,
+    webview_ids: HashSet<u64>,
+    webviews: Vec<WebViewSpec>,
+    system_ids: HashSet<u64>,
+    native_control_ids: HashSet<u64>,
+    scroll_ids: HashSet<u64>,
+}
+
+impl TreeMetadata {
+    fn collect(root: &Arc<ReactElement>) -> Self {
+        let mut metadata = Self::default();
+        collect_tree_metadata(root, false, &mut metadata);
+        metadata
+    }
+
+    fn retain_native_state(&self) {
+        bridge::retain_layout(&self.node_ids);
+        crate::anim_overlay::retain(&self.node_ids);
+        crate::anim_overlay_tween::retain(&self.node_ids);
+        crate::inspector::retain_sources(&self.node_ids);
+        elements::retain_pointer_state(&self.node_ids);
+        elements::retain_presentations(&self.node_ids);
+        elements::retain_native_layout_keys(&self.native_layout_keys);
+        bridge::emit_cached_layout_for_new_subscribers(&self.layout_ids);
+        elements::system::retain_system_views(&self.system_ids);
+        elements::native_control::retain_native_controls(&self.native_control_ids);
+        elements::retain_scroll_state(&self.scroll_ids);
+        elements::native_scroll::retain_drivers(&self.scroll_ids);
+
+        for spec in &self.layout_specs {
+            if let Some((x, y, cached_w, cached_h)) = bridge::cached_layout(spec.id) {
+                let width = spec.width.unwrap_or(cached_w);
+                let height = spec.height.unwrap_or(cached_h);
+                if (width - cached_w).abs() > 0.5 || (height - cached_h).abs() > 0.5 {
+                    bridge::remember_layout(spec.id, x, y, width, height);
+                    bridge::emit_layout(spec.id, x, y, width, height);
+                }
+            }
+        }
+    }
 }
 
 fn schedule_inspector_activation(cx: &mut Context<ServiceApp>, token: u64) {
@@ -1153,27 +1220,6 @@ fn schedule_inspector_menu_close(cx: &mut Context<ServiceApp>, token: u64) {
         }
     })
     .detach();
-}
-
-/// collect the native state inputs for every text-input node in the tree.
-fn collect_inputs(el: &Arc<ReactElement>, out: &mut Vec<InputSpec>) {
-    if el.element_type == "textinput" || el.element_type == "textarea" {
-        let multiline = el.element_type == "textarea";
-        out.push(InputSpec {
-            id: el.global_id,
-            placeholder: el.text.clone().unwrap_or_default(),
-            value: el.value.clone(),
-            default_value: el.default_value.clone(),
-            multiline,
-            secure: el.secure_text_entry && !multiline,
-            auto_focus: el.auto_focus,
-            editable: el.editable,
-            most_recent_event_count: el.most_recent_event_count,
-        });
-    }
-    for c in &el.children {
-        collect_inputs(c, out);
-    }
 }
 
 fn position_for_byte_offset(text: &str, byte_offset: usize) -> Position {
@@ -1243,61 +1289,66 @@ fn consume_suppressed_input_change(
     true
 }
 
-/// Collect (id, content, is_html, hidden) for every webview node. Prefers a `src` uri;
-/// falls back to inline html carried in `text`.
-fn collect_webviews(
-    el: &Arc<ReactElement>,
-    inherited_hidden: bool,
-    out: &mut Vec<(u64, String, bool, bool)>,
-) {
+fn collect_tree_metadata(el: &Arc<ReactElement>, inherited_hidden: bool, out: &mut TreeMetadata) {
+    out.node_ids.insert(el.global_id);
+    if let Some(key) = el.native_layout_key.as_ref() {
+        out.native_layout_keys.insert(key.clone());
+    }
+    if el.listens("layout") {
+        out.layout_ids.insert(el.global_id);
+        out.layout_specs.push(LayoutSpec {
+            id: el.global_id,
+            width: el.style.width.and_then(Dim::as_px),
+            height: el.style.height.and_then(Dim::as_px),
+        });
+    }
+    if el.element_type == "textinput" || el.element_type == "textarea" {
+        let multiline = el.element_type == "textarea";
+        out.input_ids.insert(el.global_id);
+        out.inputs.push(InputSpec {
+            id: el.global_id,
+            placeholder: el.text.clone().unwrap_or_default(),
+            value: el.value.clone(),
+            default_value: el.default_value.clone(),
+            multiline,
+            secure: el.secure_text_entry && !multiline,
+            auto_focus: el.auto_focus,
+            editable: el.editable,
+            most_recent_event_count: el.most_recent_event_count,
+        });
+    }
+
     let hidden = inherited_hidden || el.style.is_display_none();
     if el.element_type == "webview" {
         if let Some(uri) = el.src.clone() {
-            out.push((el.global_id, uri, false, hidden));
+            out.webview_ids.insert(el.global_id);
+            out.webviews.push(WebViewSpec {
+                id: el.global_id,
+                content: uri,
+                is_html: false,
+                hidden,
+            });
         } else if let Some(html) = el.text.clone() {
-            out.push((el.global_id, html, true, hidden));
+            out.webview_ids.insert(el.global_id);
+            out.webviews.push(WebViewSpec {
+                id: el.global_id,
+                content: html,
+                is_html: true,
+                hidden,
+            });
         }
     }
-    for c in &el.children {
-        collect_webviews(c, hidden, out);
-    }
-}
-
-/// Collect ids of every `<SystemView>` node, to tear down native views for absent ones.
-fn collect_system_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
     if el.element_type == "system" {
-        out.insert(el.global_id);
+        out.system_ids.insert(el.global_id);
     }
-    for c in &el.children {
-        collect_system_ids(c, out);
-    }
-}
-
-fn collect_native_control_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
     if el.element_type == "nativebutton" || el.element_type == "nativeinput" {
-        out.insert(el.global_id);
+        out.native_control_ids.insert(el.global_id);
     }
-    for c in &el.children {
-        collect_native_control_ids(c, out);
-    }
-}
-
-fn collect_scroll_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
     if matches!(el.style.overflow.as_deref(), Some("scroll") | Some("auto")) {
-        out.insert(el.global_id);
+        out.scroll_ids.insert(el.global_id);
     }
     for c in &el.children {
-        collect_scroll_ids(c, out);
-    }
-}
-
-/// Collect ids of every node that listens for onLayout, to GC stale dedup state.
-fn collect_layout_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
-    if el.listens("layout") {
-        out.insert(el.global_id);
-    }
-    for c in &el.children {
-        collect_layout_ids(c, out);
+        collect_tree_metadata(c, hidden, out);
     }
 }
 
@@ -1335,38 +1386,6 @@ fn effective_appearance_scheme(appearance: gpui::WindowAppearance) -> &'static s
         Some(ThemeMode::Dark) => "dark",
         Some(ThemeMode::Light) => "light",
         None => appearance_scheme(appearance),
-    }
-}
-
-fn emit_definite_cached_layouts(el: &Arc<ReactElement>) {
-    if el.listens("layout") {
-        if let Some((x, y, cached_w, cached_h)) = bridge::cached_layout(el.global_id) {
-            let width = el.style.width.and_then(Dim::as_px).unwrap_or(cached_w);
-            let height = el.style.height.and_then(Dim::as_px).unwrap_or(cached_h);
-            if (width - cached_w).abs() > 0.5 || (height - cached_h).abs() > 0.5 {
-                bridge::remember_layout(el.global_id, x, y, width, height);
-                bridge::emit_layout(el.global_id, x, y, width, height);
-            }
-        }
-    }
-    for c in &el.children {
-        emit_definite_cached_layouts(c);
-    }
-}
-
-fn collect_node_ids(el: &Arc<ReactElement>, out: &mut HashSet<u64>) {
-    out.insert(el.global_id);
-    for c in &el.children {
-        collect_node_ids(c, out);
-    }
-}
-
-fn collect_native_layout_keys(el: &Arc<ReactElement>, out: &mut HashSet<String>) {
-    if let Some(key) = el.native_layout_key.as_ref() {
-        out.insert(key.clone());
-    }
-    for c in &el.children {
-        collect_native_layout_keys(c, out);
     }
 }
 
@@ -1439,13 +1458,10 @@ impl Render for ServiceApp {
         }
 
         // ── tree-lifecycle work (gated on `root_dirty`) ──────────────────────────────
-        // All of this is a pure function of `self.root`: text-input entities, native
-        // WebView creation + REPOSITIONING, <SystemView> retention, a11y tree sync,
-        // layout-dedup GC. On an overlay-only animation frame (`SetNodeStyle`) `root` is
-        // unchanged, so re-running it every frame is wasted work — and `set_webviews`'
-        // per-frame WebView repositioning + the repeated whole-tree walks are what pinned
-        // the main thread on-screen during a multi-component spring (the freeze). Skip it
-        // unless the tree actually changed; the element renderers keep their last-set state.
+        // input/webview reconciliation and a11y sync are pure functions of `self.root` and
+        // its retained metadata. on an overlay-only animation frame (`SetNodeStyle`) `root`
+        // is unchanged, so re-running them every frame is wasted work. geometry-stable React
+        // commits skip them too unless controlled input metadata changed.
         // A worklet-driven layout change (pane resize) moved a yoga box this frame — run
         // the lifecycle so native WebViews reposition. take() it unconditionally so the
         // flag is consumed even when root_dirty already forces the lifecycle.
@@ -1497,26 +1513,26 @@ impl Render for ServiceApp {
             );
         }
 
-        if std::env::var_os("RNGPUI_RENDER_TRACE").is_some() {
+        let lifecycle_required = (self.root_dirty
+            && (!self.root_paint_only || self.root_lifecycle_dirty))
+            || render_gate_disabled()
+            || layout_dirty;
+        let render_trace = std::env::var_os("RNGPUI_RENDER_TRACE").is_some();
+        if render_trace {
             eprintln!(
                 "[render] root_dirty={} layout_dirty={} (lifecycle {})",
                 self.root_dirty,
                 layout_dirty,
-                if self.root_dirty || render_gate_disabled() || layout_dirty {
-                    "RUN"
-                } else {
-                    "SKIP"
-                }
+                if lifecycle_required { "RUN" } else { "SKIP" }
             );
         }
-        if self.root_dirty || render_gate_disabled() || layout_dirty {
+        if lifecycle_required {
             let lifecycle_t0 = std::time::Instant::now();
             // Ensure a persistent InputState entity exists for every text-input node,
             // subscribing once so edits stream back to JS as `changeText`, and observing
             // it so this view re-renders (and the edit shows) when the input changes.
-            let mut specs = Vec::new();
-            collect_inputs(&self.root, &mut specs);
-            let present: HashSet<u64> = specs.iter().map(|spec| spec.id).collect();
+            let specs = self.tree_metadata.inputs.clone();
+            let present = self.tree_metadata.input_ids.clone();
             if let Some(id) = self.focused_input
                 && !present.contains(&id)
             {
@@ -1714,15 +1730,21 @@ impl Render for ServiceApp {
                 }
             }
             elements::input::set_entities(self.inputs.clone());
+            let inputs_done = std::time::Instant::now();
 
             // Same lifecycle for <WebView>: create a native child view per id, then
             // let the element resize and load it once layout has real bounds.
-            let mut wv_specs = Vec::new();
-            collect_webviews(&self.root, false, &mut wv_specs);
-            let present_wv: HashSet<u64> = wv_specs.iter().map(|(id, _, _, _)| *id).collect();
+            let wv_specs = self.tree_metadata.webviews.clone();
+            let present_wv = self.tree_metadata.webview_ids.clone();
             self.webviews.retain(|id, _| present_wv.contains(id));
             let mut webview_content = HashMap::new();
-            for (id, content, is_html, hidden) in wv_specs {
+            for WebViewSpec {
+                id,
+                content,
+                is_html,
+                hidden,
+            } in wv_specs
+            {
                 webview_content.insert(
                     id,
                     WebViewContent {
@@ -1796,56 +1818,38 @@ impl Render for ServiceApp {
                 }
             }
             elements::webview::set_webviews(self.webviews.clone(), webview_content);
-
-            // Parallel lifecycle for <SystemView>: tear down the native surface/tint/shadow
-            // views for any id that left the tree (card closed/removed). The views themselves
-            // are created lazily in the element's prepaint, so retaining present ids is all
-            // we do here.
-            let mut system_ids = HashSet::new();
-            collect_system_ids(&self.root, &mut system_ids);
-            elements::system::retain_system_views(&system_ids);
-
-            // Parallel lifecycle for native AppKit controls (<NativeButton>/<NativeTextInput>):
-            // GC the NSButton/NSTextField views for any id that left the tree. The views are
-            // created lazily in the element's prepaint, so retaining present ids is all we do.
-            let mut native_control_ids = HashSet::new();
-            collect_native_control_ids(&self.root, &mut native_control_ids);
-            elements::native_control::retain_native_controls(&native_control_ids);
-
-            let mut scroll_ids = HashSet::new();
-            collect_scroll_ids(&self.root, &mut scroll_ids);
-            elements::retain_scroll_state(&scroll_ids);
-            elements::native_scroll::retain_drivers(&scroll_ids);
+            let webviews_done = std::time::Instant::now();
 
             if self.inspector.enabled() {
                 inspector::refresh_snapshot_cache(&self.root);
             }
-
-            // GC layout-dedup and pointer state for nodes that left the tree.
-            let mut node_ids = HashSet::new();
-            collect_node_ids(&self.root, &mut node_ids);
-            bridge::retain_layout(&node_ids);
-            elements::retain_pointer_state(&node_ids);
-            let mut native_layout_keys = HashSet::new();
-            collect_native_layout_keys(&self.root, &mut native_layout_keys);
-            elements::retain_native_layout_keys(&native_layout_keys);
-
-            let mut layout_ids = HashSet::new();
-            collect_layout_ids(&self.root, &mut layout_ids);
-            bridge::emit_cached_layout_for_new_subscribers(&layout_ids);
+            let inspector_done = std::time::Instant::now();
 
             #[cfg(target_os = "macos")]
             ax::sync_tree(window, &self.root);
+            let accessibility_done = std::time::Instant::now();
             self.write_debug_dump(cx);
-            if std::env::var_os("RNGPUI_RENDER_TRACE").is_some() {
+            let debug_done = std::time::Instant::now();
+            if render_trace {
                 eprintln!(
-                    "[render] lifecycle took {:.2}ms",
-                    lifecycle_t0.elapsed().as_secs_f64() * 1000.0
+                    "[render] lifecycle inputs={:.2}ms webviews={:.2}ms inspector={:.2}ms \
+                     accessibility={:.2}ms debug={:.2}ms total={:.2}ms nodes={}",
+                    inputs_done.duration_since(lifecycle_t0).as_secs_f64() * 1000.0,
+                    webviews_done.duration_since(inputs_done).as_secs_f64() * 1000.0,
+                    inspector_done.duration_since(webviews_done).as_secs_f64() * 1000.0,
+                    accessibility_done
+                        .duration_since(inspector_done)
+                        .as_secs_f64()
+                        * 1000.0,
+                    debug_done.duration_since(accessibility_done).as_secs_f64() * 1000.0,
+                    debug_done.duration_since(lifecycle_t0).as_secs_f64() * 1000.0,
+                    self.tree_metadata.node_ids.len(),
                 );
             }
-            self.root_dirty = false;
-            self.root_paint_only = false;
         } // end tree-lifecycle (root_dirty) gate
+        self.root_dirty = false;
+        self.root_paint_only = false;
+        self.root_lifecycle_dirty = false;
 
         let create_t0 = std::time::Instant::now();
         let root = create_element(self.root.clone(), 0);
@@ -2952,6 +2956,8 @@ fn main() {
             anchored_window_origin(win_w, win_h, cx).unwrap_or(window_origin)
         };
         let app_root = fill_root(initial);
+        let tree_metadata = TreeMetadata::collect(&app_root);
+        tree_metadata.retain_native_state();
         bridge::ready(win_w, win_h);
 
         // The view that renders the tree. Created up front so the applier task below
@@ -2959,7 +2965,9 @@ fn main() {
         let content = cx.new(|cx| ServiceApp {
             app_focus: cx.focus_handle(),
             root: app_root,
+            tree_metadata,
             root_dirty: true,
+            root_lifecycle_dirty: true,
             root_paint_only: false,
             dump_tree_path: std::env::var("RNGPUI_DUMP_TREE").ok(),
             last_w: 0.0,
@@ -4360,9 +4368,15 @@ fn main() {
                         let mut drive_gpui_tweens = false;
                         let applied = pump.update(cx, |this, cx| match msg {
                             Incoming::Tree(t) => {
+                                let apply_t0 = std::time::Instant::now();
                                 let next_root = fill_root(t);
+                                let filled_at = std::time::Instant::now();
                                 let update_paint_only =
                                     elements::is_paint_only_tree_update(&this.root, &next_root);
+                                let classified_at = std::time::Instant::now();
+                                let next_metadata = TreeMetadata::collect(&next_root);
+                                let metadata_at = std::time::Instant::now();
+                                let lifecycle_changed = this.tree_metadata != next_metadata;
                                 // Several React commits can arrive before GPUI renders. Keep
                                 // every pending commit's provenance: once any commit changed
                                 // geometry, a later paint-only commit cannot make replaying the
@@ -4378,27 +4392,40 @@ fn main() {
                                     crate::anim_overlay::clear_paint_only_frame();
                                 }
                                 this.root_paint_only = pending_paint_only;
-                                let mut node_ids = HashSet::new();
-                                collect_node_ids(&next_root, &mut node_ids);
-                                bridge::retain_layout(&node_ids);
-                                crate::anim_overlay::retain(&node_ids);
-                                crate::anim_overlay_tween::retain(&node_ids);
+                                if lifecycle_changed {
+                                    next_metadata.retain_native_state();
+                                }
+                                let retained_at = std::time::Instant::now();
                                 // `fill_root` (parse_json_tree → note_commit) just armed any
                                 // `_gpuiTransition` tweens this commit; lazy-arm the driver.
                                 drive_gpui_tweens = crate::anim_overlay_tween::tweens_active();
-                                crate::inspector::retain_sources(&node_ids);
-                                elements::retain_pointer_state(&node_ids);
-                                elements::retain_presentations(&node_ids);
-                                let mut native_layout_keys = HashSet::new();
-                                collect_native_layout_keys(&next_root, &mut native_layout_keys);
-                                elements::retain_native_layout_keys(&native_layout_keys);
-                                let mut layout_ids = HashSet::new();
-                                collect_layout_ids(&next_root, &mut layout_ids);
-                                bridge::emit_cached_layout_for_new_subscribers(&layout_ids);
-                                emit_definite_cached_layouts(&next_root);
+                                let node_count = next_metadata.node_ids.len();
+                                this.root_lifecycle_dirty |= lifecycle_changed;
+                                this.tree_metadata = next_metadata;
                                 this.root = next_root;
                                 this.root_dirty = true;
                                 this.write_debug_dump(cx);
+                                let debugged_at = std::time::Instant::now();
+                                if std::env::var_os("RNGPUI_RENDER_TRACE").is_some() {
+                                    eprintln!(
+                                        "[tree-apply] fill={:.2}ms classify={:.2}ms \
+                                         metadata={:.2}ms retain={:.2}ms debug={:.2}ms \
+                                         total={:.2}ms nodes={} paint_only={} lifecycle_changed={}",
+                                        filled_at.duration_since(apply_t0).as_secs_f64() * 1000.0,
+                                        classified_at.duration_since(filled_at).as_secs_f64()
+                                            * 1000.0,
+                                        metadata_at.duration_since(classified_at).as_secs_f64()
+                                            * 1000.0,
+                                        retained_at.duration_since(metadata_at).as_secs_f64()
+                                            * 1000.0,
+                                        debugged_at.duration_since(retained_at).as_secs_f64()
+                                            * 1000.0,
+                                        debugged_at.duration_since(apply_t0).as_secs_f64() * 1000.0,
+                                        node_count,
+                                        update_paint_only,
+                                        lifecycle_changed,
+                                    );
+                                }
                                 cx.notify();
                             }
                             Incoming::SetNodeStyle { ops } => {
@@ -4817,6 +4844,27 @@ mod tests {
         })));
 
         assert!(crate::elements::is_paint_only_tree_update(&first, &next));
+    }
+
+    #[test]
+    fn lifecycle_metadata_tracks_controlled_input_values() {
+        let first = tree_of(parse_incoming(&json!({
+            "globalId": 21_000,
+            "type": "textinput",
+            "value": "before",
+            "mostRecentEventCount": 1,
+            "style": { "width": 240, "height": 32 }
+        })));
+        let next = tree_of(parse_incoming(&json!({
+            "globalId": 21_000,
+            "type": "textinput",
+            "value": "after",
+            "mostRecentEventCount": 2,
+            "style": { "width": 240, "height": 32 }
+        })));
+
+        assert!(crate::elements::is_paint_only_tree_update(&first, &next));
+        assert!(super::TreeMetadata::collect(&first) != super::TreeMetadata::collect(&next));
     }
 
     // The delta wire: a full commit seeds the index, then a delta with a `ref` node

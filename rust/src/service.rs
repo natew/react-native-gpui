@@ -1549,8 +1549,8 @@ impl Render for ServiceApp {
         // tree and re-solve only the branches whose style or text actually changed instead of
         // clearing and solving everything. Same vetoes as reuse (a moved animated layout key,
         // a resize, a native layout animation, the inspector overlay) because each of those
-        // can reshape the graph out from under a positional replay. Opt-in while it proves
-        // out; RNGPUI_DISABLE_RETAINED_LAYOUT also disables it.
+        // can reshape the graph out from under a positional replay.
+        // RNGPUI_DISABLE_RETAINED_LAYOUT disables both retained modes for diagnostics.
         let want_incremental = !want_reuse
             && self.root_dirty
             && elements::incremental_eligible()
@@ -1560,8 +1560,7 @@ impl Render for ServiceApp {
             && !elements::native_layout_has_animations()
             && !self.inspector.wants_input_grab()
             && !render_gate_disabled()
-            && !retained_layout_disabled
-            && std::env::var_os("RNGPUI_INCREMENTAL_LAYOUT").is_some();
+            && !retained_layout_disabled;
         let reusing = window.prepare_layout_frame(want_reuse, want_incremental);
         if std::env::var_os("RNGPUI_RETAINED_TRACE").is_some() {
             eprintln!(
@@ -4504,8 +4503,7 @@ fn main() {
                                 // layout frame: same node graph, but styles/text may differ.
                                 // Only meaningful when the commit is not already paint-only.
                                 let mut text_changed = std::collections::HashSet::new();
-                                let update_incremental = elements::incremental_layout_enabled()
-                                    && !update_paint_only
+                                let update_incremental = !update_paint_only
                                     && elements::is_structure_preserving_tree_update(
                                         &this.root,
                                         &next_root,

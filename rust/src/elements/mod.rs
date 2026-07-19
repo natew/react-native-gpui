@@ -284,18 +284,9 @@ static INCREMENTAL_ELIGIBLE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// True when this element's text content changed in the pending commit batch, so an
-/// incremental frame must force a re-measure of its text child.
-/// Cheap gate so the default (non-incremental) path pays nothing: without it every text
-/// element would take a mutex + hash lookup per frame just to answer "no".
-pub fn incremental_layout_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("RNGPUI_INCREMENTAL_LAYOUT").is_some())
-}
-
+/// incremental frame must force a re-measure of its text child. Callers only query this
+/// while the current frame is incremental.
 pub fn text_changed(id: u64) -> bool {
-    if !incremental_layout_enabled() {
-        return false;
-    }
     TEXT_CHANGED_IDS.lock().unwrap().contains(&id)
 }
 
@@ -311,9 +302,6 @@ pub fn accumulate_incremental(
     eligible: bool,
     text_changed: std::collections::HashSet<u64>,
 ) {
-    if !incremental_layout_enabled() {
-        return;
-    }
     use std::sync::atomic::Ordering;
     let next = if already_pending {
         INCREMENTAL_ELIGIBLE.load(Ordering::Relaxed) && eligible

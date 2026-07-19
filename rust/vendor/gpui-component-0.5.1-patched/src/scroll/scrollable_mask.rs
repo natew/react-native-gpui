@@ -108,7 +108,7 @@ impl Element for ScrollableMask {
         let line_height = window.line_height();
         let bounds = hitbox.bounds;
 
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        window.with_content_mask(Some(ContentMask::new(bounds)), |window| {
             if let Some(color) = self.debug {
                 window.paint_quad(PaintQuad {
                     bounds,

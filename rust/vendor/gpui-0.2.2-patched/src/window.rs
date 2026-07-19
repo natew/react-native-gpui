@@ -1286,14 +1286,31 @@ pub struct DispatchEventResult {
     pub default_prevented: bool,
 }
 
-/// Indicates which region of the window is visible. Content falling outside of this mask will not be
-/// rendered. Currently, only rectangular content masks are supported, but we give the mask its own type
-/// to leave room to support more complex shapes in the future.
+/// indicates which region of the window is visible. content falling outside of this mask is not
+/// rendered. a mask is a rectangle plus optional per-corner radii. the rectangular bounds are honored by
+/// every primitive. the corner radii round the mask so content overflowing a rounded container is
+/// clipped to the rounded shape rather than the bounding rect, and are honored by the source-over
+/// primitives (quad, text, image, shadow, underline) and the fade primitive; the path, surface, and
+/// backdrop-blur primitives currently honor only the rectangular bounds. zero radii (the default) mean a
+/// plain rectangular mask, which the fragment shaders fast-path, so a rectangular mask costs nothing
+/// extra.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
-    /// The bounds
+    /// the bounds
     pub bounds: Bounds<P>,
+    /// per-corner radii. zero (default) = square corners = plain rectangular mask.
+    pub corner_radii: Corners<P>,
+}
+
+impl<P: Clone + Debug + Default + PartialEq> ContentMask<P> {
+    /// a plain rectangular mask with square (un-rounded) corners.
+    pub fn new(bounds: Bounds<P>) -> Self {
+        Self {
+            bounds,
+            corner_radii: Corners::default(),
+        }
+    }
 }
 
 impl ContentMask<Pixels> {
@@ -1301,13 +1318,74 @@ impl ContentMask<Pixels> {
     pub fn scale(&self, factor: f32) -> ContentMask<ScaledPixels> {
         ContentMask {
             bounds: self.bounds.scale(factor),
+            corner_radii: self.corner_radii.scale(factor),
         }
     }
 
-    /// Intersect the content mask with the given content mask.
+    /// intersect the content mask with the given content mask.
+    ///
+    /// the result rect is the exact rect intersection. the corner radii are a best-effort
+    /// approximation: a single rounded rectangle cannot represent the exact intersection of two
+    /// arbitrary rounded rects. a result corner inherits the larger radius of whichever input corner
+    /// coincides with it, then is clamped to the intersected size. this is exact only when the chosen
+    /// corner arc survives without clamping or re-anchoring and no other input arc cuts across the
+    /// result. otherwise it is a best-effort improvement over the old rectangular mask: it never admits
+    /// anything outside the rect intersection (so it is never worse than the pre-rounding rect-only
+    /// mask), but it can keep a thin sliver a rounded input excluded, either a corner sliced by the
+    /// other mask's straight edge or a coincident radius shrunk by clamping. an exact result would need
+    /// a mask stack.
     pub fn intersect(&self, other: &Self) -> Self {
         let bounds = self.bounds.intersect(&other.bounds);
-        ContentMask { bounds }
+        let corner_radii = intersect_corner_radii(
+            &bounds,
+            &self.bounds,
+            &self.corner_radii,
+            &other.bounds,
+            &other.corner_radii,
+        )
+        .clamp_radii_for_quad_size(bounds.size);
+        ContentMask {
+            bounds,
+            corner_radii,
+        }
+    }
+}
+
+/// combine the corner radii of two masks being intersected. a radius applies at a result corner only
+/// when that corner coincides (within half a pixel) with the same corner of the contributing mask; the
+/// intersection keeps the more-rounded (larger) of the two, since each corner cut-out removes area.
+fn intersect_corner_radii(
+    result: &Bounds<Pixels>,
+    a_bounds: &Bounds<Pixels>,
+    a_radii: &Corners<Pixels>,
+    b_bounds: &Bounds<Pixels>,
+    b_radii: &Corners<Pixels>,
+) -> Corners<Pixels> {
+    let eps = 0.5_f32;
+    let close = |x: Pixels, y: Pixels| (f32::from(x) - f32::from(y)).abs() <= eps;
+    let max_px = |a: Pixels, b: Pixels| px(f32::from(a).max(f32::from(b)));
+    let on_left = |b: &Bounds<Pixels>| close(result.left(), b.left());
+    let on_right = |b: &Bounds<Pixels>| close(result.right(), b.right());
+    let on_top = |b: &Bounds<Pixels>| close(result.top(), b.top());
+    let on_bottom = |b: &Bounds<Pixels>| close(result.bottom(), b.bottom());
+    let z = Pixels::ZERO;
+    Corners {
+        top_left: max_px(
+            if on_left(a_bounds) && on_top(a_bounds) { a_radii.top_left } else { z },
+            if on_left(b_bounds) && on_top(b_bounds) { b_radii.top_left } else { z },
+        ),
+        top_right: max_px(
+            if on_right(a_bounds) && on_top(a_bounds) { a_radii.top_right } else { z },
+            if on_right(b_bounds) && on_top(b_bounds) { b_radii.top_right } else { z },
+        ),
+        bottom_right: max_px(
+            if on_right(a_bounds) && on_bottom(a_bounds) { a_radii.bottom_right } else { z },
+            if on_right(b_bounds) && on_bottom(b_bounds) { b_radii.bottom_right } else { z },
+        ),
+        bottom_left: max_px(
+            if on_left(a_bounds) && on_bottom(a_bounds) { a_radii.bottom_left } else { z },
+            if on_left(b_bounds) && on_bottom(b_bounds) { b_radii.bottom_left } else { z },
+        ),
     }
 }
 
@@ -2635,11 +2713,11 @@ impl Window {
         self.content_mask_stack
             .last()
             .cloned()
-            .unwrap_or_else(|| ContentMask {
-                bounds: Bounds {
+            .unwrap_or_else(|| {
+                ContentMask::new(Bounds {
                     origin: Point::default(),
                     size: self.viewport_size,
-                },
+                })
             })
     }
 

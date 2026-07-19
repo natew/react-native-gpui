@@ -1438,55 +1438,24 @@ fn target_receives_pointer_up_event(
     target_receives_captured_pointer_event(active_target, target_id, inside_target)
 }
 
-#[derive(Clone, Copy, Debug)]
-struct RoundedOverflowClip {
-    bounds: Bounds<Pixels>,
-    radii: Corners<Pixels>,
-}
-
-thread_local! {
-    static ROUNDED_OVERFLOW_CLIPS: RefCell<Vec<RoundedOverflowClip>> = const { RefCell::new(Vec::new()) };
-}
-
-struct RoundedOverflowClipGuard;
-
-impl Drop for RoundedOverflowClipGuard {
-    fn drop(&mut self) {
-        ROUNDED_OVERFLOW_CLIPS.with(|clips| {
-            clips.borrow_mut().pop();
-        });
-    }
-}
-
-fn push_rounded_overflow_clip(
-    clip: Option<RoundedOverflowClip>,
-) -> Option<RoundedOverflowClipGuard> {
-    if let Some(clip) = clip {
-        ROUNDED_OVERFLOW_CLIPS.with(|clips| {
-            clips.borrow_mut().push(clip);
-        });
-        Some(RoundedOverflowClipGuard)
-    } else {
-        None
-    }
-}
-
-fn rounded_overflow_clip(
+// inner corner radii for an `overflow: hidden` container, matching the element's
+// own rounded background/border (outer radius minus the border it sits behind).
+// these become the content mask's `corner_radii`, so gpui's fragment shaders clip
+// the covered descendant primitives (source-over quad/text/image/shadow/underline
+// plus fade) to the rounded shape, not just the bounding rect. this reaches even an
+// absolutely-positioned child that overflows past a corner, whose own corner is
+// elsewhere. all-zero radii are the shader's fast path (a plain rect mask).
+fn overflow_clip_radii(
     bounds: Bounds<Pixels>,
     style: &gpui::Style,
     rem_size: Pixels,
-) -> Option<RoundedOverflowClip> {
-    let content_bounds = style.overflow_mask(bounds, rem_size)?.bounds;
-    if content_bounds.is_empty() {
-        return None;
-    }
-
+) -> Corners<Pixels> {
     let corner_radii = style
         .corner_radii
         .to_pixels(rem_size)
         .clamp_radii_for_quad_size(bounds.size);
     let border_widths = style.border_widths.to_pixels(rem_size);
-    let radii = Corners {
+    Corners {
         top_left: inner_corner_radius(corner_radii.top_left, border_widths.left, border_widths.top),
         top_right: inner_corner_radius(
             corner_radii.top_right,
@@ -1503,19 +1472,7 @@ fn rounded_overflow_clip(
             border_widths.left,
             border_widths.bottom,
         ),
-    };
-    if pixels_are_zero(radii.top_left)
-        && pixels_are_zero(radii.top_right)
-        && pixels_are_zero(radii.bottom_right)
-        && pixels_are_zero(radii.bottom_left)
-    {
-        return None;
     }
-
-    Some(RoundedOverflowClip {
-        bounds: content_bounds,
-        radii,
-    })
 }
 
 fn inner_corner_radius(
@@ -1527,78 +1484,6 @@ fn inner_corner_radius(
     let horizontal_border: f32 = horizontal_border.into();
     let vertical_border: f32 = vertical_border.into();
     px((radius - horizontal_border.max(vertical_border)).max(0.0))
-}
-
-fn apply_rounded_overflow_clips_to_style(
-    style: &mut gpui::Style,
-    bounds: Bounds<Pixels>,
-    rem_size: Pixels,
-) {
-    let mut radii = style.corner_radii.to_pixels(rem_size);
-    ROUNDED_OVERFLOW_CLIPS.with(|clips| {
-        for clip in clips.borrow().iter() {
-            let clip_radii = rounded_clip_radii_for_bounds(bounds, *clip);
-            radii.top_left = max_pixels(radii.top_left, clip_radii.top_left);
-            radii.top_right = max_pixels(radii.top_right, clip_radii.top_right);
-            radii.bottom_right = max_pixels(radii.bottom_right, clip_radii.bottom_right);
-            radii.bottom_left = max_pixels(radii.bottom_left, clip_radii.bottom_left);
-        }
-    });
-    style.corner_radii = Corners {
-        top_left: radii.top_left.into(),
-        top_right: radii.top_right.into(),
-        bottom_right: radii.bottom_right.into(),
-        bottom_left: radii.bottom_left.into(),
-    };
-}
-
-fn rounded_clip_radii_for_bounds(
-    bounds: Bounds<Pixels>,
-    clip: RoundedOverflowClip,
-) -> Corners<Pixels> {
-    let epsilon = 0.5;
-    let left: f32 = bounds.left().into();
-    let top: f32 = bounds.top().into();
-    let right: f32 = bounds.right().into();
-    let bottom: f32 = bounds.bottom().into();
-    let clip_left: f32 = clip.bounds.left().into();
-    let clip_top: f32 = clip.bounds.top().into();
-    let clip_right: f32 = clip.bounds.right().into();
-    let clip_bottom: f32 = clip.bounds.bottom().into();
-
-    Corners {
-        top_left: if left <= clip_left + epsilon && top <= clip_top + epsilon {
-            clip.radii.top_left
-        } else {
-            Pixels::ZERO
-        },
-        top_right: if right >= clip_right - epsilon && top <= clip_top + epsilon {
-            clip.radii.top_right
-        } else {
-            Pixels::ZERO
-        },
-        bottom_right: if right >= clip_right - epsilon && bottom >= clip_bottom - epsilon {
-            clip.radii.bottom_right
-        } else {
-            Pixels::ZERO
-        },
-        bottom_left: if left <= clip_left + epsilon && bottom >= clip_bottom - epsilon {
-            clip.radii.bottom_left
-        } else {
-            Pixels::ZERO
-        },
-    }
-}
-
-fn max_pixels(a: Pixels, b: Pixels) -> Pixels {
-    let a: f32 = a.into();
-    let b: f32 = b.into();
-    px(a.max(b))
-}
-
-fn pixels_are_zero(value: Pixels) -> bool {
-    let value: f32 = value.into();
-    value == 0.0
 }
 
 impl Element for ReactDivElement {
@@ -1913,7 +1798,6 @@ impl Element for ReactDivElement {
             .computed_style
             .take()
             .unwrap_or_else(|| self.element.build_gpui_style(None));
-        apply_rounded_overflow_clips_to_style(&mut style, bounds, window.rem_size());
         let (clip, scroll) = overflow_mode(&self.element.style);
 
         // native AppKit drivers report absolute offsets. synthetic debug
@@ -2639,13 +2523,17 @@ impl Element for ReactDivElement {
             window.set_cursor_style(mouse_cursor, hitbox);
         }
 
+        // overflow clip mask. rounding the mask's corners (to the container's inner
+        // radii) makes gpui's shaders clip the covered descendant primitives to the
+        // rounded shape, reaching even an absolutely-positioned child that overflows a
+        // corner (the case the old radius-propagation hack could not reach).
         let overflow_mask = if clip {
-            style.overflow_mask(bounds, window.rem_size())
-        } else {
-            None
-        };
-        let rounded_clip = if clip {
-            rounded_overflow_clip(bounds, &style, window.rem_size())
+            style
+                .overflow_mask(bounds, window.rem_size())
+                .map(|mut mask| {
+                    mask.corner_radii = overflow_clip_radii(bounds, &style, window.rem_size());
+                    mask
+                })
         } else {
             None
         };
@@ -2703,7 +2591,6 @@ impl Element for ReactDivElement {
                     window.paint_backdrop_blur(bounds, corner_radii, px(radius), backdrop_tint);
                 }
                 style.paint(bounds, window, cx, |window, cx| {
-                    let _rounded_clip_guard = push_rounded_overflow_clip(rounded_clip);
                     // a scroll container's off-screen children were never prepainted
                     // this frame (see DivPrepaintState::culled); painting them now would
                     // hit gpui's "paint without prepaint" assert, so skip the same set.
@@ -2787,20 +2674,19 @@ mod tests {
     use std::sync::{Mutex, MutexGuard};
     use std::time::{Duration, Instant};
 
-    use gpui::{Bounds, Corners, point, px};
+    use gpui::{Bounds, ContentMask, Corners, point, px};
     use once_cell::sync::Lazy;
 
     use super::{
         ACTIVE_MOUSE_TARGET, ActiveNativeResize, ActivePressDrag, NATIVE_LAYOUT_ANIMATIONS,
         NATIVE_LAYOUT_FRAMES, NATIVE_LAYOUT_OVERRIDES, NativeLayoutAnimation, NativeLayoutOverride,
-        RoundedOverflowClip, animate_native_layout_override, clear_native_layout_override,
-        events_have_press_action, finish_pointer_gesture, get_scroll, inner_corner_radius,
-        native_layout_animation_value, native_layout_has_animations, native_layout_override,
-        press_drag_should_activate, remember_native_layout_frame, retain_scroll_state,
-        rounded_clip_radii_for_bounds, scroll_to, scroll_to_end, set_native_layout_override,
-        stacked_child_indices_for, take_scroll_event, take_scroll_to_end,
-        target_receives_captured_pointer_event, target_receives_pointer_up_event,
-        update_native_resize,
+        animate_native_layout_override, clear_native_layout_override, events_have_press_action,
+        finish_pointer_gesture, get_scroll, inner_corner_radius, native_layout_animation_value,
+        native_layout_has_animations, native_layout_override, press_drag_should_activate,
+        remember_native_layout_frame, retain_scroll_state, scroll_to, scroll_to_end,
+        set_native_layout_override, stacked_child_indices_for, take_scroll_event,
+        take_scroll_to_end, target_receives_captured_pointer_event,
+        target_receives_pointer_up_event, update_native_resize,
     };
     use crate::elements::NativeResizeEdge;
 
@@ -3005,41 +2891,85 @@ mod tests {
         assert_eq!(inner_corner_radius(px(4.0), px(8.0), px(1.0)), px(0.0));
     }
 
-    #[test]
-    fn rounded_clip_radii_apply_only_to_children_touching_clip_edges() {
-        let clip = RoundedOverflowClip {
-            bounds: Bounds::from_corners(point(px(0.0), px(0.0)), point(px(100.0), px(60.0))),
-            radii: Corners {
-                top_left: px(10.0),
-                top_right: px(11.0),
-                bottom_right: px(12.0),
-                bottom_left: px(13.0),
+    // rounded-content-mask intersection math (gpui::ContentMask::intersect). this is the
+    // core the rounded overflow clip relies on: a child mask intersected with a rounded
+    // ancestor mask must keep the ancestor's rounding where the corners coincide, stay
+    // square where an edge slices a corner (documented lossy case), and never over-round.
+    fn cmask(x: f32, y: f32, w: f32, h: f32, radii: [f32; 4]) -> ContentMask<gpui::Pixels> {
+        ContentMask {
+            bounds: Bounds::from_corners(point(px(x), px(y)), point(px(x + w), px(y + h))),
+            corner_radii: Corners {
+                top_left: px(radii[0]),
+                top_right: px(radii[1]),
+                bottom_right: px(radii[2]),
+                bottom_left: px(radii[3]),
             },
-        };
+        }
+    }
 
-        let top_row = rounded_clip_radii_for_bounds(
-            Bounds::from_corners(point(px(0.0), px(0.0)), point(px(100.0), px(20.0))),
-            clip,
-        );
-        assert_eq!(top_row.top_left, px(10.0));
-        assert_eq!(top_row.top_right, px(11.0));
-        assert_eq!(top_row.bottom_right, px(0.0));
-        assert_eq!(top_row.bottom_left, px(0.0));
+    #[test]
+    fn mask_rect_intersect_rect_stays_square() {
+        let r = cmask(0., 0., 100., 100., [0.; 4]).intersect(&cmask(10., 10., 50., 50., [0.; 4]));
+        assert_eq!(r.bounds.origin, point(px(10.), px(10.)));
+        assert_eq!(r.corner_radii, Corners::default());
+    }
 
-        let middle_row = rounded_clip_radii_for_bounds(
-            Bounds::from_corners(point(px(0.0), px(20.0)), point(px(100.0), px(40.0))),
-            clip,
-        );
-        assert_eq!(middle_row, Corners::default());
+    #[test]
+    fn mask_coincident_corner_keeps_rounding() {
+        // child fills the rounded ancestor exactly → every corner coincides → rounding survives.
+        let r = cmask(0., 0., 100., 100., [20., 20., 20., 20.])
+            .intersect(&cmask(0., 0., 100., 100., [0.; 4]));
+        assert_eq!(r.corner_radii.top_left, px(20.));
+        assert_eq!(r.corner_radii.bottom_right, px(20.));
+    }
 
-        let bottom_row = rounded_clip_radii_for_bounds(
-            Bounds::from_corners(point(px(0.0), px(40.0)), point(px(100.0), px(60.0))),
-            clip,
-        );
-        assert_eq!(bottom_row.top_left, px(0.0));
-        assert_eq!(bottom_row.top_right, px(0.0));
-        assert_eq!(bottom_row.bottom_right, px(12.0));
-        assert_eq!(bottom_row.bottom_left, px(13.0));
+    #[test]
+    fn mask_coincident_corner_takes_larger_radius() {
+        // intersection removes the union of the two corner cut-outs → the more-rounded wins.
+        let r = cmask(0., 0., 100., 100., [20., 0., 0., 0.]).intersect(&cmask(
+            0.,
+            0.,
+            100.,
+            100.,
+            [8., 0., 0., 0.],
+        ));
+        assert_eq!(r.corner_radii.top_left, px(20.));
+    }
+
+    #[test]
+    fn mask_inset_child_away_from_corners_is_square() {
+        // child fully inside the ancestor, touching no corner → child rect is the sole
+        // binding constraint, so no corner needs rounding.
+        let r = cmask(0., 0., 100., 100., [20., 20., 20., 20.])
+            .intersect(&cmask(30., 30., 40., 40., [0.; 4]));
+        assert_eq!(r.corner_radii, Corners::default());
+    }
+
+    #[test]
+    fn mask_non_coincident_edge_slice_stays_rectangular() {
+        // child shares the ancestor's left edge but its top edge slices through the
+        // ancestor's rounded corner without the corners coinciding. this is one of the
+        // documented lossy cases: the result keeps a rectangular corner (matches the
+        // pre-rounding rect clip; never admits anything outside the rect intersection).
+        let r = cmask(0., 0., 100., 100., [20., 0., 0., 0.])
+            .intersect(&cmask(0., 10., 100., 90., [0.; 4]));
+        assert_eq!(r.corner_radii.top_left, px(0.));
+    }
+
+    #[test]
+    fn mask_radius_clamped_to_intersected_size() {
+        // a 10x10 intersection cannot carry a 20px radius; clamping shrinks the coincident
+        // radius to fit. that re-anchors the arc, so this is also a lossy case (the shrunk
+        // arc can re-admit a sliver the larger input excluded). here we assert only the
+        // clamp bound, which keeps the result inside the rect intersection.
+        let r = cmask(0., 0., 100., 100., [20., 20., 20., 20.]).intersect(&cmask(
+            0.,
+            0.,
+            10.,
+            10.,
+            [20., 20., 20., 20.],
+        ));
+        assert!(f32::from(r.corner_radii.top_left) <= 5.01);
     }
 
     #[test]

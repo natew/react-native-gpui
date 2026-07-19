@@ -378,7 +378,7 @@ impl MetalRenderer {
             &library,
             "fades",
             "quad_vertex",
-            "quad_fragment",
+            "fade_fragment",
             MTLPixelFormat::BGRA8Unorm,
         );
         let underlines_pipeline_state = build_pipeline_state(
@@ -1005,9 +1005,7 @@ impl MetalRenderer {
                 );
                 let clear_quad = Quad {
                     bounds: clear_bounds,
-                    content_mask: ContentMask {
-                        bounds: clear_bounds,
-                    },
+                    content_mask: ContentMask::new(clear_bounds),
                     ..Quad::default()
                 };
                 if !self.draw_quads_with_pipeline(

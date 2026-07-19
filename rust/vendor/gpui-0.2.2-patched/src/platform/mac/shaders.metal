@@ -28,6 +28,8 @@ float pick_corner_radius(float2 center_to_point, Corners_ScaledPixels corner_rad
 float quad_sdf(float2 point, Bounds_ScaledPixels bounds,
                Corners_ScaledPixels corner_radii);
 float quad_sdf_impl(float2 center_to_point, float corner_radius);
+float content_mask_alpha(float2 device_position, Bounds_ScaledPixels mask_bounds,
+                         Corners_ScaledPixels mask_radii);
 float2 transform_inverse_apply(TransformationMatrix t, float2 p);
 float gaussian(float x, float sigma);
 float2 erf(float2 x);
@@ -102,6 +104,10 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
                               constant Quad *quads
                               [[buffer(QuadInputIndex_Quads)]]) {
   Quad quad = quads[input.quad_id];
+  // rounded content-mask coverage, evaluated in screen space (the mask is not
+  // transformed with the quad). 1.0 for an un-rounded mask (the common case).
+  float mask_a = content_mask_alpha(input.position.xy, quad.content_mask.bounds,
+                                    quad.content_mask.corner_radii);
   // SDF + gradient math runs in the quad's untransformed local space; map the
   // device-space fragment position back through the element transform.
   float2 local_position =
@@ -120,7 +126,7 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
       quad.border_widths.right == 0.0 &&
       quad.border_widths.bottom == 0.0 &&
       unrounded) {
-    return background_color;
+    return background_color * float4(1.0, 1.0, 1.0, mask_a);
   }
 
   float2 size = float2(quad.bounds.size.width, quad.bounds.size.height);
@@ -180,7 +186,7 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
 
   // Fast path for points that must be part of the background
   if (is_within_inner_straight_border && !is_near_rounded_corner) {
-    return background_color;
+    return background_color * float4(1.0, 1.0, 1.0, mask_a);
   }
 
   // Signed distance of the point to the outside edge of the quad's border
@@ -398,7 +404,30 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
                 saturate(antialias_threshold - inner_sdf));
   }
 
-  return color * float4(1.0, 1.0, 1.0, saturate(antialias_threshold - outer_sdf));
+  return color * float4(1.0, 1.0, 1.0, saturate(antialias_threshold - outer_sdf) * mask_a);
+}
+
+// fade primitive (edge-fade strips): a screen-space gradient drawn with a
+// destination-multiply blend (result = source_alpha * dst) that dissolves chrome
+// into the glass behind it. only the output alpha is used (the pipeline's source
+// rgb factor is Zero). unlike a source-over primitive, "no coverage" here means
+// the multiplier must be 1 (leave dst untouched), not 0 (which would erase it).
+// so the rounded content mask modulates toward 1 outside the mask via
+// mix(1, f, mask_a): full fade `f` inside the rounded region, no-op at/outside a
+// rounded corner. (a plain rect mask has mask_a==1 everywhere, so this equals `f`.)
+fragment float4 fade_fragment(QuadFragmentInput input [[stage_in]],
+                              constant Quad *quads
+                              [[buffer(QuadInputIndex_Quads)]]) {
+  Quad quad = quads[input.quad_id];
+  float2 local_position =
+      transform_inverse_apply(quad.transformation, input.position.xy);
+  float4 background_color = fill_color(quad.background, local_position, quad.bounds,
+    input.background_solid, input.background_color0, input.background_color1);
+  float f = background_color.a;
+  float mask_a = content_mask_alpha(input.position.xy, quad.content_mask.bounds,
+                                    quad.content_mask.corner_radii);
+  float factor = mix(1.0, f, mask_a);
+  return float4(factor, factor, factor, factor);
 }
 
 // Returns the dash velocity of a corner given the dash velocity of the two
@@ -552,6 +581,8 @@ fragment float4 shadow_fragment(ShadowFragmentInput input [[stage_in]],
                                      shadow.corner_radii);
   alpha *= saturate(0.5 + occluder_distance);
 
+  alpha *= content_mask_alpha(input.position.xy, shadow.content_mask.bounds,
+                              shadow.content_mask.corner_radii);
   return input.color * float4(1., 1., 1., alpha);
 }
 
@@ -595,6 +626,8 @@ fragment float4 underline_fragment(UnderlineFragmentInput input [[stage_in]],
   const float WAVE_HEIGHT_RATIO = 0.8;
 
   Underline underline = underlines[input.underline_id];
+  float mask_a = content_mask_alpha(input.position.xy, underline.content_mask.bounds,
+                                    underline.content_mask.corner_radii);
   if (underline.wavy) {
     float half_thickness = underline.thickness * 0.5;
     float2 origin =
@@ -613,9 +646,9 @@ fragment float4 underline_fragment(UnderlineFragmentInput input [[stage_in]],
     float distance_from_bottom_border = distance_in_pixels + half_thickness;
     float alpha = saturate(
         0.5 - max(-distance_from_bottom_border, distance_from_top_border));
-    return input.color * float4(1., 1., 1., alpha);
+    return input.color * float4(1., 1., 1., alpha * mask_a);
   } else {
-    return input.color;
+    return input.color * float4(1., 1., 1., mask_a);
   }
 }
 
@@ -623,6 +656,7 @@ struct MonochromeSpriteVertexOutput {
   float4 position [[position]];
   float2 tile_position;
   float4 color [[flat]];
+  uint sprite_id [[flat]];
   float4 clip_distance;
 };
 
@@ -630,6 +664,7 @@ struct MonochromeSpriteFragmentInput {
   float4 position [[position]];
   float2 tile_position;
   float4 color [[flat]];
+  uint sprite_id [[flat]];
   float4 clip_distance;
 };
 
@@ -653,6 +688,7 @@ vertex MonochromeSpriteVertexOutput monochrome_sprite_vertex(
       device_position,
       tile_position,
       color,
+      sprite_id,
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
@@ -664,12 +700,15 @@ fragment float4 monochrome_sprite_fragment(
     return float4(0.0);
   }
 
+  MonochromeSprite sprite = sprites[input.sprite_id];
   constexpr sampler atlas_texture_sampler(mag_filter::linear,
                                           min_filter::linear);
   float4 sample =
       atlas_texture.sample(atlas_texture_sampler, input.tile_position);
   float4 color = input.color;
   color.a *= sample.a;
+  color.a *= content_mask_alpha(input.position.xy, sprite.content_mask.bounds,
+                                sprite.content_mask.corner_radii);
   return color;
 }
 
@@ -730,6 +769,8 @@ fragment float4 polychrome_sprite_fragment(
     color.b = grayscale;
   }
   color.a *= sprite.opacity * saturate(0.5 - distance);
+  color.a *= content_mask_alpha(input.position.xy, sprite.content_mask.bounds,
+                                sprite.content_mask.corner_radii);
   return color;
 }
 
@@ -1200,6 +1241,24 @@ float quad_sdf(float2 point, Bounds_ScaledPixels bounds,
     float2 corner_to_point = fabs(center_to_point) - half_size;
     float2 corner_center_to_point = corner_to_point + corner_radius;
     return quad_sdf_impl(corner_center_to_point, corner_radius);
+}
+
+// coverage of a fragment under the content mask's rounded rectangle. the
+// hardware clip planes (or the manual clip_distance test in the sprite shaders)
+// already reject fragments outside the mask rect, so this only softens the
+// corners where the mask carries a radius. the mask is axis-aligned in screen
+// space (ScaledPixels), so it is evaluated at the fragment's device position
+// regardless of the primitive's own transform. square corners (all radii 0, the
+// common case) fast-path to full coverage, so a plain rectangular mask costs
+// four compares and nothing else.
+float content_mask_alpha(float2 device_position, Bounds_ScaledPixels mask_bounds,
+                         Corners_ScaledPixels mask_radii) {
+  if (mask_radii.top_left == 0.0 && mask_radii.top_right == 0.0 &&
+      mask_radii.bottom_left == 0.0 && mask_radii.bottom_right == 0.0) {
+    return 1.0;
+  }
+  float distance = quad_sdf(device_position, mask_bounds, mask_radii);
+  return saturate(0.5 - distance);
 }
 
 // Implementation of quad signed distance field

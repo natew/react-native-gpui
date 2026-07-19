@@ -40,6 +40,12 @@ export type SerializedNode = {
     autoFocus?: boolean;
     mostRecentEventCount?: number;
     src?: string;
+    /** delta wire only: this (changed) node's large `text`/`src` is byte-identical to
+     * what the host already holds for this globalId, so it was omitted — the host reuses
+     * its prior value (parse_json_tree, same PRIOR_TREE_INDEX the node-level `ref` uses).
+     * Emitted by toWireDelta's big-field interning; never set on a first/changed send. */
+    textRef?: boolean;
+    srcRef?: boolean;
     name?: string;
     placeholder?: string;
     placeholderTextColor?: string;

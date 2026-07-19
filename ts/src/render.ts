@@ -14,7 +14,7 @@ import Reconciler, {
     type ReconcilerCommitDiagnostics,
 } from "./reconciler";
 import { setEventBatcher, startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type SerializedNode } from "./runtime";
-import { toWireDelta, type WireDeltaStats } from "./wire-delta";
+import { toWireDelta, type BigFieldCache, type WireDeltaStats } from "./wire-delta";
 
 // coalesced event batches (resize/layout/scroll floods) dispatch inside one React update so
 // a window resize produces one re-render per batch instead of one per event.
@@ -64,6 +64,9 @@ export function createRoot(options: RootOptions = {}): Root {
     let lastTree: SerializedNode | null = null;
     // objects the host currently holds in full; toWireDelta emits refs for these. see its doc.
     const sentNodes = new WeakSet<SerializedNode>();
+    // per-globalId large text/src the host currently holds; toWireDelta omits an unchanged
+    // big field on a changed node and marks textRef/srcRef. see its doc.
+    const sentBigFields: BigFieldCache = new Map();
     const bridgeOptions: BridgeOptions = {
         inspector: options.devtools === true || (typeof options.devtools === "object" && options.devtools.inspector === true),
     };
@@ -100,7 +103,7 @@ export function createRoot(options: RootOptions = {}): Root {
         if (!bridge) {
             const wireStats: WireDeltaStats | undefined = COMMIT_TRACE ? { refs: 0, full: 0 } : undefined;
             const deltaStartedAt = COMMIT_TRACE ? performance.now() : 0;
-            const wire = toWireDelta(tree, sentNodes, wireStats);
+            const wire = toWireDelta(tree, sentNodes, sentBigFields, wireStats);
             const deltaMs = COMMIT_TRACE ? performance.now() - deltaStartedAt : 0;
             bridge = startBridge(wire, bridgeOptions);
             bridge.onEvent(handleEvent);
@@ -122,7 +125,7 @@ export function createRoot(options: RootOptions = {}): Root {
         }
         const wireStats: WireDeltaStats | undefined = COMMIT_TRACE ? { refs: 0, full: 0 } : undefined;
         const deltaStartedAt = COMMIT_TRACE ? performance.now() : 0;
-        const wire = toWireDelta(tree, sentNodes, wireStats);
+        const wire = toWireDelta(tree, sentNodes, sentBigFields, wireStats);
         const deltaMs = COMMIT_TRACE ? performance.now() - deltaStartedAt : 0;
         if (typeof process !== "undefined" && process.env?.RNGPUI_WIRE_TRACE) {
             // diagnostic: how much of the wire crossed as refs vs full nodes —

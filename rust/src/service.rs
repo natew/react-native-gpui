@@ -255,13 +255,25 @@ fn parse_json_tree(
         }
     }
     // `text` is overloaded by node type: text content, input placeholder, svg icon
-    // name, or webview html — whichever the serializer set.
-    let text = obj
-        .get("text")
-        .or_else(|| obj.get("placeholder"))
-        .or_else(|| obj.get("name"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    // name, or webview html — whichever the serializer set. `textRef` is the delta
+    // big-field ref: the JS side omitted an unchanged large text (e.g. a webview's 45KB
+    // shell html on a node that only flipped its focus id), so reuse the prior commit's
+    // value for this id — the same PRIOR_TREE_INDEX the node-level `ref` reads.
+    let text = if obj.get("textRef").and_then(|v| v.as_bool()) == Some(true) {
+        match prior.get(&global_id).and_then(|p| p.text.clone()) {
+            Some(t) => Some(t),
+            None => {
+                eprintln!("[rngpui] delta textRef miss for globalId {global_id} (no prior text)");
+                None
+            }
+        }
+    } else {
+        obj.get("text")
+            .or_else(|| obj.get("placeholder"))
+            .or_else(|| obj.get("name"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
     let number_of_lines = obj
         .get("numberOfLines")
         .and_then(|v| v.as_u64())
@@ -271,10 +283,20 @@ fn parse_json_tree(
         .get("selectable")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let src = obj
-        .get("src")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    // `srcRef` is the delta big-field ref for `src` (image/webview uri); reuse prior.
+    let src = if obj.get("srcRef").and_then(|v| v.as_bool()) == Some(true) {
+        match prior.get(&global_id).and_then(|p| p.src.clone()) {
+            Some(s) => Some(s),
+            None => {
+                eprintln!("[rngpui] delta srcRef miss for globalId {global_id} (no prior src)");
+                None
+            }
+        }
+    } else {
+        obj.get("src")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
     // <SystemView> native surface props: NSVisualEffectView material, NSGlassEffectView
     // variant, tint overlay color, and a native outer drop shadow.
     let system_material = obj

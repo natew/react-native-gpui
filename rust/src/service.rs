@@ -4475,7 +4475,8 @@ fn main() {
                                 // layout frame: same node graph, but styles/text may differ.
                                 // Only meaningful when the commit is not already paint-only.
                                 let mut text_changed = std::collections::HashSet::new();
-                                let update_incremental = !update_paint_only
+                                let update_incremental = elements::incremental_layout_enabled()
+                                    && !update_paint_only
                                     && elements::is_structure_preserving_tree_update(
                                         &this.root,
                                         &next_root,

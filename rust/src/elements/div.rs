@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -414,28 +413,6 @@ fn smoke_time_seconds() -> f32 {
 fn smoke_epoch() -> &'static Instant {
     static EPOCH: Lazy<Instant> = Lazy::new(Instant::now);
     &EPOCH
-}
-
-// millis-since-epoch of the last painted smoke quad; the service's effects driver
-// polls this to decide whether to keep the window repainting.
-static SMOKE_LAST_PAINT_MS: AtomicU64 = AtomicU64::new(0);
-
-fn mark_smoke_painted() {
-    SMOKE_LAST_PAINT_MS.store(
-        smoke_epoch().elapsed().as_millis() as u64,
-        Ordering::Relaxed,
-    );
-}
-
-/// True while an animated smoke background painted within the last few frames —
-/// the effects driver's tick predicate. The window stops repainting ~a quarter
-/// second after the last smoke node unmounts.
-pub fn smoke_recently_painted() -> bool {
-    let last = SMOKE_LAST_PAINT_MS.load(Ordering::Relaxed);
-    if last == 0 {
-        return false;
-    }
-    smoke_epoch().elapsed().as_millis() as u64 - last < 250
 }
 
 fn native_layout_override(key: &str) -> NativeLayoutOverride {
@@ -2609,13 +2586,13 @@ impl Element for ReactDivElement {
         // un-animated node pays nothing.
         // animated smoke background (backgroundImage: 'smoke(dense, faded)'): stamp the
         // per-frame time into the Background (the shader's only animation input) and
-        // mark the paint so the service's effects driver keeps the window repainting
-        // while a smoke node is mounted (and goes idle the moment it unmounts).
-        if let Some(gpui::Fill::Color(bg)) = style.background.as_mut() {
-            if bg.is_smoke() {
-                *bg = bg.with_time(smoke_time_seconds());
-                mark_smoke_painted();
-            }
+        // request the next frame from gpui's display link so shader time advances once
+        // per actual display refresh without a free-running timer drifting past vblank.
+        if let Some(gpui::Fill::Color(bg)) = style.background.as_mut()
+            && bg.is_smoke()
+        {
+            *bg = bg.with_time(smoke_time_seconds());
+            window.request_animation_frame();
         }
 
         let element_opacity = style.opacity;

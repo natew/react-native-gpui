@@ -527,6 +527,19 @@ impl MetalRenderer {
                     let block = block.copy();
                     command_buffer.add_completed_handler(&block);
 
+                    if crate::presentation_trace::is_active() {
+                        let content_id = crate::presentation_trace::content_id();
+                        let presented = ConcreteBlock::new(move |drawable: &metal::DrawableRef| {
+                            crate::presentation_trace::record(
+                                drawable.drawable_id() as u64,
+                                drawable.presented_time(),
+                                content_id,
+                            );
+                        });
+                        let presented = presented.copy();
+                        drawable.add_presented_handler(&presented);
+                    }
+
                     if self.presents_with_transaction {
                         let _ws_t0 = std::time::Instant::now();
                         command_buffer.commit();

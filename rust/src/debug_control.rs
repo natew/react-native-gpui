@@ -174,6 +174,21 @@ fn handle_trace_request(value: &Value) -> Option<Value> {
             Some(crate::anim_trace::start(ids, keys, native_keys, max_ms))
         }
         "traceStop" => Some(crate::anim_trace::stop()),
+        "presentTraceStart" => {
+            gpui::presentation_trace::start();
+            Some(json!({"ok": true}))
+        }
+        "presentTraceStop" => {
+            let frames = gpui::presentation_trace::stop();
+            Some(json!({
+                "ok": true,
+                "frames": frames.into_iter().map(|frame| json!({
+                    "drawableId": frame.drawable_id,
+                    "presentedTime": frame.presented_time,
+                    "contentId": frame.content_id,
+                })).collect::<Vec<_>>(),
+            }))
+        }
         _ => None,
     }
 }
@@ -307,6 +322,17 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
                 .and_then(Value::as_str)
                 .unwrap_or("none")
                 .to_string(),
+            reply,
+        }),
+        "nativeDriverSequence" => Ok(Incoming::DebugNativeDriverSequence {
+            x: number(value, "x")?,
+            y: number(value, "y")?,
+            dy: number(value, "dy").unwrap_or(0.0),
+            steps: value
+                .get("steps")
+                .and_then(Value::as_u64)
+                .unwrap_or(120)
+                .clamp(1, 600) as u32,
             reply,
         }),
         "nativeScrollAt" => Ok(Incoming::DebugNativeScrollAt {

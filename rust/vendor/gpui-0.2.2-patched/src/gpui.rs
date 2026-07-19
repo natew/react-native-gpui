@@ -29,6 +29,8 @@ mod key_dispatch;
 mod keymap;
 mod path_builder;
 mod platform;
+/// Debug-only timestamps reported after Metal drawables reach the display.
+pub mod presentation_trace;
 pub mod prelude;
 mod scene;
 mod shared_string;

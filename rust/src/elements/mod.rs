@@ -16,8 +16,7 @@ pub use div::{
     clear_native_layout_override, ease_out_cubic, finish_pointer_gesture, lerp,
     native_layout_has_animations, native_resize_active, retain_native_layout_keys,
     retain_pointer_state, retain_scroll_state, scroll_to, scroll_to_end,
-    set_native_layout_override, smoke_recently_painted, synth_drag_end, synth_drag_move,
-    synth_drag_start, synth_tap,
+    set_native_layout_override, synth_drag_end, synth_drag_move, synth_drag_start, synth_tap,
 };
 pub use image::ReactImageElement;
 pub use input::ReactInputElement;

@@ -864,6 +864,9 @@ impl Element for FrameMarker {
     ) {
         self.child.paint(window, cx);
         let frame = anim_trace::on_frame_painted();
+        if gpui::presentation_trace::is_active() {
+            gpui::presentation_trace::mark_content(frame);
+        }
         if self.input.is_some() {
             let mut input = NEXT_PAINTED_INPUT.lock().unwrap().clone();
             input.frame = frame;
@@ -2234,6 +2237,13 @@ pub(crate) enum Incoming {
         momentum_phase: String,
         reply: flume::Sender<serde_json::Value>,
     },
+    DebugNativeDriverSequence {
+        x: f32,
+        y: f32,
+        dy: f32,
+        steps: u32,
+        reply: flume::Sender<serde_json::Value>,
+    },
     /// proof-of-native-scroll: run the REAL AppKit `hitTest:` at (x,y) and report the
     /// resolved view class, then synthesize a real scroll-wheel `NSEvent` and deliver it
     /// natively to that view via `scrollWheel:` — NO rngpui JS delta-forwarding. If the
@@ -2313,6 +2323,68 @@ pub(crate) enum Incoming {
         y: f32,
         reply: flume::Sender<serde_json::Value>,
     },
+}
+
+struct DebugNativeDriverSequenceState {
+    x: f32,
+    y: f32,
+    dy: f32,
+    steps: u32,
+    index: u32,
+    dispatched: u32,
+    offset_y: f64,
+    reply: Option<flume::Sender<serde_json::Value>>,
+}
+
+fn schedule_debug_native_driver_sequence(
+    window: &mut Window,
+    state: Rc<RefCell<DebugNativeDriverSequenceState>>,
+) {
+    window.on_next_frame(move |window, _cx| {
+        let mut state_ref = state.borrow_mut();
+        let phase = if state_ref.index == 0 {
+            "began"
+        } else if state_ref.index < state_ref.steps {
+            "changed"
+        } else {
+            "ended"
+        };
+        let dy = if phase == "ended" { 0.0 } else { state_ref.dy };
+        let proof = elements::native_scroll::native_scroll_proof(
+            window,
+            state_ref.x as f64,
+            state_ref.y as f64,
+            dy as f64,
+            phase,
+            "none",
+        );
+        if proof.dispatched {
+            state_ref.dispatched += 1;
+            state_ref.offset_y = proof.offset_y;
+        }
+        let done = phase == "ended";
+        if !done {
+            state_ref.index += 1;
+        }
+        crate::anim_overlay::arm_paint_only_frame();
+        window.refresh();
+
+        if done {
+            if let Some(reply) = state_ref.reply.take() {
+                let _ = reply.send(serde_json::json!({
+                    "ok": proof.dispatched && state_ref.dispatched == state_ref.steps + 1,
+                    "type": "nativeDriverSequence",
+                    "steps": state_ref.steps,
+                    "dispatched": state_ref.dispatched,
+                    "offsetY": state_ref.offset_y,
+                }));
+            }
+        } else {
+            drop(state_ref);
+            schedule_debug_native_driver_sequence(window, state.clone());
+        }
+    });
+    window.refresh();
 }
 
 /// Parse one JS-host payload into an `Incoming`. A `$cmd` object is a native host
@@ -3115,45 +3187,6 @@ fn main() {
 
         let native_layout_driver_active = Arc::new(AtomicBool::new(false));
         let gpui_tween_driver_active = Arc::new(AtomicBool::new(false));
-
-        // Effects driver: animated procedural backgrounds (Background::Smoke) need the
-        // window repainting every frame while one is on screen. A paint-chained
-        // request_animation_frame is fragile (one dropped next-frame callback kills the
-        // chain for good), so this mirrors the native-layout driver instead: tick ~120Hz
-        // while a smoke quad painted recently, idle on a cheap poll otherwise.
-        {
-            let pump = pump.clone();
-            let window_handle = window_handle;
-            cx.spawn(async move |cx| {
-                loop {
-                    if elements::smoke_recently_painted() {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(8))
-                            .await;
-                        if pump.update(cx, |_this, cx| cx.notify()).is_err() {
-                            break;
-                        }
-                        if window_handle
-                            .update(cx, |_root, window, root_cx| {
-                                root_cx.notify();
-                                window.refresh();
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    } else {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(120))
-                            .await;
-                        if pump.update(cx, |_this, _cx| ()).is_err() {
-                            break;
-                        }
-                    }
-                }
-            })
-            .detach();
-        }
 
         // Foreground pump: apply each message on the main thread. A new tree re-renders
         // (cx.notify); a webview command runs straight against the live wry view (which
@@ -4059,6 +4092,37 @@ fn main() {
                             "momentumPhase": momentum_phase,
                         }));
                     }
+                    Incoming::DebugNativeDriverSequence {
+                        x,
+                        y,
+                        dy,
+                        steps,
+                        reply,
+                    } => {
+                        let failure_reply = reply.clone();
+                        let state = Rc::new(RefCell::new(DebugNativeDriverSequenceState {
+                            x,
+                            y,
+                            dy,
+                            steps,
+                            index: 0,
+                            dispatched: 0,
+                            offset_y: 0.0,
+                            reply: Some(reply),
+                        }));
+                        if window_handle
+                            .update(cx, |_root, window, _cx| {
+                                schedule_debug_native_driver_sequence(window, state);
+                            })
+                            .is_err()
+                        {
+                            let _ = failure_reply.send(serde_json::json!({
+                                "ok": false,
+                                "type": "nativeDriverSequence",
+                                "error": "window update failed",
+                            }));
+                        }
+                    }
                     Incoming::DebugNativeScrollAt { x, y, dy, reply } => {
                         // proof the hitTest passthrough routes a REAL scroll-wheel NSEvent
                         // natively to the WKWebView — no rngpui JS delta-forwarding. resolve
@@ -4556,6 +4620,7 @@ fn main() {
                             | Incoming::DebugScrollAt { .. }
                             | Incoming::DebugScrollDriverStats { .. }
                             | Incoming::DebugNativeDriverWheel { .. }
+                            | Incoming::DebugNativeDriverSequence { .. }
                             | Incoming::DebugNativeScrollAt { .. }
                             | Incoming::DebugWebviewCopyProof { .. }
                             | Incoming::NativeContextMenu(_)

@@ -5555,7 +5555,7 @@ dependencies = [
 
 [[package]]
 name = "react-native-gpui"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "anyhow",
  "base64",

@@ -1,6 +1,6 @@
 {
     "name": "react-native-gpui",
-    "version": "0.1.32",
+    "version": "0.1.33",
     "description": "Write React Native components, render them natively with GPUI (Zed's GPU UI framework).",
     "type": "module",
     "main": "dist/index.js",
@@ -69,7 +69,7 @@
         "conformance:native-layout-animation": "RNGPUI_NO_ACTIVATE=1 RNGPUI_TEST_MODE=1 node scripts/run-hermes-example.mjs examples/native-layout-animation-conformance.tsx --timeout-ms 8000",
         "conformance:portal": "node scripts/run-hermes-example.mjs examples/portal-conformance.tsx --interactive",
         "conformance:raf-pacing": "RNGPUI_NO_ACTIVATE=1 RNGPUI_TEST_MODE=1 node scripts/run-hermes-example.mjs examples/raf-pacing-conformance.tsx --timeout-ms 15000",
-    "conformance:presentation-pacing": "bun run scripts/presentation-pacing-conformance.mjs --require-120hz",
+        "conformance:presentation-pacing": "bun run scripts/presentation-pacing-conformance.mjs --require-120hz",
         "conformance:rounded-overflow": "bun run scripts/rounded-overflow-conformance.mjs",
         "conformance:text-lines": "bun run scripts/text-lines-conformance.mjs",
         "conformance:watch-reload": "node scripts/watch-reload-conformance.mjs",

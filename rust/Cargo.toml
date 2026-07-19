@@ -1,6 +1,6 @@
 [package]
 name = "react-native-gpui"
-version = "0.1.36"
+version = "0.1.37"
 edition = "2024"
 
 # the renderer service: hosts Hermes on a JS thread, renders committed React trees

@@ -152,6 +152,15 @@ pub struct ElementStyle {
 
     // Elevation / z-index
     pub z_index: Option<i32>,
+
+    // Edge fade: paint an alpha-multiply gradient over the top/bottom `edgeFadeTop`/
+    // `edgeFadeBottom` logical px of this element, fading that strip toward transparent so
+    // scrolling content dissolves into the glass behind a transparent chrome (revealed, not
+    // scrimmed). Painted after children. It is a DESTINATION multiply that scales every
+    // composited pixel in the strip (not an isolated mask) — see Window::paint_fade for the
+    // contract; use on an opacity-1 transparent-chrome wrapper.
+    pub edge_fade_top: Option<f32>,
+    pub edge_fade_bottom: Option<f32>,
 }
 
 impl ElementStyle {
@@ -241,6 +250,8 @@ impl ElementStyle {
         f!(line_height, "lineHeight");
         f!(letter_spacing, "letterSpacing");
         f!(opacity, "opacity");
+        f!(edge_fade_top, "edgeFadeTop");
+        f!(edge_fade_bottom, "edgeFadeBottom");
 
         i!(z_index, "zIndex");
 

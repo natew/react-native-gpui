@@ -2738,6 +2738,37 @@ impl Element for ReactDivElement {
                         paint_children(window);
                     }
                 });
+                // edge fades paint AFTER children so they sit on top, multiplying the
+                // element's own top/bottom strip toward transparent (revealing the glass
+                // behind a transparent chrome). angle 180 fades downward (opaque top edge
+                // -> clear bottom edge) for the bottom strip; angle 0 fades upward for the
+                // top strip. this wrapper paints the fade AFTER its scroll-list child's
+                // region ends, so scene.rs treats it as fixed content and repairs its band
+                // (+ scroll delta) each frame while the rest of the viewport still blits —
+                // the band re-renders the rows at their new offset before the multiply, so
+                // scroll-blit stays engaged AND the fade never ghosts.
+                let clamp_h = |requested: f32| {
+                    let h = px(requested);
+                    if h < bounds.size.height {
+                        h
+                    } else {
+                        bounds.size.height
+                    }
+                };
+                if let Some(strip) = self.element.style.edge_fade_bottom.filter(|s| *s > 0.0) {
+                    let h = clamp_h(strip);
+                    let strip_bounds = gpui::Bounds::new(
+                        point(bounds.origin.x, bounds.bottom() - h),
+                        gpui::size(bounds.size.width, h),
+                    );
+                    window.paint_fade(strip_bounds, 180.0);
+                }
+                if let Some(strip) = self.element.style.edge_fade_top.filter(|s| *s > 0.0) {
+                    let h = clamp_h(strip);
+                    let strip_bounds =
+                        gpui::Bounds::new(bounds.origin, gpui::size(bounds.size.width, h));
+                    window.paint_fade(strip_bounds, 0.0);
+                }
             });
         });
     }

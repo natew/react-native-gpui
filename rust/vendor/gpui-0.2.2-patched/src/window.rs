@@ -2967,6 +2967,54 @@ impl Window {
         });
     }
 
+    /// Paint an edge fade over `bounds`: an alpha-multiply gradient that fades the content
+    /// already drawn there toward transparent along `angle` (0 = top, clockwise degrees),
+    /// revealing whatever is behind the window (e.g. liquid glass) at the far edge. Unlike a
+    /// color scrim, this reduces the framebuffer's own alpha, so it works over a transparent
+    /// chrome. Reuses the `Quad` instance layout + quad shader; the fade pipeline multiplies
+    /// `dst` by the gradient's alpha (`result = f * dst` on every channel), so only the
+    /// gradient alpha matters — rgb is ignored. Paint it AFTER the content it should fade.
+    ///
+    /// Contract — this is NOT an isolated subtree mask. The multiply is a DESTINATION operator
+    /// on the already-composited framebuffer, so it scales EVERY gpui pixel drawn in the strip,
+    /// including lower siblings and any backdrop, not just this element's own children. At f=0
+    /// those pixels are cleared to transparent and what shows through is the window's own
+    /// backdrop (the transparent Metal layer over the glass/desktop), so intended use is an
+    /// opacity-1 transparent-chrome wrapper whose strip has no lower gpui sibling content you
+    /// want to keep. `element_opacity` is deliberately NOT applied to the fade: the children
+    /// under the strip were already scaled by it, and folding it in again would multiply the
+    /// f=1 (keep) edge by opacity a second time, dimming the subtree and seaming the strip's
+    /// inner edge. Because the destination op still runs at element/ancestor opacity 0, this is
+    /// unsuitable for an opacity-animated wrapper unless the fade strength is modeled separately.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_fade(&mut self, bounds: Bounds<Pixels>, angle: f32) {
+        self.invalidator.debug_assert_paint();
+
+        let scale_factor = self.scale_factor();
+        let content_mask = self.content_mask();
+        // opaque -> transparent along the gradient line. hue/lightness are irrelevant
+        // (the fade pipeline uses the source alpha as the multiply factor, ignoring rgb).
+        let background = crate::linear_gradient(
+            angle,
+            crate::linear_color_stop(crate::hsla(0.0, 0.0, 1.0, 1.0), 0.0),
+            crate::linear_color_stop(crate::hsla(0.0, 0.0, 1.0, 0.0), 1.0),
+        );
+        self.next_frame
+            .scene
+            .insert_primitive(crate::Primitive::Fade(Quad {
+                order: 0,
+                bounds: bounds.scale(scale_factor),
+                content_mask: content_mask.scale(scale_factor),
+                background,
+                border_color: transparent_black(),
+                corner_radii: Corners::default().scale(scale_factor),
+                border_widths: Edges::default().scale(scale_factor),
+                border_style: BorderStyle::default(),
+                transformation: self.element_transform,
+            }));
+    }
+
     /// Paint a real in-app backdrop blur: blurs the gpui content already drawn behind
     /// `bounds` (everything at a lower draw order), composites `tint` over it, and clips
     /// to the rounded rect. This is true liquid glass — it frosts the in-app Metal content

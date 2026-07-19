@@ -36,6 +36,10 @@ pub(crate) struct Scene {
     pub(crate) polychrome_sprites: Vec<PolychromeSprite>,
     pub(crate) surfaces: Vec<PaintSurface>,
     pub(crate) backdrop_blurs: Vec<BackdropBlur>,
+    // opt-in edge fades (an alpha-multiply gradient reused from the Quad struct +
+    // quad shader, drawn with the fade pipeline). isolated lane so the fade never
+    // batches with, or perturbs, normal quads.
+    pub(crate) fades: Vec<Quad>,
 }
 
 impl Scene {
@@ -54,6 +58,7 @@ impl Scene {
         self.polychrome_sprites.clear();
         self.surfaces.clear();
         self.backdrop_blurs.clear();
+        self.fades.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -317,6 +322,10 @@ impl Scene {
                 quad.order = order;
                 self.quads.push(quad.clone());
             }
+            Primitive::Fade(fade) => {
+                fade.order = order;
+                self.fades.push(fade.clone());
+            }
             Primitive::Path(path) => {
                 path.order = order;
                 path.id = PathId(self.paths.len());
@@ -368,6 +377,7 @@ impl Scene {
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.surfaces.sort_by_key(|surface| surface.order);
         self.backdrop_blurs.sort_by_key(|blur| blur.order);
+        self.fades.sort_by_key(|fade| fade.order);
     }
 
     #[cfg_attr(
@@ -403,6 +413,9 @@ impl Scene {
             backdrop_blurs: &self.backdrop_blurs,
             backdrop_blurs_start: 0,
             backdrop_blurs_iter: self.backdrop_blurs.iter().peekable(),
+            fades: &self.fades,
+            fades_start: 0,
+            fades_iter: self.fades.iter().peekable(),
         }
     }
 }
@@ -455,6 +468,10 @@ pub(crate) enum PrimitiveKind {
     // last so that at an equal draw order the blur batches AFTER same-order quads/sprites
     // — i.e. the glass frosts its same-layer siblings, not the other way around.
     BackdropBlur,
+    // an edge fade paints on top of everything it covers, so it sorts after the blur too:
+    // it multiplies the already-composited result (including any frosted glass) toward
+    // transparent. emitted after children in paint, so its order is normally higher anyway.
+    Fade,
 }
 
 #[derive(Clone)]
@@ -494,6 +511,9 @@ impl PaintOperation {
 pub(crate) enum Primitive {
     Shadow(Shadow),
     Quad(Quad),
+    // reuses the Quad struct + quad shader; distinguished only so it batches into its own
+    // lane and draws with the alpha-multiply fade pipeline.
+    Fade(Quad),
     Path(Path<ScaledPixels>),
     Underline(Underline),
     MonochromeSprite(MonochromeSprite),
@@ -507,6 +527,7 @@ impl Primitive {
         match self {
             Self::Shadow(_) => PrimitiveKind::Shadow,
             Self::Quad(_) => PrimitiveKind::Quad,
+            Self::Fade(_) => PrimitiveKind::Fade,
             Self::Path(_) => PrimitiveKind::Path,
             Self::Underline(_) => PrimitiveKind::Underline,
             Self::MonochromeSprite(_) => PrimitiveKind::MonochromeSprite,
@@ -545,6 +566,9 @@ impl Primitive {
             // + the shader's antialias band so the softened rounded edge is fully covered.
             return (extent > 0.0).then_some(extent + 1.0);
         }
+        // a Fade is not a Quad, so it falls through to None here and gets the general
+        // bounds+delta repair in scroll_blit_fixed_content_repairs — exactly right for a
+        // fixed alpha-multiply strip, whose whole band (not just an edge) must re-render.
         let Self::Quad(quad) = self else {
             return None;
         };
@@ -582,6 +606,7 @@ impl Primitive {
         match (self, other) {
             (Self::Shadow(a), Self::Shadow(b)) => a == b,
             (Self::Quad(a), Self::Quad(b)) => a == b,
+            (Self::Fade(a), Self::Fade(b)) => a == b,
             (Self::Path(a), Self::Path(b)) => a == b,
             (Self::Underline(a), Self::Underline(b)) => a == b,
             (Self::MonochromeSprite(a), Self::MonochromeSprite(b)) => a == b,
@@ -598,6 +623,7 @@ impl Primitive {
         match self {
             Primitive::Shadow(shadow) => &shadow.bounds,
             Primitive::Quad(quad) => &quad.bounds,
+            Primitive::Fade(fade) => &fade.bounds,
             Primitive::Path(path) => &path.bounds,
             Primitive::Underline(underline) => &underline.bounds,
             Primitive::MonochromeSprite(sprite) => &sprite.bounds,
@@ -611,6 +637,7 @@ impl Primitive {
         match self {
             Primitive::Shadow(shadow) => &shadow.content_mask,
             Primitive::Quad(quad) => &quad.content_mask,
+            Primitive::Fade(fade) => &fade.content_mask,
             Primitive::Path(path) => &path.content_mask,
             Primitive::Underline(underline) => &underline.content_mask,
             Primitive::MonochromeSprite(sprite) => &sprite.content_mask,
@@ -653,6 +680,9 @@ struct BatchIterator<'a> {
     backdrop_blurs: &'a [BackdropBlur],
     backdrop_blurs_start: usize,
     backdrop_blurs_iter: Peekable<slice::Iter<'a, BackdropBlur>>,
+    fades: &'a [Quad],
+    fades_start: usize,
+    fades_iter: Peekable<slice::Iter<'a, Quad>>,
 }
 
 impl<'a> Iterator for BatchIterator<'a> {
@@ -685,6 +715,10 @@ impl<'a> Iterator for BatchIterator<'a> {
             (
                 self.backdrop_blurs_iter.peek().map(|b| b.order),
                 PrimitiveKind::BackdropBlur,
+            ),
+            (
+                self.fades_iter.peek().map(|f| f.order),
+                PrimitiveKind::Fade,
             ),
         ];
         orders_and_kinds.sort_by_key(|(order, kind)| (order.unwrap_or(u32::MAX), *kind));
@@ -832,6 +866,20 @@ impl<'a> Iterator for BatchIterator<'a> {
                     &self.backdrop_blurs[blurs_start..blurs_end],
                 ))
             }
+            PrimitiveKind::Fade => {
+                let fades_start = self.fades_start;
+                let mut fades_end = fades_start + 1;
+                self.fades_iter.next();
+                while self
+                    .fades_iter
+                    .next_if(|fade| (fade.order, batch_kind) < max_order_and_kind)
+                    .is_some()
+                {
+                    fades_end += 1;
+                }
+                self.fades_start = fades_end;
+                Some(PrimitiveBatch::Fades(&self.fades[fades_start..fades_end]))
+            }
         }
     }
 }
@@ -859,6 +907,8 @@ pub(crate) enum PrimitiveBatch<'a> {
     },
     Surfaces(&'a [PaintSurface]),
     BackdropBlurs(&'a [BackdropBlur]),
+    // reuses the Quad instance layout; drawn with the alpha-multiply fade pipeline.
+    Fades(&'a [Quad]),
 }
 
 #[derive(Default, Debug, Clone, PartialEq)]

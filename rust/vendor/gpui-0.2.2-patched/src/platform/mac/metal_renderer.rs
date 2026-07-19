@@ -152,6 +152,7 @@ fn trace_scene_sprites(scene: &Scene, band: (f32, f32, f32, f32)) {
                 }
                 PrimitiveBatch::Surfaces(s) => write!(seq, " su{}", s.len()),
                 PrimitiveBatch::BackdropBlurs(b) => write!(seq, " bb{}", b.len()),
+                PrimitiveBatch::Fades(f) => write!(seq, " fd{}", f.len()),
             }
             .ok();
         }
@@ -235,6 +236,10 @@ pub(crate) struct MetalRenderer {
     shadows_pipeline_state: metal::RenderPipelineState,
     quads_pipeline_state: metal::RenderPipelineState,
     clear_quads_pipeline_state: metal::RenderPipelineState,
+    // reuses the quad shader; blends result = source_alpha * dst on every channel, so a
+    // white->transparent gradient quad fades the framebuffer toward transparent (revealing
+    // the glass window behind a transparent chrome). see build_alpha_multiply_pipeline_state.
+    fade_pipeline_state: metal::RenderPipelineState,
     underlines_pipeline_state: metal::RenderPipelineState,
     monochrome_sprites_pipeline_state: metal::RenderPipelineState,
     polychrome_sprites_pipeline_state: metal::RenderPipelineState,
@@ -368,6 +373,14 @@ impl MetalRenderer {
             MTLPixelFormat::BGRA8Unorm,
             false,
         );
+        let fade_pipeline_state = build_alpha_multiply_pipeline_state(
+            &device,
+            &library,
+            "fades",
+            "quad_vertex",
+            "quad_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        );
         let underlines_pipeline_state = build_pipeline_state(
             &device,
             &library,
@@ -438,6 +451,7 @@ impl MetalRenderer {
             shadows_pipeline_state,
             quads_pipeline_state,
             clear_quads_pipeline_state,
+            fade_pipeline_state,
             underlines_pipeline_state,
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
@@ -1118,6 +1132,14 @@ impl MetalRenderer {
 
                         did_draw
                     }
+                    PrimitiveBatch::Fades(fades) => self.draw_quads_with_pipeline(
+                        fades,
+                        &self.fade_pipeline_state,
+                        instance_buffer,
+                        &mut instance_offset,
+                        viewport_size,
+                        command_encoder,
+                    ),
                 };
                 if !ok {
                     command_encoder.end_encoding();
@@ -2052,6 +2074,47 @@ fn build_pipeline_state_with_blending(
     color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
     color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
+
+    device
+        .new_render_pipeline_state(&descriptor)
+        .expect("could not create render pipeline state")
+}
+
+// Alpha-multiply blend: result = source_alpha * dst on every channel (rgb AND alpha),
+// with the source's own color contributing nothing. Drawn with the quad shader, whose
+// (straight-alpha) gradient output supplies `source_alpha` = the gradient's alpha `f`.
+// Against gpui's premultiplied framebuffer this scales a pixel's premultiplied
+// (r,g,b,a) by f uniformly: the un-premultiplied color is unchanged while opacity drops
+// to f*a, so at f=0 the pixel becomes fully transparent and reveals the glass window
+// behind a transparent chrome. This is the fade primitive's whole trick.
+fn build_alpha_multiply_pipeline_state(
+    device: &metal::DeviceRef,
+    library: &metal::LibraryRef,
+    label: &str,
+    vertex_fn_name: &str,
+    fragment_fn_name: &str,
+    pixel_format: metal::MTLPixelFormat,
+) -> metal::RenderPipelineState {
+    let vertex_fn = library
+        .get_function(vertex_fn_name, None)
+        .expect("error locating vertex function");
+    let fragment_fn = library
+        .get_function(fragment_fn_name, None)
+        .expect("error locating fragment function");
+
+    let descriptor = metal::RenderPipelineDescriptor::new();
+    descriptor.set_label(label);
+    descriptor.set_vertex_function(Some(vertex_fn.as_ref()));
+    descriptor.set_fragment_function(Some(fragment_fn.as_ref()));
+    let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
+    color_attachment.set_pixel_format(pixel_format);
+    color_attachment.set_blending_enabled(true);
+    color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
+    color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
+    color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::Zero);
+    color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::Zero);
+    color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::SourceAlpha);
+    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::SourceAlpha);
 
     device
         .new_render_pipeline_state(&descriptor)

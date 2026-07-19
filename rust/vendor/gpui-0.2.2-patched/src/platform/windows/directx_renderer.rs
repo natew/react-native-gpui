@@ -305,6 +305,8 @@ impl DirectXRenderer {
                 PrimitiveBatch::Surfaces(surfaces) => self.draw_surfaces(surfaces),
                 // in-app backdrop blur is a mac-only metal feature; no-op elsewhere.
                 PrimitiveBatch::BackdropBlurs(_) => Ok(()),
+                // the edge-fade alpha-multiply pipeline is a mac-only metal feature; no-op here.
+                PrimitiveBatch::Fades(_) => Ok(()),
             }.context(format!("scene too large: {} paths, {} shadows, {} quads, {} underlines, {} mono, {} poly, {} surfaces",
                     scene.paths.len(),
                     scene.shadows.len(),

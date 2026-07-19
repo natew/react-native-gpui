@@ -904,6 +904,8 @@ impl BladeRenderer {
                 }
                 // in-app backdrop blur is a mac-only metal feature; no-op elsewhere.
                 PrimitiveBatch::BackdropBlurs(_) => {}
+                // the edge-fade alpha-multiply pipeline is a mac-only metal feature; no-op here.
+                PrimitiveBatch::Fades(_) => {}
             }
         }
         drop(pass);

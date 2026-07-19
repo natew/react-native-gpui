@@ -50,6 +50,42 @@ impl DisplayLink {
                 },
                 data,
             );
+            // react-native-gpui patch (experiment, opt-in via RNGPUI_PRESENT_QOS).
+            //
+            // This source IS the frame pump: CVDisplayLink fires on its own thread and only
+            // merges data here, so the actual draw + present runs as an event handler on the
+            // MAIN queue (probed: step() reports main_thread=true). That means every scroll
+            // present — even the cheap GPU scroll-blit that most scroll frames take — is
+            // serialized behind whatever else the main queue is doing, and under machine load
+            // the present cadence grows a dropped-frame tail while p50 stays at a clean 120Hz.
+            //
+            // Flooring the source's QoS makes dispatch service (and priority-boost) the frame
+            // handler at the user-interactive band instead of the main thread's baseline.
+            // This is a pure scheduling hint: it cannot race, tear, or change what is drawn.
+            // It is deliberately NOT the same thing as an earlier pthread_set_qos_class_self_np
+            // on the main thread, which floors the thread baseline and measured no effect.
+            //
+            // Left opt-in because present cadence under load is NOT measurable from the
+            // offscreen harness (a loaded harness delivers wheel events sparsely, so the
+            // service simply has nothing to present and the gaps are harness-induced). The
+            // only valid oracle is a real visible window under real load.
+            if std::env::var_os("RNGPUI_PRESENT_QOS").is_some() {
+                const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+                unsafe extern "C" {
+                    fn dispatch_set_qos_class_floor(
+                        object: crate::dispatch_sys::dispatch_object_t,
+                        qos_class: u32,
+                        relative_priority: std::os::raw::c_int,
+                    );
+                }
+                dispatch_set_qos_class_floor(
+                    crate::dispatch_sys::dispatch_object_t {
+                        _ds: frame_requests,
+                    },
+                    QOS_CLASS_USER_INTERACTIVE,
+                    0,
+                );
+            }
             dispatch_source_set_event_handler_f(frame_requests, Some(callback));
 
             let display_link = sys::DisplayLink::new(

@@ -521,6 +521,30 @@ impl Primitive {
         viewport: Bounds<ScaledPixels>,
         vertical: bool,
     ) -> Option<f32> {
+        // an outer cast shadow paints only outside its occluder, but a rounded occluder
+        // still lets the shadow paint in the corner cutouts inside a viewport that the
+        // occluder RECT contains (the metal shader uses a rounded-rect SDF on corner_radii
+        // plus a 0.5px antialias band, not rectangular containment). repair just that
+        // corner strip. the shadow's full bounding box spans its occluded interior plus
+        // blur, and repairing all of it is what exceeded the fast-path threshold and
+        // disabled scroll-blit for a stage inside a shadowed card. a sharp (radius 0)
+        // occluder returns None and falls through to the conservative full-box repair.
+        if let Self::Shadow(shadow) = self {
+            if shadow.transformation != TransformationMatrix::unit()
+                || shadow.occluder_bounds.intersect(&viewport) != viewport
+            {
+                return None;
+            }
+            let extent = shadow
+                .corner_radii
+                .top_left
+                .0
+                .max(shadow.corner_radii.top_right.0)
+                .max(shadow.corner_radii.bottom_left.0)
+                .max(shadow.corner_radii.bottom_right.0);
+            // + the shader's antialias band so the softened rounded edge is fully covered.
+            return (extent > 0.0).then_some(extent + 1.0);
+        }
         let Self::Quad(quad) = self else {
             return None;
         };

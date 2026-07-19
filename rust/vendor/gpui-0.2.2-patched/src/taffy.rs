@@ -492,7 +492,13 @@ impl TaffyLayoutEngine {
     /// Run each retained measured node's closure against its previously solved size, so gpui
     /// text/input elements repopulate this frame's layout state without a solve.
     fn run_measured_closures(&mut self, window: &mut Window, cx: &mut App) {
-        let expected = self.reuse_cursor.min(self.retained.len());
+        // Sweep EVERY retained measured node, not just those requested before this
+        // compute_layout. gpui lays some elements out after the first solve (deferred draws,
+        // overlays), and a text node whose closure never runs panics in prepaint with
+        // "measurement has not been performed". Re-running a node that taffy will also
+        // measure is harmless (shaping is cached and the solve overwrites it with real
+        // constraints); leaving one unmeasured is fatal.
+        let expected = self.retained.len();
         for i in 0..expected {
             if !self.retained_measured.get(i).copied().unwrap_or(false) {
                 continue;

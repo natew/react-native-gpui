@@ -4794,6 +4794,31 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn terminal_frame_commit_preserves_retained_layout() {
+        let first = tree_of(parse_incoming(&json!({
+            "globalId": 20_000,
+            "type": "ghostty-terminal",
+            "terminalSessionId": "ab-terminal",
+            "terminalFrames": [
+                { "seq": 1, "kind": "snapshot", "data": "YWJj", "cols": 120, "rows": 40 }
+            ],
+            "style": { "width": 800, "height": 600 }
+        })));
+        let next = tree_of(parse_incoming(&json!({
+            "globalId": 20_000,
+            "type": "ghostty-terminal",
+            "terminalSessionId": "ab-terminal",
+            "terminalFrames": [
+                { "seq": 1, "kind": "snapshot", "data": "YWJj", "cols": 120, "rows": 40 },
+                { "seq": 2, "kind": "bytes", "data": "ZA==" }
+            ],
+            "style": { "width": 800, "height": 600 }
+        })));
+
+        assert!(crate::elements::is_paint_only_tree_update(&first, &next));
+    }
+
     // The delta wire: a full commit seeds the index, then a delta with a `ref` node
     // reuses the prior Arc for the unchanged subtree (structural sharing) and must
     // reconstruct a tree byte-identical to a full apply of the same end state.

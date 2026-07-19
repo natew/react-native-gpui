@@ -920,12 +920,14 @@ fn scroll_terminal_pixels(session_id: &str, dy: f32) -> bool {
 
 /// Convert a wheel/trackpad delta into pixels of terminal scroll. Trackpad
 /// deltas arrive as pixels (with the OS momentum tail) and pass straight
-/// through; wheel "lines" become whole rows. dy > 0 reveals history.
+/// through; wheel "lines" become whole rows. GPUI reports the content-motion
+/// delta, while the terminal tracks distance upward from the live tail, so the
+/// signs are opposite: a natural upward gesture must increase scrollback.
 fn scroll_delta_pixels(delta: &ScrollDelta, line_height: f32) -> f32 {
     let line_height = line_height.max(1.0);
     match delta {
-        ScrollDelta::Lines(point) => point.y * line_height,
-        ScrollDelta::Pixels(point) => point.y.into(),
+        ScrollDelta::Lines(point) => -point.y * line_height,
+        ScrollDelta::Pixels(point) => -f32::from(point.y),
     }
 }
 
@@ -1053,17 +1055,17 @@ mod tests {
     }
 
     #[test]
-    fn trackpad_pixels_pass_through_wheel_lines_become_rows() {
-        // trackpad pixel deltas (with the OS momentum tail) pass straight through
-        // so scrolling is smooth, not quantized to whole rows.
+    fn natural_wheel_direction_reveals_terminal_history() {
+        // GPUI's negative content-motion delta for a natural upward trackpad
+        // gesture becomes positive distance into terminal scrollback.
         assert_eq!(
-            scroll_delta_pixels(&ScrollDelta::Pixels(point(px(0.0), px(7.5))), 18.0),
+            scroll_delta_pixels(&ScrollDelta::Pixels(point(px(0.0), px(-7.5))), 18.0),
             7.5
         );
-        // a wheel "line" maps to one terminal row.
+        // wheel lines use the same direction and map to whole terminal rows.
         assert_eq!(
             scroll_delta_pixels(&ScrollDelta::Lines(point(0.0, -3.0)), 18.0),
-            -54.0
+            54.0
         );
     }
 

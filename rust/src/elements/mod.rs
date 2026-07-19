@@ -277,7 +277,9 @@ impl ReactElement {
 /// True when a React commit preserves the exact host tree and changes only style
 /// keys that paint in place. Delta refs make this proportional to the changed paths:
 /// an unchanged subtree is the same Arc and returns immediately. Unknown fields and
-/// style keys take the safe full-layout path.
+/// style keys take the safe full-layout path. Terminal session/frame payloads are
+/// paint content inside a fixed host box; if a resize changes the terminal's internal
+/// row count, GPUI's retained-layout node-count guard rejects reuse automatically.
 pub fn is_paint_only_tree_update(previous: &Arc<ReactElement>, next: &Arc<ReactElement>) -> bool {
     if Arc::ptr_eq(previous, next) {
         return true;
@@ -311,8 +313,6 @@ pub fn is_paint_only_tree_update(previous: &Arc<ReactElement>, next: &Arc<ReactE
         || previous.native_layout_key != next.native_layout_key
         || previous.native_resize != next.native_resize
         || previous.native_list_group != next.native_list_group
-        || previous.terminal_session_id != next.terminal_session_id
-        || previous.terminal_frames != next.terminal_frames
         || previous.accessibility != next.accessibility
         || previous.interactive != next.interactive
         || previous.pseudo_events != next.pseudo_events

@@ -1536,7 +1536,24 @@ impl Render for ServiceApp {
             && !self.inspector.wants_input_grab()
             && !render_gate_disabled()
             && !retained_layout_disabled;
-        let reusing = window.prepare_layout_frame(want_reuse);
+        // Incremental layout: the commit kept the node graph identical, so replay the taffy
+        // tree and re-solve only the branches whose style or text actually changed instead of
+        // clearing and solving everything. Same vetoes as reuse (a moved animated layout key,
+        // a resize, a native layout animation, the inspector overlay) because each of those
+        // can reshape the graph out from under a positional replay. Opt-in while it proves
+        // out; RNGPUI_DISABLE_RETAINED_LAYOUT also disables it.
+        let want_incremental = !want_reuse
+            && self.root_dirty
+            && elements::incremental_eligible()
+            && !layout_dirty
+            && !viewport_changed
+            && !elements::native_resize_active()
+            && !elements::native_layout_has_animations()
+            && !self.inspector.wants_input_grab()
+            && !render_gate_disabled()
+            && !retained_layout_disabled
+            && std::env::var_os("RNGPUI_INCREMENTAL_LAYOUT").is_some();
+        let reusing = window.prepare_layout_frame(want_reuse, want_incremental);
         if std::env::var_os("RNGPUI_RETAINED_TRACE").is_some() {
             eprintln!(
                 "[retained] paint_only={paint_only} want_reuse={want_reuse} reusing={reusing} \
@@ -4454,6 +4471,21 @@ fn main() {
                                 let update_paint_only =
                                     elements::is_paint_only_tree_update(&this.root, &next_root);
                                 let classified_at = std::time::Instant::now();
+                                // Structure-preserving classification for the incremental
+                                // layout frame: same node graph, but styles/text may differ.
+                                // Only meaningful when the commit is not already paint-only.
+                                let mut text_changed = std::collections::HashSet::new();
+                                let update_incremental = !update_paint_only
+                                    && elements::is_structure_preserving_tree_update(
+                                        &this.root,
+                                        &next_root,
+                                        &mut text_changed,
+                                    );
+                                elements::accumulate_incremental(
+                                    this.root_dirty,
+                                    update_incremental,
+                                    text_changed,
+                                );
                                 let next_metadata = TreeMetadata::collect(&next_root);
                                 let metadata_at = std::time::Instant::now();
                                 let lifecycle_changed = this.tree_metadata != next_metadata;

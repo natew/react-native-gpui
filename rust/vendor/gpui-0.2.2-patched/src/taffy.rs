@@ -48,6 +48,22 @@ pub struct TaffyLayoutEngine {
     reuse: bool,
     reuse_cursor: usize,
     reuse_desynced: bool,
+    // Incremental-layout frame (react-native-gpui patch). A "reuse" frame skips the solve
+    // entirely and is only legal when NOTHING moved. Incremental is the middle case: the host
+    // proved the node GRAPH is identical (same elements, same order, same child counts) but
+    // some nodes' layout inputs changed. We keep the persistent taffy tree instead of
+    // clear()ing it, push `set_style` only into nodes whose style actually differs, and mark
+    // measured nodes dirty only where content changed. taffy 0.9 keeps per-node caches and
+    // clears them up the ancestor chain on mutation, so the solve re-runs only touched
+    // branches and reuses everything else.
+    incremental: bool,
+    // taffy style each retained node was last given, parallel to `retained`.
+    prev_styles: Vec<taffy::style::Style>,
+    // One-shot, set immediately before an element requests a measured child whose CONTENT
+    // changed. A text change never appears in the taffy Style, so without this the node keeps
+    // taffy's cached measure and lays out at its old size. Consumed by the next
+    // `request_measured_layout`; survives intervening `request_layout` calls by design.
+    measure_dirty_next: bool,
 }
 
 const EXPECT_MESSAGE: &str = "we should avoid taffy layout errors by construction if possible";
@@ -66,6 +82,9 @@ impl TaffyLayoutEngine {
             reuse: false,
             reuse_cursor: 0,
             reuse_desynced: false,
+            incremental: false,
+            prev_styles: Vec::new(),
+            measure_dirty_next: false,
         }
     }
 
@@ -81,6 +100,43 @@ impl TaffyLayoutEngine {
         self.reuse = false;
         self.reuse_cursor = 0;
         self.reuse_desynced = false;
+        // the taffy tree is gone, so these styles describe nothing; an incremental frame
+        // afterwards would diff against garbage.
+        self.incremental = false;
+        self.prev_styles.clear();
+    }
+
+    /// Begin an incremental-layout frame: keep the persistent taffy tree, replay the prior
+    /// nodes in allocation order, and still run the solve — but only nodes whose style
+    /// actually changed get `set_style`, and only content-dirty measured nodes are
+    /// invalidated, so taffy's caches carry the untouched branches.
+    ///
+    /// The caller must have proven the node graph is unchanged. A positional mismatch trips
+    /// `reuse_desynced` and the host forces a full layout next draw.
+    pub fn begin_incremental_frame(&mut self) -> bool {
+        if self.prev_bounds.is_empty()
+            || self.retained.len() != self.prev_bounds.len()
+            || self.retained_measured.len() != self.retained.len()
+            || self.prev_styles.len() != self.retained.len()
+        {
+            return false;
+        }
+        self.incremental = true;
+        self.reuse = false;
+        self.reuse_cursor = 0;
+        self.reuse_desynced = false;
+        self.measure_dirty_next = false;
+        true
+    }
+
+    /// Mark the NEXT measured node requested this frame as content-dirty.
+    pub fn mark_next_measured_dirty(&mut self) {
+        self.measure_dirty_next = true;
+    }
+
+    /// True while an incremental frame is in progress (persistent tree, partial re-solve).
+    pub fn is_incremental(&self) -> bool {
+        self.incremental
     }
 
     /// begin a retained-layout frame: replay the prior nodes + run fresh measures, but
@@ -95,6 +151,7 @@ impl TaffyLayoutEngine {
             return false;
         }
         self.reuse = true;
+        self.incremental = false;
         self.reuse_cursor = 0;
         self.reuse_desynced = false;
         true
@@ -135,20 +192,46 @@ impl TaffyLayoutEngine {
 
         let taffy_style = style.to_taffy(rem_size, scale_factor);
 
+        if self.incremental {
+            let index = self.reuse_cursor;
+            self.reuse_cursor += 1;
+            match self.retained.get(index).copied() {
+                // A measured slot or a different child count means the element walk diverged
+                // from the frame we are building on, so replaying positionally would attribute
+                // geometry to the wrong node.
+                Some(id)
+                    if self.retained_measured.get(index).copied() == Some(false)
+                        && self.taffy.child_count(id.into()) == children.len() =>
+                {
+                    if self.prev_styles[index] != taffy_style {
+                        // set_style clears this node's cache and its ancestors' — exactly the
+                        // invalidation we want; clean siblings keep theirs.
+                        self.taffy.set_style(id.into(), taffy_style.clone()).ok();
+                        self.prev_styles[index] = taffy_style;
+                    }
+                    return id;
+                }
+                _ => self.reuse_desynced = true,
+            }
+            // desynced: fall through and allocate so THIS frame still renders; the host clears
+            // the engine at end-of-draw and the next frame is a full layout.
+        }
+
         let id: LayoutId = if children.is_empty() {
             self.taffy
-                .new_leaf(taffy_style)
+                .new_leaf(taffy_style.clone())
                 .expect(EXPECT_MESSAGE)
                 .into()
         } else {
             self.taffy
                 // This is safe because LayoutId is repr(transparent) to taffy::tree::NodeId.
-                .new_with_children(taffy_style, LayoutId::to_taffy_slice(children))
+                .new_with_children(taffy_style.clone(), LayoutId::to_taffy_slice(children))
                 .expect(EXPECT_MESSAGE)
                 .into()
         };
         self.retained.push(id);
         self.retained_measured.push(false);
+        self.prev_styles.push(taffy_style);
         id
     }
 
@@ -203,13 +286,43 @@ impl TaffyLayoutEngine {
 
         let taffy_style = style.to_taffy(rem_size, scale_factor);
 
+        if self.incremental {
+            let dirty = std::mem::take(&mut self.measure_dirty_next);
+            let index = self.reuse_cursor;
+            self.reuse_cursor += 1;
+            match self.retained.get(index).copied() {
+                Some(id) if self.retained_measured.get(index).copied() == Some(true) => {
+                    if self.prev_styles[index] != taffy_style {
+                        self.taffy.set_style(id.into(), taffy_style.clone()).ok();
+                        self.prev_styles[index] = taffy_style;
+                    }
+                    // Swap the closure in place. Assigning THROUGH the context does not touch
+                    // taffy's dirty bits, so unchanged text keeps its cached measure;
+                    // set_node_context would dirty every text node every frame and defeat this
+                    // entirely. Content changes arrive via mark_next_measured_dirty instead.
+                    if let Some(existing) = self.taffy.get_node_context_mut(id.into()) {
+                        *existing = context;
+                    } else {
+                        self.reuse_desynced = true;
+                        self.taffy.set_node_context(id.into(), Some(context)).ok();
+                    }
+                    if dirty {
+                        self.taffy.mark_dirty(id.into()).ok();
+                    }
+                    return id;
+                }
+                _ => self.reuse_desynced = true,
+            }
+        }
+
         let id: LayoutId = self
             .taffy
-            .new_leaf_with_context(taffy_style, context)
+            .new_leaf_with_context(taffy_style.clone(), context)
             .expect(EXPECT_MESSAGE)
             .into();
         self.retained.push(id);
         self.retained_measured.push(true);
+        self.prev_styles.push(taffy_style);
         id
     }
 
@@ -276,6 +389,15 @@ impl TaffyLayoutEngine {
         if self.reuse {
             self.compute_layout_reuse(window, cx);
             return;
+        }
+        // Incremental frame: taffy will re-measure ONLY the nodes we dirtied, but gpui's
+        // text/input elements populate their per-frame paint state inside the measure
+        // callback. A clean text node would therefore never run its closure and paint would
+        // panic ("measurement has not been performed"). Run every measured closure against
+        // its prior solved size first — same reason compute_layout_reuse does it — then the
+        // solve re-runs the dirty ones with real constraints and overwrites their state.
+        if self.incremental {
+            self.run_measured_closures(window, cx);
         }
         // Leaving this here until we have a better instrumentation approach.
         // println!("Laying out {} children", self.count_all_children(id)?);
@@ -365,6 +487,43 @@ impl TaffyLayoutEngine {
             self.prev_bounds.push(b);
         }
         self.retained = nodes;
+    }
+
+    /// Run each retained measured node's closure against its previously solved size, so gpui
+    /// text/input elements repopulate this frame's layout state without a solve.
+    fn run_measured_closures(&mut self, window: &mut Window, cx: &mut App) {
+        let expected = self.reuse_cursor.min(self.retained.len());
+        for i in 0..expected {
+            if !self.retained_measured.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            let node = self.retained[i];
+            let known = self
+                .prev_bounds
+                .get(i)
+                .map(|b| Size {
+                    width: Some(b.size.width),
+                    height: Some(b.size.height),
+                })
+                .unwrap_or(Size {
+                    width: None,
+                    height: None,
+                });
+            let avail = Size {
+                width: known
+                    .width
+                    .map(AvailableSpace::Definite)
+                    .unwrap_or(AvailableSpace::MaxContent),
+                height: known
+                    .height
+                    .map(AvailableSpace::Definite)
+                    .unwrap_or(AvailableSpace::MaxContent),
+            };
+            if let Some(ctx) = self.taffy.get_node_context_mut(node.into()) {
+                // SAFETY of re-entrancy: the closure borrows window/cx but not the taffy tree.
+                let _ = (ctx.measure)(known, avail, window, cx);
+            }
+        }
     }
 
     /// run fresh closures for measured nodes with their retained solved sizes. the tree

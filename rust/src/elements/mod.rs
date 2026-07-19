@@ -274,6 +274,92 @@ impl ReactElement {
     }
 }
 
+static TEXT_CHANGED_IDS: once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashSet<u64>>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+static INCREMENTAL_ELIGIBLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// True when this element's text content changed in the pending commit batch, so an
+/// incremental frame must force a re-measure of its text child.
+pub fn text_changed(id: u64) -> bool {
+    TEXT_CHANGED_IDS.lock().unwrap().contains(&id)
+}
+
+pub fn incremental_eligible() -> bool {
+    INCREMENTAL_ELIGIBLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Fold one commit into the pending batch. Several React commits can land before GPUI
+/// renders, so once any pending commit is structurally ineligible the whole batch is, and the
+/// text-changed ids union across the batch.
+pub fn accumulate_incremental(
+    already_pending: bool,
+    eligible: bool,
+    text_changed: std::collections::HashSet<u64>,
+) {
+    use std::sync::atomic::Ordering;
+    let next = if already_pending {
+        INCREMENTAL_ELIGIBLE.load(Ordering::Relaxed) && eligible
+    } else {
+        eligible
+    };
+    INCREMENTAL_ELIGIBLE.store(next, Ordering::Relaxed);
+    let mut ids = TEXT_CHANGED_IDS.lock().unwrap();
+    if already_pending {
+        ids.extend(text_changed);
+    } else {
+        *ids = text_changed;
+    }
+}
+
+/// True when a commit preserves the exact host node GRAPH — same elements in the same order,
+/// same child counts, same measured-child shape — even though styles and text CONTENT may
+/// differ. That is the precondition for an incremental layout frame: the taffy tree can be
+/// replayed positionally, with `set_style` pushed only where styles differ and re-measures
+/// forced only where text changed (collected into `text_changed`).
+///
+/// Deliberately conservative: anything that could add, remove, or reshape a host node (a text
+/// child appearing, styled runs, an image, an input's value) takes the full-layout path.
+pub fn is_structure_preserving_tree_update(
+    previous: &Arc<ReactElement>,
+    next: &Arc<ReactElement>,
+    text_changed: &mut std::collections::HashSet<u64>,
+) -> bool {
+    if Arc::ptr_eq(previous, next) {
+        return true;
+    }
+    let has_text = |e: &ReactElement| e.text.as_ref().is_some_and(|t| !t.is_empty());
+    if previous.global_id != next.global_id
+        || previous.element_type != next.element_type
+        // a text child node appearing/disappearing changes the node graph
+        || has_text(previous) != has_text(next)
+        || previous.runs != next.runs
+        || previous.src.is_some() != next.src.is_some()
+        || previous.number_of_lines != next.number_of_lines
+        || previous.selectable != next.selectable
+        || previous.value != next.value
+        || previous.default_value != next.default_value
+        || previous.system_material != next.system_material
+        || previous.system_glass_variant != next.system_glass_variant
+        || previous.native_layout_key != next.native_layout_key
+        || previous.native_resize != next.native_resize
+        || previous.native_list_group != next.native_list_group
+        || previous.shows_vertical_scroll_indicator != next.shows_vertical_scroll_indicator
+        || previous.shows_horizontal_scroll_indicator != next.shows_horizontal_scroll_indicator
+        || previous.children.len() != next.children.len()
+    {
+        return false;
+    }
+    if previous.text != next.text {
+        text_changed.insert(next.global_id);
+    }
+    previous
+        .children
+        .iter()
+        .zip(&next.children)
+        .all(|(previous, next)| is_structure_preserving_tree_update(previous, next, text_changed))
+}
+
 /// True when a React commit preserves the exact host tree and changes only style
 /// keys that paint in place. Delta refs make this proportional to the changed paths:
 /// an unchanged subtree is the same Arc and returns immediately. Unknown fields and

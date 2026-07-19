@@ -1544,6 +1544,7 @@ impl Element for ReactDivElement {
         }
 
         // If element has text content, add it
+        let mut pushed_text = false;
         if let Some(ref text) = self.element.text {
             if !text.is_empty() {
                 let text_color = self.element.style.color.unwrap_or(Hsla {
@@ -1567,14 +1568,28 @@ impl Element for ReactDivElement {
                     element: te.child(text.clone()).into_any_element(),
                     z_index: 0,
                 });
+                pushed_text = true;
             }
         }
 
-        let child_ids: Vec<_> = self
-            .children
-            .iter_mut()
-            .map(|c| c.element.request_layout(window, cx))
-            .collect();
+        // The text child is pushed LAST, after the regular children. On an incremental frame
+        // a text change never shows up in the taffy Style, so signal it right before that one
+        // child is requested — marking earlier would dirty a measured node inside the regular
+        // children instead, and the node whose text actually changed would keep a stale
+        // cached measure (silently wrong geometry).
+        let text_index = if pushed_text {
+            self.children.len().checked_sub(1)
+        } else {
+            None
+        };
+        let text_dirty = text_index.is_some() && crate::elements::text_changed(self.element.global_id);
+        let mut child_ids: Vec<LayoutId> = Vec::with_capacity(self.children.len());
+        for (index, child) in self.children.iter_mut().enumerate() {
+            if text_dirty && Some(index) == text_index {
+                window.mark_next_measured_dirty();
+            }
+            child_ids.push(child.element.request_layout(window, cx));
+        }
 
         let _t = crate::frame_trace::named(2);
         // stash the built style for paint — the same element instance carries through

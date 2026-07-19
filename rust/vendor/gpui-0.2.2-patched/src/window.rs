@@ -2040,7 +2040,7 @@ impl Window {
         // self-healing in a single frame.
         {
             let engine = self.layout_engine.as_mut().unwrap();
-            if engine.is_reusing() && engine.reuse_desynced() {
+            if (engine.is_reusing() || engine.is_incremental()) && engine.reuse_desynced() {
                 engine.clear();
             }
         }
@@ -3502,13 +3502,25 @@ impl Window {
     /// affecting changed (see the host's paint-only-frame gate). A desync (replay over/under
     /// -runs) is detected and self-heals to a full layout next draw, so a gate bug is a
     /// one-frame glitch, never a crash or a permanently-wrong layout.
-    pub fn prepare_layout_frame(&mut self, reuse_paint_only: bool) -> bool {
+    pub fn prepare_layout_frame(&mut self, reuse_paint_only: bool, incremental: bool) -> bool {
         let engine = self.layout_engine.as_mut().unwrap();
         if reuse_paint_only && engine.begin_reuse_frame() {
             true
+        } else if incremental && engine.begin_incremental_frame() {
+            // still solves, so this is NOT a "reusing" frame for tracing/probe purposes.
+            false
         } else {
             engine.clear();
             false
+        }
+    }
+
+    /// Mark the next measured layout node requested this frame as content-dirty, so an
+    /// incremental frame re-measures it instead of trusting taffy's cached measure. Elements
+    /// call this immediately before requesting a measured child whose content changed.
+    pub fn mark_next_measured_dirty(&mut self) {
+        if let Some(engine) = self.layout_engine.as_mut() {
+            engine.mark_next_measured_dirty();
         }
     }
 

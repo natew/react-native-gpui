@@ -851,6 +851,7 @@ impl Element for FrameMarker {
         window: &mut Window,
         cx: &mut App,
     ) {
+        bridge::begin_layout_frame();
         self.child.prepaint(window, cx);
     }
 
@@ -865,6 +866,7 @@ impl Element for FrameMarker {
         cx: &mut App,
     ) {
         self.child.paint(window, cx);
+        bridge::flush_layout_frame();
         let frame = anim_trace::on_frame_painted();
         if gpui::presentation_trace::is_active() {
             gpui::presentation_trace::mark_content(frame);
@@ -1169,6 +1171,12 @@ impl TreeMetadata {
                 }
             }
         }
+    }
+
+    fn has_native_snapshot_hosts(&self) -> bool {
+        !self.webview_ids.is_empty()
+            || !self.system_ids.is_empty()
+            || !self.native_control_ids.is_empty()
     }
 }
 
@@ -1821,7 +1829,11 @@ impl Render for ServiceApp {
             let webviews_done = std::time::Instant::now();
 
             if self.inspector.enabled() {
-                inspector::refresh_snapshot_cache(&self.root);
+                if self.tree_metadata.has_native_snapshot_hosts() {
+                    inspector::refresh_snapshot_cache(&self.root);
+                } else {
+                    inspector::clear_snapshot_cache();
+                }
             }
             let inspector_done = std::time::Instant::now();
 
@@ -3196,11 +3208,47 @@ fn main() {
         let native_layout_driver_active = Arc::new(AtomicBool::new(false));
         let gpui_tween_driver_active = Arc::new(AtomicBool::new(false));
 
-        // Foreground pump: apply each message on the main thread. A new tree re-renders
-        // (cx.notify); a webview command runs straight against the live wry view (which
-        // must be driven from the main thread). Both arrive on the same ordered channel.
+        // Foreground pump: apply messages on the main thread. Consecutive React trees
+        // supersede one another, so collapse an already-queued burst to its newest tree
+        // before touching GPUI. Commands remain ordering barriers: a tree on either side
+        // of a command is never reordered or dropped. This keeps recycler commit bursts
+        // from starving native scroll presentation with obsolete intermediate trees.
         cx.spawn(async move |cx| {
-            while let Ok(msg) = tree_rx.recv_async().await {
+            let mut pending_msg = None;
+            loop {
+                let msg = if let Some(msg) = pending_msg.take() {
+                    msg
+                } else {
+                    let Ok(msg) = tree_rx.recv_async().await else {
+                        break;
+                    };
+                    msg
+                };
+                let msg = match msg {
+                    Incoming::Tree(mut latest) => {
+                        let mut coalesced = 0usize;
+                        loop {
+                            match tree_rx.try_recv() {
+                                Ok(Incoming::Tree(next)) => {
+                                    latest = next;
+                                    coalesced += 1;
+                                }
+                                Ok(other) => {
+                                    pending_msg = Some(other);
+                                    break;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        if coalesced > 0
+                            && std::env::var_os("RNGPUI_RENDER_TRACE").is_some()
+                        {
+                            eprintln!("[tree-apply] coalesced={coalesced}");
+                        }
+                        Incoming::Tree(latest)
+                    }
+                    other => other,
+                };
                 match msg {
                     Incoming::Quit => {
                         let _ = cx.update(|cx| cx.quit());

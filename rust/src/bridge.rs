@@ -4,6 +4,7 @@
 //! `globalThis.__rngpui_onHostEvent`. `runtime.ts` parses these into `BridgeEvent`s and
 //! routes them back to React handlers. The JSON shapes are unchanged from the old stdio bridge.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -19,6 +20,12 @@ static LAST_LAYOUT: Lazy<Mutex<HashMap<u64, (i32, i32, i32, i32)>>> =
 // last real native geometry instead of a stale zero placeholder.
 static LAST_FRAME: Lazy<Mutex<HashMap<u64, (f32, f32, f32, f32)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+thread_local! {
+    // Layout reporting runs on the GPUI main thread. During one paint, collect all
+    // node frames locally and merge them under LAST_FRAME's mutex once at the root.
+    // Calls outside paint keep their immediate semantics for lifecycle code/tests.
+    static FRAME_LAYOUTS: RefCell<Option<HashMap<u64, (f32, f32, f32, f32)>>> = const { RefCell::new(None) };
+}
 static LAYOUT_SUBSCRIBERS: Lazy<Mutex<std::collections::HashSet<u64>>> =
     Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
 
@@ -287,8 +294,34 @@ pub fn layout_if_changed(id: u64, x: f32, y: f32, width: f32, height: f32) {
     emit_layout(id, x, y, width, height);
 }
 
+pub fn begin_layout_frame() {
+    FRAME_LAYOUTS.with(|layouts| {
+        *layouts.borrow_mut() = Some(HashMap::new());
+    });
+}
+
+pub fn flush_layout_frame() {
+    let pending = FRAME_LAYOUTS.with(|layouts| layouts.borrow_mut().take());
+    if let Some(pending) = pending
+        && !pending.is_empty()
+    {
+        LAST_FRAME.lock().unwrap().extend(pending);
+    }
+}
+
 pub fn remember_layout(id: u64, x: f32, y: f32, width: f32, height: f32) {
-    LAST_FRAME.lock().unwrap().insert(id, (x, y, width, height));
+    let frame = (x, y, width, height);
+    let queued = FRAME_LAYOUTS.with(|layouts| {
+        let mut layouts = layouts.borrow_mut();
+        let Some(layouts) = layouts.as_mut() else {
+            return false;
+        };
+        layouts.insert(id, frame);
+        true
+    });
+    if !queued {
+        LAST_FRAME.lock().unwrap().insert(id, frame);
+    }
 }
 
 pub fn cached_layout(id: u64) -> Option<(f32, f32, f32, f32)> {

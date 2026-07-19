@@ -353,15 +353,16 @@ fn style_change_is_paint_only(
 
 pub fn report_layout(element: &ReactElement, bounds: Bounds<Pixels>) {
     let id = element.global_id;
-    crate::bridge::remember_layout(
-        id,
-        bounds.origin.x.into(),
-        bounds.origin.y.into(),
-        bounds.size.width.into(),
-        bounds.size.height.into(),
-    );
     if element.listens("layout") {
         crate::bridge::layout_if_changed(
+            id,
+            bounds.origin.x.into(),
+            bounds.origin.y.into(),
+            bounds.size.width.into(),
+            bounds.size.height.into(),
+        );
+    } else {
+        crate::bridge::remember_layout(
             id,
             bounds.origin.x.into(),
             bounds.origin.y.into(),

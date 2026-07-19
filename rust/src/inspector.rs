@@ -106,6 +106,10 @@ pub const INSPECTOR_ACTIVATION_HOLD: Duration = Duration::from_millis(500);
 /// (parity with the ~/one devtool's copy-then-dismiss beat).
 pub const INSPECTOR_COPY_CLOSE_DELAY: Duration = Duration::from_millis(800);
 
+// Native child views sit outside GPUI's pointer path, so they need a retained
+// snapshot for their own inspector bridge. Ordinary GPUI nodes are hit-tested
+// against the live tree when the inspector is active and must not be eagerly
+// formatted on every structural React commit.
 static SNAPSHOT_METADATA: Lazy<Mutex<HashMap<u64, SnapshotMetadata>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static SNAPSHOT_CACHE: Lazy<Mutex<HashMap<u64, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
@@ -1140,6 +1144,11 @@ pub fn refresh_snapshot_cache(root: &Arc<ReactElement>) {
     *SNAPSHOT_CACHE.lock().unwrap() = snapshots;
 }
 
+pub fn clear_snapshot_cache() {
+    SNAPSHOT_METADATA.lock().unwrap().clear();
+    SNAPSHOT_CACHE.lock().unwrap().clear();
+}
+
 pub fn refresh_layout_snapshot(id: u64, x: f32, y: f32, width: f32, height: f32) {
     let bounds = Rect {
         x,
@@ -1233,28 +1242,33 @@ fn collect_snapshots(
         return;
     }
     path.push(summary(element));
-    let snapshot_metadata = SnapshotMetadata {
-        target: summary(element),
-        events: element.events.clone(),
-        value: snippet(
-            element
-                .value
-                .as_deref()
-                .or(element.default_value.as_deref()),
-            120,
-        ),
-        style: style_facts(element),
-        path: path.clone(),
-        rank: inspect_rank(element),
-        depth: path.len(),
-    };
-    if let Some(bounds) = bridge::cached_layout(element.global_id).map(Rect::from)
-        && bounds.is_visible()
-    {
-        let hit = snapshot_metadata.clone().into_hit(bounds);
-        snapshots.insert(element.global_id, snapshot(&hit));
+    if matches!(
+        element.element_type.as_str(),
+        "webview" | "system" | "nativebutton" | "nativeinput"
+    ) {
+        let snapshot_metadata = SnapshotMetadata {
+            target: summary(element),
+            events: element.events.clone(),
+            value: snippet(
+                element
+                    .value
+                    .as_deref()
+                    .or(element.default_value.as_deref()),
+                120,
+            ),
+            style: style_facts(element),
+            path: path.clone(),
+            rank: inspect_rank(element),
+            depth: path.len(),
+        };
+        if let Some(bounds) = bridge::cached_layout(element.global_id).map(Rect::from)
+            && bounds.is_visible()
+        {
+            let hit = snapshot_metadata.clone().into_hit(bounds);
+            snapshots.insert(element.global_id, snapshot(&hit));
+        }
+        metadata.insert(element.global_id, snapshot_metadata);
     }
-    metadata.insert(element.global_id, snapshot_metadata);
     for child in element.children.iter() {
         collect_snapshots(child, path, metadata, snapshots);
     }

@@ -100,6 +100,21 @@ static PRESSED: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new
 static PSEUDO_HITBOXES: Lazy<Mutex<HashMap<u64, Hitbox>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+struct ScrollHoverState {
+    last_scroll: Instant,
+    settler_armed: bool,
+    suppressed: bool,
+}
+
+static SCROLL_HOVER: Lazy<Mutex<ScrollHoverState>> = Lazy::new(|| {
+    Mutex::new(ScrollHoverState {
+        last_scroll: Instant::now(),
+        settler_armed: false,
+        suppressed: false,
+    })
+});
+const SCROLL_HOVER_SETTLE: Duration = Duration::from_millis(80);
+
 // RNGPUI_DRAG_TRACE=1 logs the live press-drag-sweep gate (mouse-down arming +
 // per-row cross-sweep activation) so a real scrub can be diagnosed — synth gates
 // pass without exercising the live gpui pointer path (the gesture gap).
@@ -343,6 +358,9 @@ pub fn retain_pointer_state(present: &HashSet<u64>) {
 /// stale entry. This is O(n) in the number of pseudo-enabled elements — the common
 /// case is the visible session rows + project picker menu (~dozens, not thousands).
 pub fn re_evaluate_pseudo_hover(window: &Window) {
+    if SCROLL_HOVER.lock().unwrap().suppressed {
+        return;
+    }
     let mut changed: Vec<(u64, bool)> = Vec::new();
     {
         let hitboxes = PSEUDO_HITBOXES.lock().unwrap();
@@ -370,6 +388,57 @@ pub fn re_evaluate_pseudo_hover(window: &Window) {
             crate::bridge::pseudo(id, true, pressed);
         }
     }
+}
+
+fn suppress_pseudo_hover_during_native_scroll(window: &Window, cx: &mut App) {
+    let should_arm = {
+        let mut state = SCROLL_HOVER.lock().unwrap();
+        state.last_scroll = Instant::now();
+        let should_arm = !state.settler_armed;
+        state.settler_armed = true;
+        state.suppressed = true;
+        should_arm
+    };
+    if !should_arm {
+        return;
+    }
+
+    // A stationary pointer can cross dozens of recycled rows during one fling.
+    // Sending every intermediate enter/leave through Tamagui produces a React
+    // commit at each row boundary and blocks the main thread that presents the
+    // scroll. Clear the initial hover once, then reconcile only the final row.
+    let hovered = PSEUDO_HOVER.lock().unwrap().drain().collect::<Vec<_>>();
+    for id in hovered {
+        PRESSED.lock().unwrap().remove(&id);
+        crate::bridge::pseudo(id, false, false);
+    }
+
+    let window_handle = window.window_handle();
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(SCROLL_HOVER_SETTLE).await;
+            let settled = {
+                let mut state = SCROLL_HOVER.lock().unwrap();
+                if state.last_scroll.elapsed() < SCROLL_HOVER_SETTLE {
+                    false
+                } else {
+                    state.suppressed = false;
+                    state.settler_armed = false;
+                    true
+                }
+            };
+            if settled {
+                let _ = window_handle.update(cx, |_root, window, _cx| {
+                    // The retained pseudo hitboxes describe the previous painted
+                    // offset. Refresh first; the normal paint path records the final
+                    // hitbox and emits exactly that row's enter event.
+                    window.refresh();
+                });
+                break;
+            }
+        }
+    })
+    .detach();
 }
 
 pub fn retain_native_layout_keys(keys: &HashSet<String>) {
@@ -1892,6 +1961,7 @@ impl Element for ReactDivElement {
                     if (next.x - cur.x).abs() > 0.01 || (next.y - cur.y).abs() > 0.01 {
                         if native.is_some() {
                             NATIVE_SCROLL_OWNED.lock().unwrap().insert(id);
+                            suppress_pseudo_hover_during_native_scroll(window, cx);
                         }
                         set_scroll(id, next);
                         mark_scroll_event(id);
@@ -2458,7 +2528,10 @@ impl Element for ReactDivElement {
         // coalesced `pseudo` event on native hover/press flips, so Tamagui can drive pseudo
         // state with no React mouse-event lane.
         let wants_events = self.element.pseudo_events;
-        if wants_events && let Some(hitbox) = prepaint.hitbox.clone() {
+        if wants_events
+            && !SCROLL_HOVER.lock().unwrap().suppressed
+            && let Some(hitbox) = prepaint.hitbox.clone()
+        {
             let id = self.element.global_id;
             let emit_pseudo = move |hovered: bool, pressed: bool| {
                 crate::bridge::pseudo(id, hovered, pressed);

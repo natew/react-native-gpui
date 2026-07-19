@@ -132,12 +132,15 @@ pub fn set_focused_text_node(id: u64, focused: bool) {
 }
 
 pub fn sync_tree(window: &mut Window, root: &Arc<ReactElement>) {
+    let trace = std::env::var_os("RNGPUI_RENDER_TRACE").is_some();
+    let started_at = trace.then(std::time::Instant::now);
     let Some(content_view) = content_view(window) else {
         return;
     };
 
     let mut descriptors = Vec::new();
     collect_descriptors(root, None, &mut descriptors);
+    let collected_at = trace.then(std::time::Instant::now);
     let present = descriptors
         .iter()
         .map(|descriptor| descriptor.id)
@@ -239,6 +242,13 @@ pub fn sync_tree(window: &mut Window, root: &Arc<ReactElement>) {
             .collect::<Vec<_>>();
         set_accessibility_children(content_view, &roots);
         post_layout_changed(content_view);
+    }
+    if let (Some(started_at), Some(collected_at)) = (started_at, collected_at) {
+        eprintln!(
+            "[render] accessibility collect={:.2}ms sync={:.2}ms",
+            collected_at.duration_since(started_at).as_secs_f64() * 1_000.0,
+            collected_at.elapsed().as_secs_f64() * 1_000.0,
+        );
     }
 }
 

@@ -43,6 +43,7 @@
         "conformance:reanimated": "node scripts/reanimated-conformance.mjs",
         "conformance:reanimated:scroll": "bun run scripts/reanimated-scroll-conformance.ts",
         "conformance:offthread-stall": "node scripts/offthread-stall-conformance.mjs",
+        "conformance:native-scroll-react-stall": "node scripts/native-scroll-react-stall-conformance.mjs",
         "conformance:dialog-reanimated": "bun run scripts/dialog-reanimated-conformance.mjs",
         "conformance:sustained-reanimated": "bun run scripts/sustained-reanimated-conformance.mjs",
         "prebuild:reanimated": "bun run scripts/prebuild-reanimated.mjs",

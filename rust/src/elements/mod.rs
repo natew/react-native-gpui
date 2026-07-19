@@ -198,6 +198,10 @@ pub struct ReactElement {
     /// always carry a style).
     pub style_json: Option<serde_json::Value>,
     pub cached_gpui_style: Option<gpui::Style>,
+    /// shared svg markup allocated once when the committed node is parsed. svg layout
+    /// rebuilds its gpui child on each full-layout frame, so it clones this handle
+    /// instead of copying and re-allocating the complete markup string each time.
+    pub cached_svg_path: gpui::SharedString,
     /// precomputed at parse: this node listens for any pointer/press event (the
     /// `POINTER_EVENTS` scan) — prepaint reads this once per frame per node, so the
     /// 28-name string scan must not run there.

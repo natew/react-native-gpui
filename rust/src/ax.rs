@@ -937,6 +937,7 @@ mod tests {
             style: ElementStyle::default(),
             style_json: None,
             cached_gpui_style: None,
+            cached_svg_path: gpui::SharedString::new_static(""),
             interactive: false,
             pseudo_events: false,
         }

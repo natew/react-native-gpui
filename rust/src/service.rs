@@ -466,6 +466,14 @@ fn parse_json_tree(
     // (also immutable) style — so caching it here turns the ~280-line per-frame
     // rebuild (run in both request_layout and paint, for every element) into a clone.
     let cached_gpui_style = Some(style.build_gpui_style(None));
+    // svg request_layout rebuilds its gpui child on every full-layout frame. convert
+    // the markup to SharedString once per committed svg node so each rebuild clones
+    // an arc-backed handle instead of the entire source string.
+    let cached_svg_path = if element_type == "svg" {
+        gpui::SharedString::new(text.as_deref().unwrap_or_default())
+    } else {
+        gpui::SharedString::new_static("")
+    };
     // precompute the per-frame prepaint facts (event scan) once per commit — prepaint
     // runs them for every node on every draw.
     let interactive = events
@@ -507,6 +515,7 @@ fn parse_json_tree(
         style,
         style_json,
         cached_gpui_style,
+        cached_svg_path,
         interactive,
         pseudo_events,
     }))
@@ -2078,6 +2087,7 @@ fn fallback_root() -> Arc<ReactElement> {
         },
         style_json: None,
         cached_gpui_style: None,
+        cached_svg_path: gpui::SharedString::new_static(""),
         interactive: false,
         pseudo_events: false,
     })

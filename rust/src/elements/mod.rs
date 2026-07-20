@@ -130,6 +130,9 @@ pub struct ReactElement {
     pub global_id: u64,
     pub element_type: String,
     pub text: Option<String>,
+    /// arc-backed copy used by the immediate-mode text rebuild. metadata keeps the
+    /// committed String while each draw clones this handle instead of its bytes.
+    pub cached_text: gpui::SharedString,
     /// RN Text `numberOfLines`; clamps text and ellipsizes overflow.
     pub number_of_lines: Option<usize>,
     /// RN Text `selectable`; opts this text into the native drag selection + Cmd+C.
@@ -177,7 +180,7 @@ pub struct ReactElement {
     pub shows_vertical_scroll_indicator: bool,
     pub shows_horizontal_scroll_indicator: bool,
     /// event names this node listens to: "press", "changeText", "layout", …
-    pub events: Vec<String>,
+    pub events: Arc<[String]>,
     /// native-only key for runtime layout overrides, bypassing React commits.
     pub native_layout_key: Option<String>,
     /// native-only resize gesture applied to a keyed layout target.

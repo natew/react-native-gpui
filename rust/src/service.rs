@@ -474,6 +474,10 @@ fn parse_json_tree(
     } else {
         gpui::SharedString::new_static("")
     };
+    let cached_text = text.as_deref().map_or_else(
+        || gpui::SharedString::new_static(""),
+        gpui::SharedString::new,
+    );
     // precompute the per-frame prepaint facts (event scan) once per commit — prepaint
     // runs them for every node on every draw.
     let interactive = events
@@ -483,6 +487,7 @@ fn parse_json_tree(
         global_id,
         element_type: element_type.to_string(),
         text,
+        cached_text,
         number_of_lines,
         selectable,
         runs,
@@ -504,7 +509,7 @@ fn parse_json_tree(
         most_recent_event_count,
         shows_vertical_scroll_indicator,
         shows_horizontal_scroll_indicator,
-        events,
+        events: events.into(),
         native_layout_key,
         native_resize,
         native_list_group,
@@ -2049,6 +2054,7 @@ fn fallback_root() -> Arc<ReactElement> {
         global_id: 1,
         element_type: "div".to_string(),
         text: None,
+        cached_text: gpui::SharedString::new_static(""),
         number_of_lines: None,
         selectable: false,
         runs: Vec::new(),
@@ -2070,7 +2076,7 @@ fn fallback_root() -> Arc<ReactElement> {
         most_recent_event_count: 0,
         shows_vertical_scroll_indicator: true,
         shows_horizontal_scroll_indicator: true,
-        events: Vec::new(),
+        events: Arc::from([]),
         native_layout_key: None,
         native_resize: None,
         native_list_group: None,

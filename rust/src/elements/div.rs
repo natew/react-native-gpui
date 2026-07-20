@@ -1565,7 +1565,9 @@ impl Element for ReactDivElement {
                     te = te.font_weight(weight);
                 }
                 self.children.push(StackedChild {
-                    element: te.child(text.clone()).into_any_element(),
+                    element: te
+                        .child(self.element.cached_text.clone())
+                        .into_any_element(),
                     z_index: 0,
                 });
                 pushed_text = true;
@@ -1948,6 +1950,7 @@ impl Element for ReactDivElement {
         }
 
         // pointer events: emit react native press and desktop mouse events to js. bounds-gated; bubbling.
+        let event_flags_trace = crate::frame_trace::named(8);
         let id = self.element.global_id;
         let click = self.element.listens("click");
         let context_menu = self.element.listens("contextMenu");
@@ -2012,6 +2015,7 @@ impl Element for ReactDivElement {
             || press
             || press_in
             || press_out;
+        drop(event_flags_trace);
         if tracks_pointer {
             if let Some(hitbox) = prepaint.hitbox.clone() {
                 if context_menu {
@@ -2072,7 +2076,7 @@ impl Element for ReactDivElement {
                                     group: press_group_for_down.clone(),
                                     did_activate: false,
                                     left_start: false,
-                                    start_events: event_names_for_down.clone(),
+                                    start_events: event_names_for_down.to_vec(),
                                     start_bounds: layout_bounds,
                                     start_cancelled: false,
                                 });

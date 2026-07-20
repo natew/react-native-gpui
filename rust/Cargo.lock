@@ -5573,6 +5573,7 @@ dependencies = [
  "objc",
  "once_cell",
  "raw-window-handle",
+ "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "tungstenite",

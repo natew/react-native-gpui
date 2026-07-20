@@ -45,7 +45,7 @@ impl ReactTextElement {
         let size = style.font_size.unwrap_or(14.0);
         let family = style.gpui_font_family();
         let weight = style.gpui_font_weight();
-        let text = self.element.text.clone().unwrap_or_default();
+        let text = self.element.cached_text.clone();
 
         let mut el = div()
             .whitespace_normal()
@@ -94,7 +94,7 @@ impl ReactTextElement {
         }
 
         let flat: String = if self.element.runs.is_empty() {
-            text.clone()
+            self.element.text.clone().unwrap_or_default()
         } else {
             self.element.runs.iter().map(|r| r.text.as_str()).collect()
         };

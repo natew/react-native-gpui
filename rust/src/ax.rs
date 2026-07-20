@@ -1,7 +1,7 @@
 #![allow(unexpected_cfgs)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -13,6 +13,7 @@ use objc::declare::ClassDecl;
 use objc::runtime::{BOOL, Class, Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use rustc_hash::FxHashMap;
 
 use crate::elements::ReactElement;
 
@@ -72,9 +73,9 @@ struct AxNode {
 #[derive(Default)]
 struct AxState {
     content_view: usize,
-    nodes: HashMap<u64, AxNode>,
+    nodes: FxHashMap<u64, AxNode>,
     focused_text_id: Option<u64>,
-    input_text: HashMap<u64, (String, String)>,
+    input_text: FxHashMap<u64, (String, String)>,
 }
 
 static STATE: OnceLock<Mutex<AxState>> = OnceLock::new();
@@ -379,7 +380,7 @@ fn collect_descriptors(
         checked: element.accessibility.checked.clone(),
         expanded: element.accessibility.expanded,
         is_element: ax_is_element(element),
-        events: element.events.clone(),
+        events: element.events.to_vec(),
     });
 
     for child in &element.children {
@@ -886,6 +887,8 @@ extern "C" fn accessibility_set_value_for_attribute(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{
         ax_is_element, ax_label, ax_role, events_have_press_action, set_focused_text_node, state,
     };
@@ -905,6 +908,7 @@ mod tests {
             global_id: 1,
             element_type: element_type.to_string(),
             text: text.map(String::from),
+            cached_text: gpui::SharedString::new(text.unwrap_or_default()),
             number_of_lines: None,
             selectable: false,
             runs: Vec::new(),
@@ -926,7 +930,7 @@ mod tests {
             most_recent_event_count: 0,
             shows_vertical_scroll_indicator: true,
             shows_horizontal_scroll_indicator: true,
-            events: Vec::new(),
+            events: Arc::from([]),
             native_layout_key: None,
             native_resize: None,
             native_list_group: None,
@@ -975,7 +979,7 @@ mod tests {
     #[test]
     fn responder_release_controls_map_to_ax_buttons() {
         let mut item = element("div", None, AccessibilityInfo::default());
-        item.events = events(&["responderGrant", "responderRelease"]);
+        item.events = events(&["responderGrant", "responderRelease"]).into();
 
         assert_eq!(ax_role(&item), "AXButton");
     }
@@ -990,7 +994,7 @@ mod tests {
                 ..AccessibilityInfo::default()
             },
         );
-        item.events = events(&["responderGrant", "responderRelease"]);
+        item.events = events(&["responderGrant", "responderRelease"]).into();
 
         assert_eq!(ax_role(&item), "AXButton");
     }

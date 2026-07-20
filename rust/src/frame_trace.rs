@@ -50,7 +50,7 @@ thread_local! {
     static NAMED: [Cell<Duration>; NAMED_COUNT] = const { [const { Cell::new(Duration::ZERO) }; NAMED_COUNT] };
 }
 
-pub const NAMED_COUNT: usize = 8;
+pub const NAMED_COUNT: usize = 9;
 pub const NAMED_LABELS: [&str; NAMED_COUNT] = [
     "style_build",
     "child_create",
@@ -60,6 +60,7 @@ pub const NAMED_LABELS: [&str; NAMED_COUNT] = [
     "occluder",
     "text_layout",
     "paint_quad",
+    "event_flags",
 ];
 
 static DETAIL: Lazy<bool> =

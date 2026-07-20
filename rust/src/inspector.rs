@@ -1248,7 +1248,7 @@ fn collect_snapshots(
     ) {
         let snapshot_metadata = SnapshotMetadata {
             target: summary(element),
-            events: element.events.clone(),
+            events: element.events.to_vec(),
             value: snippet(
                 element
                     .value
@@ -1438,7 +1438,7 @@ fn collect_hits(
         hits.push(InspectorHit {
             target: summary(element),
             bounds,
-            events: element.events.clone(),
+            events: element.events.to_vec(),
             native_list_group: element.native_list_group.clone(),
             value: snippet(
                 element
@@ -1695,6 +1695,7 @@ mod tests {
             global_id: id,
             element_type: element_type.to_string(),
             text: None,
+            cached_text: gpui::SharedString::new_static(""),
             number_of_lines: None,
             selectable: false,
             runs: Vec::new(),
@@ -1716,7 +1717,7 @@ mod tests {
             most_recent_event_count: 0,
             shows_vertical_scroll_indicator: true,
             shows_horizontal_scroll_indicator: true,
-            events: Vec::new(),
+            events: Arc::from([]),
             native_layout_key: None,
             native_resize: None,
             native_list_group: None,
@@ -1756,7 +1757,7 @@ mod tests {
         label.text = Some("Increment".to_string());
         let label = Arc::new(label);
         let mut button = (*node(3002, "view", vec![label])).clone();
-        button.events.push("press".to_string());
+        button.events = Arc::from(["press".to_string()]);
         button.accessibility.label = Some("Increment".to_string());
         let root = node(3001, "view", vec![Arc::new(button)]);
         bridge::remember_layout(3001, 0.0, 0.0, 400.0, 300.0);
@@ -1778,7 +1779,7 @@ mod tests {
         label.text = Some("Select project".to_string());
         let label = Arc::new(label);
         let mut row = (*node(3102, "view", vec![label])).clone();
-        row.events.push("responderRelease".to_string());
+        row.events = Arc::from(["responderRelease".to_string()]);
         row.accessibility.label = Some("Select project soot".to_string());
         let root = node(3101, "view", vec![Arc::new(row)]);
         bridge::remember_layout(3101, 0.0, 0.0, 400.0, 300.0);
@@ -1814,7 +1815,7 @@ mod tests {
         let _guard = inspector_test_guard();
         bridge::retain_layout(&HashSet::new());
         let mut button = (*node(2002, "view", Vec::new())).clone();
-        button.events.push("press".to_string());
+        button.events = Arc::from(["press".to_string()]);
         button.accessibility.label = Some("Run task".to_string());
         button.accessibility.role = Some("button".to_string());
         button.accessibility.identifier = Some("run-task-button".to_string());

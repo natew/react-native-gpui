@@ -16,14 +16,14 @@ bun run scripts/bundle-hermes.mjs examples/kitchen-sink.tsx /tmp/kitchen.js --by
 RNGPUI_BUNDLE=/tmp/kitchen.hbc RNGPUI_NO_ACTIVATE=1 ../rust/target/release/rngpui-service
 ```
 
-## Releasing into agentbus
+## Releasing into Team Machine
 
 `~/agentbus/gui` consumes this package locally, but it is not symlinked. The
-agentbus native shell deliberately copies this package into
+Team Machine native shell deliberately copies this package into
 `~/agentbus/gui/node_modules/react-native-gpui` as a real directory so the app and
 renderer share one React instance.
 
-Do not manually copy this repo into agentbus. Use the agentbus-side release script:
+Do not manually copy this repo into Team Machine. Use the Team Machine-side release script:
 
 ```sh
 cd ~/agentbus/gui
@@ -34,7 +34,7 @@ That script:
 
 - bumps this repo's root, `ts/`, and Rust crate versions;
 - builds the package and native `rngpui-service`;
-- copies `dist/`, `native/`, `package.json`, and `README.md` into agentbus;
+- copies `dist/`, `native/`, `package.json`, and `README.md` into Team Machine;
 - writes `~/agentbus/gui/native-shell/react-native-gpui-release.json`;
 - commits the version bump in this repo;
 - commits the version marker in `~/agentbus`.
@@ -66,7 +66,7 @@ for a stable frame, write a PNG + tree dump, and print the PNG path plus the bou
 sampled color of every `--select`'d node — no second command, no flag archaeology.
 
 ```sh
-# one shot: realistic size, forced theme, measured nodes (cold ≈ 2s on the agentbus app)
+# one shot: realistic size, forced theme, measured nodes (cold ≈ 2s on the Team Machine app)
 rngpui shot --bundle native-shell/.gpui-hermes/app.hbc --size 1360x880 --fixture \
   --appearance dark --select stage --select trees-pane
 #   png: /tmp/rngpui-shot.png (2720x1760) appearance=dark
@@ -88,7 +88,7 @@ rngpui diff /tmp/before.png /tmp/rngpui-shot.png --out /tmp/diff.png
   the backing scale (1360x880 → 2720x1760). (The old LaunchServices `.app` capture path
   produced a wrongly-clamped ~784x507; the CLI direct-spawn path used by `shot` is correct.)
 - `--fixture` loads deterministic demo data (`AGENTBUS_FIXTURE_ONLY=1`); without it the
-  agentbus app paints an empty "connecting…" shell when no daemon is reachable.
+  Team Machine app paints an empty "connecting…" shell when no daemon is reachable.
 - `--select <selector>` is repeatable; `--json` for machine output; `--out` to place the PNG.
 - `reshot` only re-reads the **current** frame of a kept session — it does not re-bundle
   or change the theme. After editing JS, re-`shot` (re-launches against the rebuilt `.hbc`).
@@ -119,7 +119,7 @@ rngpui diff /tmp/before.png /tmp/rngpui-shot.png --out /tmp/diff.png
 - `--launch <entry.tsx>` — compile the entry to Hermes bytecode, spawn
   `rngpui-service` offscreen + non-activating, and own its debug socket.
 - `--bundle <app.hbc>` — spawn `rngpui-service` against an existing Hermes bytecode
-  bundle, useful for apps with their own bundler such as agentbus.
+  bundle, useful for apps with their own bundler such as Team Machine.
 - `--keep` — leave the launched service running and print a session directory on stderr.
 - `--session <dir>` or `RNGPUI_SESSION=<dir>` — reuse a kept driveable session for
   do-then-get workflows.

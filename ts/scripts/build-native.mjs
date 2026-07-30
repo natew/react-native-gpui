@@ -29,8 +29,15 @@ if (needsGhostty && ghosttyDylibs.length === 0) {
     throw new Error(`rngpui-service links libghostty-vt, but no libghostty-vt dylib was found under ${join(releaseDir, "build")}`);
 }
 
+// staged beside the packaged binary, and beside the cargo one too: build.rs embeds an
+// @executable_path rpath, and the dylib is otherwise left buried under target/release/build,
+// so `rust/target/release/rngpui-service` dies at dyld before printing a single line. Every
+// conformance gate defaults to exactly that path, which turns one missing file into a whole
+// suite that fails with no output and no explanation.
 for (const dylib of ghosttyDylibs) {
-    copyFileSync(dylib, join(nativeDir, dylib.split("/").pop()));
+    const name = dylib.split("/").pop();
+    copyFileSync(dylib, join(nativeDir, name));
+    copyFileSync(dylib, join(releaseDir, name));
 }
 
 if (readdirSync(nativeDir).some((entry) => entry.endsWith(".dylib")) && !hasRpath(serviceTarget, "@executable_path")) {

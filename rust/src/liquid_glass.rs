@@ -7,7 +7,7 @@ use cocoa::appkit::{
     NSVisualEffectMaterial, NSVisualEffectState,
 };
 use cocoa::base::{NO, YES, id, nil};
-use cocoa::foundation::{NSPoint, NSRect};
+use cocoa::foundation::{NSPoint, NSRect, NSString};
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
 use core_foundation::number::CFNumber;
@@ -41,6 +41,7 @@ pub fn install(window: &mut Window) {
             return;
         }
 
+        apply_forced_appearance(ns_window);
         configure_transparent_window(ns_window, content_view, ns_view);
 
         // RNGPUI_NO_VIBRANCY: keep the window transparent but skip the blur/vibrancy
@@ -308,6 +309,29 @@ fn window_server_rects_intersect(a: WindowServerRect, b: NSRect) -> bool {
         && a.x + a.width > b.origin.x
         && a.y < b.origin.y + b.size.height
         && a.y + a.height > b.origin.y
+}
+
+// Offscreen captures (`rngpui shot --appearance dark`) can't change the host's real
+// system appearance, so every AppKit material keeps rendering in the HOST's mode no
+// matter what RNGPUI_FORCE_APPEARANCE says: the window's translucent regions — the
+// sidebar, the titlebar strip, the border ring — come back the same mid-gray #aaaaaa
+// in dark and light alike, and dark-theme glyphs painted over them vanish.
+// Pin the NSWindow's NSAppearance from the same flag instead. Every material derives
+// its look from effectiveAppearance, so this one write covers the glass view below,
+// gpui's own blurred backdrop view, and gpui's `window.appearance()` — no per-material
+// override, and nothing left reading the host's mode behind our back.
+unsafe fn apply_forced_appearance(ns_window: id) {
+    let forced = std::env::var("RNGPUI_FORCE_APPEARANCE").unwrap_or_default();
+    let name = match forced.as_str() {
+        "dark" => "NSAppearanceNameDarkAqua",
+        "light" => "NSAppearanceNameAqua",
+        _ => return,
+    };
+    let ns_name = unsafe { NSString::alloc(nil).init_str(name) };
+    let appearance: id = msg_send![class!(NSAppearance), appearanceNamed: ns_name];
+    if appearance != nil {
+        let _: () = msg_send![ns_window, setAppearance: appearance];
+    }
 }
 
 unsafe fn configure_transparent_window(ns_window: id, content_view: id, ns_view: id) {

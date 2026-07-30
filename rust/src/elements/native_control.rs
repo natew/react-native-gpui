@@ -213,17 +213,6 @@ unsafe fn read_ns_string(s: id) -> String {
 // ── native view lifecycle ───────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
-unsafe fn set_aqua_appearance(view: id) {
-    unsafe {
-        let name = ns_string("NSAppearanceNameAqua");
-        let aqua: id = msg_send![class!(NSAppearance), appearanceNamed: name];
-        if aqua != nil {
-            let _: () = msg_send![view, setAppearance: aqua];
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
 unsafe fn create_view(kind: NativeKind, id: u64) -> id {
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0));
     let target = shared_target();
@@ -237,9 +226,6 @@ unsafe fn create_view(kind: NativeKind, id: u64) -> id {
             let _: () = msg_send![btn, setTag: id as isize];
             let _: () = msg_send![btn, setTarget: target];
             let _: () = msg_send![btn, setAction: sel!(rngpuiButtonClick:)];
-            // Force the standard light (Aqua) appearance for a predictable native look.
-            // TODO: follow the app/window theme instead of hardcoding light.
-            unsafe { set_aqua_appearance(btn) };
             btn
         }
         NativeKind::Input { secure } => {
@@ -260,7 +246,6 @@ unsafe fn create_view(kind: NativeKind, id: u64) -> id {
             // Return fires the control's action → submit.
             let _: () = msg_send![tf, setTarget: target];
             let _: () = msg_send![tf, setAction: sel!(rngpuiTextSubmit:)];
-            unsafe { set_aqua_appearance(tf) };
             tf
         }
     }

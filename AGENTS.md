@@ -216,8 +216,12 @@ Non-obvious facts (these cost real debugging — don't relearn them):
   `examples/native-controls.tsx`: each tap bumps a gpui `presses:` counter (which DOES
   capture), so `do tap native-btn` then `get tree` shows the count climb.
 
-Known gaps (spike follow-ups): appearance is hardcoded Aqua (`set_aqua_appearance`) instead
-of following the app theme; native controls aren't in the AX tree because gpui's
+Native controls carry no appearance of their own: they inherit the window's
+`effectiveAppearance`, which `liquid_glass::install` pins from `RNGPUI_FORCE_APPEARANCE`.
+Don't set `NSAppearance` on an individual control — that override is what used to make
+them render light inside a dark window.
+
+Known gaps (spike follow-ups): native controls aren't in the AX tree because gpui's
 `RNGPUIAccessibilityView.accessibilityChildren` returns only synthetic children (so VoiceOver
 / cua-driver can't see them); no gpui-layout measurement of the AppKit intrinsic size, so
 native controls need explicit `style` sizing; Windows/Linux backends are unimplemented (the

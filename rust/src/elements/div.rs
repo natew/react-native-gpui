@@ -792,6 +792,27 @@ fn events_have_press_action(events: &[String]) -> bool {
     })
 }
 
+/// True if this node's events make `paint` register the `MouseDownEvent` listener that
+/// latches `ACTIVE_MOUSE_TARGET` — i.e. whether a real left press at a point can resolve
+/// to this node. `inspector::tap_target_at` picks its `do tap` target with this same
+/// predicate so the debug driver can never resolve a press to a node a real click would
+/// not reach.
+pub fn listens_pointer_down(events: &[String]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event.as_str(),
+            "mouseDown"
+                | "pointerDown"
+                | "touchStart"
+                | "startShouldSetResponder"
+                | "startShouldSetResponderCapture"
+                | "responderGrant"
+                | "responderStart"
+                | "pressIn"
+        )
+    }) || events_have_press_action(events)
+}
+
 fn press_drag_groups_match(active_group: &Option<String>, target_group: &Option<String>) -> bool {
     match (active_group.as_deref(), target_group.as_deref()) {
         (Some(active), Some(target)) => active == target,
@@ -1374,8 +1395,9 @@ impl ReactDivElement {
 }
 
 /// Stable z-index stacking order for a child z-index sequence (ascending z, ties keep
-/// document order). Only reached when some child overrides `z-index`.
-fn stacked_child_indices_for(z_indices: impl IntoIterator<Item = i32>) -> Vec<usize> {
+/// document order). Only reached when some child overrides `z-index`. Shared with
+/// `inspector::collect_hits` so debug hit-testing walks the same stacking order paint does.
+pub fn stacked_child_indices_for(z_indices: impl IntoIterator<Item = i32>) -> Vec<usize> {
     let mut indexed: Vec<(usize, i32)> = z_indices.into_iter().enumerate().collect();
     indexed.sort_by_key(|(index, z_index)| (*z_index, *index));
     indexed.into_iter().map(|(index, _)| index).collect()
@@ -2038,16 +2060,7 @@ impl Element for ReactDivElement {
                         }
                     });
                 }
-                if mouse_down
-                    || pointer_down
-                    || touch_start
-                    || start_responder
-                    || start_responder_capture
-                    || responder_grant
-                    || responder_start
-                    || press_in
-                    || press_action
-                {
+                if listens_pointer_down(&self.element.events) {
                     let event_bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
                     let layout_bounds = bounds;
                     let press_group_for_down = press_group.clone();

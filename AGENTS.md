@@ -200,6 +200,16 @@ Non-obvious facts (these cost real debugging — don't relearn them):
   `ts/native/rngpui-service` renders an unknown `nativebutton` type as an empty div, so a
   shot can look like a positioned box with the page-bg color — that's NOT the native control.
   Force the fresh binary with `RNGPUI_SERVICE=…/target/release/rngpui-service`.
+- **`do tap` must agree with a real click, and `conformance:hit-test` is what proves it.**
+  `do tap` resolves its target through `inspector::tap_target_at`, which is a *separate*
+  resolver from gpui's own mouse dispatch — so it can silently disagree with what a user's
+  click does, and has. It stays honest by mirroring paint order: `collect_hits` walks
+  children back-to-front in the same z-index-aware stacking order `paint` uses, and the
+  first hit that registers a pointer-down listener wins, because gpui runs bubble-phase
+  mouse listeners in reverse registration order. Change either side and run
+  `bun run conformance:hit-test`, which presses the same point via `realtap` (a genuine
+  `PlatformInput::MouseDown`) and via `tap`, and fails unless both reach the covering node.
+  Overlap bugs are invisible to painting checks — the pixels are identical either way.
 - **Validate the event round trip with `do tap <native-selector>`**: the `DebugTap` handler
   routes a tapped native control to `native_control::perform_native_click` (real
   `performClick:` → target/action → bridge → JS) instead of a gpui synth-tap. Proven via

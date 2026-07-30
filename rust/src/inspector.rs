@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -138,10 +138,6 @@ impl Rect {
     fn is_visible(self) -> bool {
         self.width > 0.5 && self.height > 0.5
     }
-
-    fn area(self) -> f32 {
-        self.width * self.height
-    }
 }
 
 impl From<(f32, f32, f32, f32)> for Rect {
@@ -184,7 +180,6 @@ struct InspectorHit {
     path: Vec<NodeSummary>,
     rank: u8,
     depth: usize,
-    order: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1227,7 +1222,6 @@ impl SnapshotMetadata {
             path: self.path,
             rank: self.rank,
             depth: self.depth,
-            order: 0,
         }
     }
 }
@@ -1311,11 +1305,21 @@ fn hit_key(hit: &InspectorHit) -> (u64, Rect) {
     (hit.target.id, hit.bounds)
 }
 
+/// The element a click at `position` lands on. `collect_hits` yields hits in reverse
+/// paint order, so `hits[0]` is the top-most painted node at the point — the one gpui's
+/// own dispatch reaches first. From there we walk up that node's ancestor chain and pick
+/// the most meaningful node on it (the Pressable around a text label, say), which is what
+/// makes the inspector select a row instead of the glyph inside it. Candidates are
+/// restricted to that chain so nothing an overlay paints over can win: reaching a node in
+/// a different stack is exactly the occlusion bug that made `do tap` unusable over menus.
 fn hit_test(root: &Arc<ReactElement>, position: Point<Pixels>) -> Option<InspectorHit> {
     let mut path = Vec::new();
     let mut hits = Vec::new();
     collect_hits(root, position, &mut path, &mut hits);
-    hits.into_iter().max_by(compare_hits)
+    let chain: HashSet<u64> = hits.first()?.path.iter().map(|node| node.id).collect();
+    hits.into_iter()
+        .filter(|hit| chain.contains(&hit.target.id))
+        .max_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.depth.cmp(&b.depth)))
 }
 
 /// The innermost scroll container (overflow: scroll/auto) whose painted bounds contain
@@ -1356,37 +1360,26 @@ pub fn webview_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<u64> {
     }
 }
 
-/// The topmost node at a point that listens for a press/click gesture, plus its
-/// events and bounds — used to synthesize a `do tap`. Walks up the hit path so a tap
-/// on a label inside a Pressable still finds the Pressable's handlers.
+/// The node a real left press at a point would resolve to, plus its events and bounds —
+/// used to synthesize a `do tap`.
+///
+/// gpui dispatches bubble-phase mouse listeners in reverse registration order, and those
+/// listeners are registered during paint, so the last-painted node containing the point
+/// runs first and latches `ACTIVE_MOUSE_TARGET` (see `elements::div`). `collect_hits`
+/// yields hits in reverse paint order for exactly this reason, so the first hit that
+/// registers a pointer-down listener is the node the real dispatch picks. Nothing else in
+/// the tree can outrank it — not greater nesting depth, not a smaller box.
 pub fn tap_target_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<TapTarget> {
     let position = point(px(x), px(y));
     let mut path = Vec::new();
     let mut hits = Vec::new();
     collect_hits(root, position, &mut path, &mut hits);
-    // the visual hit itself may be a text leaf inside a row. choose the topmost
-    // press/responder target under the point first, then fall back to the visual hit
+    // no pointer-down listener anywhere under the point: fall back to the top-most node
     // so the caller can still report what is there.
-    const PRESS: &[&str] = &[
-        "press",
-        "click",
-        "pressIn",
-        "pressOut",
-        "longPress",
-        "mouseDown",
-        "mouseUp",
-        "pointerDown",
-        "pointerUp",
-        "touchStart",
-        "touchEnd",
-        "responderRelease",
-    ];
-    let listens_press = |events: &[String]| events.iter().any(|e| PRESS.contains(&e.as_str()));
     let hit = hits
         .iter()
-        .filter(|hit| listens_press(&hit.events))
-        .max_by(|a, b| compare_hits(a, b))
-        .or_else(|| hits.iter().max_by(|a, b| compare_hits(a, b)))?;
+        .find(|hit| crate::elements::listens_pointer_down(&hit.events))
+        .or_else(|| hits.first())?;
     Some(TapTarget {
         id: hit.target.id,
         focusable_input: is_input_type(&hit.target.element_type),
@@ -1405,6 +1398,11 @@ fn is_input_type(element_type: &str) -> bool {
     matches!(element_type, "textinput" | "textarea")
 }
 
+/// Appends every node whose painted bounds contain `position`, in reverse paint order:
+/// a node is pushed after its own subtree, and children are walked back-to-front in the
+/// same z-index-aware stacking order `ReactDivElement::paint` uses. `hits[0]` is therefore
+/// the top-most painted node at the point, which is what both `hit_test` and
+/// `tap_target_at` resolve against.
 fn collect_hits(
     element: &Arc<ReactElement>,
     position: Point<Pixels>,
@@ -1429,8 +1427,24 @@ fn collect_hits(
 
     path.push(summary(element));
     if children_allow {
-        for child in element.children.iter().rev() {
-            collect_hits(child, position, path, hits);
+        if element
+            .children
+            .iter()
+            .all(|child| child.style.z_index.unwrap_or(0) == 0)
+        {
+            for child in element.children.iter().rev() {
+                collect_hits(child, position, path, hits);
+            }
+        } else {
+            let stacked = crate::elements::stacked_child_indices_for(
+                element
+                    .children
+                    .iter()
+                    .map(|child| child.style.z_index.unwrap_or(0)),
+            );
+            for index in stacked.into_iter().rev() {
+                collect_hits(&element.children[index], position, path, hits);
+            }
         }
     }
 
@@ -1451,23 +1465,9 @@ fn collect_hits(
             path: path.clone(),
             rank: inspect_rank(element),
             depth: path.len(),
-            order: hits.len(),
         });
     }
     path.pop();
-}
-
-fn compare_hits(a: &InspectorHit, b: &InspectorHit) -> std::cmp::Ordering {
-    a.rank
-        .cmp(&b.rank)
-        .then_with(|| a.depth.cmp(&b.depth))
-        .then_with(|| {
-            b.bounds
-                .area()
-                .partial_cmp(&a.bounds.area())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .then_with(|| b.order.cmp(&a.order))
 }
 
 fn inspect_rank(element: &ReactElement) -> u8 {
@@ -1793,6 +1793,82 @@ mod tests {
         bridge::retain_layout(&HashSet::new());
     }
 
+    /// An overlay's own button sits two levels below the root while the content it covers
+    /// is nested far deeper. Resolution follows paint order, so the overlay still wins;
+    /// picking by nesting depth is what used to hand the press to the covered content and
+    /// make menus look dead to `do tap`.
+    #[test]
+    fn tap_target_prefers_overlay_over_deeper_content_behind_it() {
+        let _guard = inspector_test_guard();
+        bridge::retain_layout(&HashSet::new());
+        let mut buried = (*node(6004, "view", Vec::new())).clone();
+        buried.events = Arc::from(["press".to_string()]);
+        let content = node(
+            6002,
+            "view",
+            vec![node(6003, "view", vec![Arc::new(buried)])],
+        );
+        let mut overlay_item = (*node(6006, "view", Vec::new())).clone();
+        overlay_item.events = Arc::from(["press".to_string()]);
+        let overlay = node(6005, "view", vec![Arc::new(overlay_item)]);
+        let root = node(6001, "view", vec![content, overlay]);
+        for id in [6001, 6002, 6003, 6004] {
+            bridge::remember_layout(id, 0.0, 0.0, 400.0, 300.0);
+        }
+        bridge::remember_layout(6005, 100.0, 100.0, 160.0, 80.0);
+        bridge::remember_layout(6006, 100.0, 100.0, 160.0, 40.0);
+
+        let target = tap_target_at(&root, 150.0, 120.0).expect("expected tap target");
+
+        assert_eq!(target.id, 6006);
+        bridge::retain_layout(&HashSet::new());
+    }
+
+    /// A z-index lift changes paint order, so it has to change hit resolution too: the
+    /// overlay is declared first but painted last, and must win over the content that
+    /// follows it in document order.
+    #[test]
+    fn tap_target_honors_z_index_lift() {
+        let _guard = inspector_test_guard();
+        bridge::retain_layout(&HashSet::new());
+        let mut overlay = (*node(6102, "view", Vec::new())).clone();
+        overlay.events = Arc::from(["press".to_string()]);
+        overlay.style.z_index = Some(10);
+        let mut behind = (*node(6103, "view", Vec::new())).clone();
+        behind.events = Arc::from(["press".to_string()]);
+        let root = node(6101, "view", vec![Arc::new(overlay), Arc::new(behind)]);
+        bridge::remember_layout(6101, 0.0, 0.0, 400.0, 300.0);
+        bridge::remember_layout(6102, 40.0, 40.0, 200.0, 60.0);
+        bridge::remember_layout(6103, 40.0, 40.0, 200.0, 60.0);
+
+        let target = tap_target_at(&root, 80.0, 60.0).expect("expected tap target");
+
+        assert_eq!(target.id, 6102);
+        bridge::retain_layout(&HashSet::new());
+    }
+
+    /// The inspector's preference for a meaningful node is scoped to the top-most node's
+    /// own ancestor chain. A plain overlay panel covering an interactive row selects the
+    /// panel, not the row it hides.
+    #[test]
+    fn hit_test_does_not_reach_behind_an_overlay() {
+        let _guard = inspector_test_guard();
+        bridge::retain_layout(&HashSet::new());
+        let mut button = (*node(6202, "view", Vec::new())).clone();
+        button.events = Arc::from(["press".to_string()]);
+        button.accessibility.label = Some("Behind".to_string());
+        let overlay = node(6203, "view", Vec::new());
+        let root = node(6201, "view", vec![Arc::new(button), overlay]);
+        bridge::remember_layout(6201, 0.0, 0.0, 400.0, 300.0);
+        bridge::remember_layout(6202, 20.0, 20.0, 200.0, 60.0);
+        bridge::remember_layout(6203, 20.0, 20.0, 200.0, 60.0);
+
+        let hit = hit_test(&root, point(px(60.0), px(40.0))).expect("expected hit");
+
+        assert_eq!(hit.target.id, 6203);
+        bridge::retain_layout(&HashSet::new());
+    }
+
     #[test]
     fn hit_test_prefers_later_overlapping_sibling() {
         let _guard = inspector_test_guard();
@@ -2028,7 +2104,6 @@ mod tests {
             path,
             rank: 10,
             depth: 0,
-            order: 0,
         }
     }
 

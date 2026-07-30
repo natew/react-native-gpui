@@ -1,17 +1,78 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
 const packageJsonCache = new Map()
 
+// Force the `react-native` export condition to win. Node/Bun pick the FIRST
+// matching key in an export map, so a package that lists `browser` before
+// `react-native` (nanoid, tamagui, on-zero, …) resolves to its DOM build even
+// with `conditions: ['react-native']` set on the build. This plugin overrides
+// those, and only those.
+//
+// It must claim ONLY the packages it actually rewrites. A Bun 1.3.14 bundler bug
+// makes an onResolve callback that MATCHES a specifier and returns `undefined`
+// drop the module across an `export *` re-export edge — silently, with no build
+// error, leaving a dangling namespace reference that throws at runtime
+// ("Property 'import_manifest' doesn't exist"). A broad `/^[^./].*/` filter put
+// every bare import in range of that bug to serve the ~7% that need the
+// override. So the filter is built from the packages that really declare a
+// react-native condition; everything else never enters the plugin and Bun
+// resolves it natively. Keep that invariant: do not widen this filter.
 export function nativePackageExportsPlugin({ root, name = 'native package exports' } = {}) {
   const fallbackRoot = root ? resolve(root) : process.cwd()
+  const owned = packagesWithReactNativeCondition(fallbackRoot)
+  if (!owned.size) return { name, setup() {} }
+  const filter = new RegExp(`^(?:${[...owned].map(escapeRegExp).join('|')})(?:/.*)?$`)
   return {
     name,
     setup(build) {
-      build.onResolve({ filter: /^[^./].*/ }, (args) =>
+      build.onResolve({ filter }, (args) =>
         resolveReactNativePackageExport(args.path, args.importer ? dirname(args.importer) : fallbackRoot)
       )
     },
+  }
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+// every installed package whose export map mentions a react-native condition,
+// including nested node_modules (a hoisted tree still nests duplicates). ~1800
+// package.json reads, ~110ms, once per build.
+function packagesWithReactNativeCondition(root) {
+  const names = new Set()
+  for (let dir = root; ; dir = dirname(dir)) {
+    scanPackageDir(join(dir, 'node_modules'), names, 0)
+    if (dir === dirname(dir)) break
+  }
+  return names
+}
+
+const MAX_NESTED_DEPTH = 6
+
+function scanPackageDir(dir, names, depth) {
+  if (depth > MAX_NESTED_DEPTH) return
+  let entries
+  try {
+    entries = readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
+    if (entry.name.startsWith('.')) continue
+    const full = join(dir, entry.name)
+    // @scope/ is a directory of packages, not a package.
+    if (entry.name.startsWith('@')) {
+      scanPackageDir(full, names, depth)
+      continue
+    }
+    const pkg = readPackageJson(join(full, 'package.json'))
+    if (pkg?.name && pkg.exports && JSON.stringify(pkg.exports).includes('"react-native"')) {
+      names.add(pkg.name)
+    }
+    scanPackageDir(join(full, 'node_modules'), names, depth + 1)
   }
 }
 

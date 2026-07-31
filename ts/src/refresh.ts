@@ -18,18 +18,13 @@ const isDev =
     typeof __DEV__ !== "undefined"
         ? __DEV__ === true
         : typeof process !== "undefined" && process.env?.NODE_ENV === "development";
-const refreshRuntimeModule = "react-refresh/runtime";
+const RefreshRuntime = isDev ? require("react-refresh/runtime") : undefined;
 let installed = false;
 
 export function installRefreshRuntime() {
-    if (!isDev || installed) return;
-    const runtimeRequire = (0, eval)("typeof require === 'function' ? require : undefined") as
-        | ((id: string) => unknown)
-        | undefined;
-    const RefreshRuntime = runtimeRequire?.(refreshRuntimeModule);
-    if (!RefreshRuntime) return;
+    if (!RefreshRuntime || installed) return;
     installed = true;
-    const runtime = RefreshRuntime as unknown as {
+    const runtime = RefreshRuntime as {
         injectIntoGlobalHook(globalObject: typeof globalThis): void;
         register(type: unknown, id: string): void;
         createSignatureFunctionForTransform(): (type: unknown, key?: string, forceReset?: boolean, getCustomHooks?: () => unknown[]) => unknown;

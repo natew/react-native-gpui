@@ -1,10 +1,9 @@
 // Overlay occlusion: does a covering view stop input reaching what it covers?
 //
 // Distinct from hit-test-conformance, which asks which single node a press RESOLVES to.
-// This asks whether the covered node hears anything at all. Press resolution is
-// single-winner via ACTIVE_MOUSE_TARGET, but the down-side and hover-side handlers are
-// gated on a raw bounds test, so a covered node can still receive pressIn / mouseDown /
-// mouseEnter while the overlay legitimately wins the press.
+// This asks whether the covered node hears anything at all — the down-side and hover-side
+// handlers resolve separately from the press, so a covered node used to receive pressIn /
+// mouseDown / mouseEnter while the overlay legitimately won the press.
 //
 // The covered node reports every event it receives. A correct renderer reports none of
 // them for a point under the overlay.

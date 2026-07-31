@@ -1452,6 +1452,9 @@ impl Render for ServiceApp {
         // reset the per-frame hit-test passthrough registry before this frame's prepaint
         // pass repopulates it (webview rects + occluder rects, for native webview events).
         hit_passthrough::begin_frame();
+        // same, for the pointer spans that tell a covered element from one the pointer
+        // actually reaches (see `elements::div::pointer_reaches`).
+        crate::elements::begin_pointer_frame();
         // while the inspector overlay/menu is up it owns all mouse input — without this,
         // a menu painted over a webview region is unclickable (clicks fall through to
         // the page via the hitTest: passthrough).

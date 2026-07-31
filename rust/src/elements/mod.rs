@@ -12,7 +12,7 @@ pub mod webview;
 #[cfg(not(target_os = "macos"))]
 pub use div::scroll_by;
 pub use div::{
-    ReactDivElement, animate_native_layout_override, claim_native_scroll,
+    ReactDivElement, animate_native_layout_override, begin_pointer_frame, claim_native_scroll,
     clear_native_layout_override, ease_out_cubic, finish_pointer_gesture, lerp,
     listens_pointer_down, native_layout_has_animations, native_resize_active,
     retain_native_layout_keys, retain_pointer_state, retain_scroll_state, scroll_to, scroll_to_end,

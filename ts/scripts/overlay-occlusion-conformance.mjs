@@ -2,9 +2,11 @@
 // Asserts that a covering view stops input reaching what it covers.
 //
 // hit-test-conformance already asserts the overlay WINS the press. This asserts the
-// covered node hears nothing at all: press resolution is single-winner, but the
-// down-side and hover-side handlers are gated independently, so a covered node can
-// still receive pressIn / mouseDown / mouseEnter under an overlay that owns the press.
+// covered node hears nothing at all — the side effect, which resolution testing cannot
+// see. Press resolution has always been single-winner through ACTIVE_MOUSE_TARGET, but
+// the down-side and hover-side handlers used to be gated on a plain bounds test, so a
+// covered node still got pressIn / mouseDown / mouseEnter under an overlay that owned
+// the press. They now resolve through `div::pointer_reaches`.
 //
 // Drives real gpui input only (realmove, realtap) — the synth `do tap` path addresses a
 // single resolved node by id and cannot exercise this at all.

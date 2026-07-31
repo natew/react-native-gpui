@@ -48,6 +48,7 @@ const tasks = [
     { name: "list-group", command: "node", args: ["scripts/list-group-conformance-driver.mjs"], cwd: root, timeoutMs: 20_000 },
     { name: "inspector", command: "node", args: ["scripts/inspector-conformance.mjs"], cwd: root, timeoutMs: 12_000 },
     { name: "hit-test", command: "node", args: ["scripts/hit-test-conformance.mjs"], cwd: root, timeoutMs: 20_000 },
+    { name: "occlusion", command: "node", args: ["scripts/overlay-occlusion-conformance.mjs"], cwd: root, timeoutMs: 20_000 },
     { name: "reload", command: "node", args: ["scripts/reload-conformance.mjs"], cwd: root, timeoutMs: 18_000 },
     { name: "hot-reload", command: "node", args: ["scripts/hot-reload-conformance.mjs"], cwd: root, timeoutMs: 18_000 },
     { name: "hot-reload-cli", command: "node", args: ["scripts/hot-reload-cli-conformance.mjs"], cwd: root, timeoutMs: 12_000 },

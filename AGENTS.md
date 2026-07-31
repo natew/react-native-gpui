@@ -210,6 +210,19 @@ Non-obvious facts (these cost real debugging — don't relearn them):
   `bun run conformance:hit-test`, which presses the same point via `realtap` (a genuine
   `PlatformInput::MouseDown`) and via `tap`, and fails unless both reach the covering node.
   Overlap bugs are invisible to painting checks — the pixels are identical either way.
+- **`hitbox.is_hovered(window)` does not mean "the pointer reaches this node" here.** Every
+  rngpui hitbox goes in as `HitboxBehavior::Normal`, so gpui's hit test reports every hitbox
+  containing the pointer, and a node buried under an overlay reads as hovered. Occluding is
+  not the fix: `BlockMouse` hides the hitboxes inserted *before* it, which are exactly the
+  node's ancestors, and ancestors must keep hearing the event because the JS side does not
+  bubble (`dispatchEvent` calls the one id the renderer names). Every pointer listener
+  instead resolves through `div::pointer_reaches`, which reads the frame's `POINTER_SPANS` —
+  one DFS span per hitbox, in prepaint order — and admits only the front-most hovered node
+  and its ancestors. Gated by `bun run conformance:occlusion`, which asserts the *side
+  effect*: a covered node must receive no `mouseDown`/`pressIn`/`mouseEnter` at all. That is
+  the half `conformance:hit-test` cannot see, since it only checks where a press resolves.
+  The spans only cover elements that get a hitbox (interactive, scrollable, or custom
+  cursor), so a purely decorative overlay with no listeners still does not occlude.
 - **Validate the event round trip with `do tap <native-selector>`**: the `DebugTap` handler
   routes a tapped native control to `native_control::perform_native_click` (real
   `performClick:` → target/action → bridge → JS) instead of a gpui synth-tap. Proven via

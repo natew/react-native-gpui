@@ -1,13 +1,13 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, Bounds, Corners, CursorStyle, DispatchPhase, Display, Element, ElementId,
-    GlobalElementId, Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, Modifiers, MouseButton,
-    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta,
-    ScrollWheelEvent, Window, div, point, prelude::*, px,
+    GlobalElementId, Hitbox, HitboxBehavior, HitboxId, Hsla, IntoElement, LayoutId, Modifiers,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    ScrollDelta, ScrollWheelEvent, Window, div, point, prelude::*, px,
 };
 use once_cell::sync::Lazy;
 
@@ -93,12 +93,6 @@ static HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()
 // pseudo flips without wiring mouseEnter/mouseLeave handlers.
 static PSEUDO_HOVER: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static PRESSED: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
-// Hitbox cache for pseudo-enabled elements, used to re-evaluate hover after layout
-// changes (scroll, resize) without waiting for the next MouseMoveEvent — a stationary
-// mouse doesn't fire MouseMoveEvent, so scrolled-away elements would stay "hovered"
-// forever without this (the stuck-hover-in-scroll-list bug).
-static PSEUDO_HITBOXES: Lazy<Mutex<HashMap<u64, Hitbox>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
 
 struct ScrollHoverState {
     last_scroll: Instant,
@@ -143,11 +137,102 @@ thread_local! {
     // to cull descendants, including rows below ScrollView's required content-
     // container wrapper.
     static SCROLL_CULL_VIEWPORTS: RefCell<Vec<Bounds<Pixels>>> = const { RefCell::new(Vec::new()) };
+
+    // one entry per element that inserted a hitbox this frame, in prepaint order —
+    // which is paint order, z-index included, because prepaint walks children through
+    // `stacked_child_indices`. See `pointer_reaches`.
+    static POINTER_SPANS: RefCell<Vec<PointerSpan>> = const { RefCell::new(Vec::new()) };
+
+    // memoized `front_most_span` for the current (frame, mouse position). Without it every
+    // hover-styled element would rescan every span on every paint and every mouse event,
+    // which is quadratic in a list of interactive rows.
+    static FRONT_MOST: Cell<Option<(Point<Pixels>, Option<usize>)>> = const { Cell::new(None) };
+}
+
+/// A hitbox plus the half-open range of spans covering its subtree.
+struct PointerSpan {
+    hitbox: HitboxId,
+    element: u64,
+    /// this element asked for the renderer→JS pseudo lane (`pseudoEvents`).
+    pseudo: bool,
+    end: usize,
+}
+
+/// Clear the pointer spans before this frame's prepaint repopulates them. Paired with
+/// `hit_passthrough::begin_frame` at the top of the render pass.
+pub fn begin_pointer_frame() {
+    POINTER_SPANS.with_borrow_mut(|spans| spans.clear());
+    FRONT_MOST.set(None);
+}
+
+fn open_pointer_span(hitbox: HitboxId, element: u64, pseudo: bool) -> usize {
+    POINTER_SPANS.with_borrow_mut(|spans| {
+        spans.push(PointerSpan {
+            hitbox,
+            element,
+            pseudo,
+            end: usize::MAX,
+        });
+        spans.len() - 1
+    })
+}
+
+fn close_pointer_span(index: usize) {
+    POINTER_SPANS.with_borrow_mut(|spans| spans[index].end = spans.len());
+}
+
+/// True when the pointer genuinely reaches this node: it is the top-most node under the
+/// pointer, or an ancestor of that node.
+///
+/// `hitbox.is_hovered(window)` cannot answer this on its own. Every rngpui hitbox goes in
+/// as `HitboxBehavior::Normal`, so gpui's hit test reports *every* hitbox containing the
+/// pointer rather than only the front-most, and a node buried under an overlay looks
+/// hovered. Nor can a hitbox occlude its way out of that: `BlockMouse` hides hitboxes
+/// inserted *before* it, and an element's ancestors are exactly the hitboxes inserted
+/// before it, so occluding would cut off the ancestors instead of the covered siblings.
+///
+/// The spans carry the order and nesting gpui's hit test drops. The last hovered span is
+/// the front-most node, and `[index, end)` is that span's subtree, so the front-most node
+/// and its ancestors are exactly the spans whose range contains it.
+///
+/// Ancestors stay eligible because the renderer names one id per event and the JS side
+/// does not bubble — `dispatchEvent` looks that single id up in its handler map — so a
+/// parent hears a press on its child only by emitting its own event here.
+fn pointer_reaches(span: Option<usize>, window: &Window) -> bool {
+    let Some(index) = span else { return false };
+    POINTER_SPANS.with_borrow(|spans| {
+        let Some(top) = front_most_span(spans, window) else {
+            return false;
+        };
+        index <= top && top < spans[index].end
+    })
+}
+
+/// Index of the front-most hovered span — the last one inserted, since prepaint inserts
+/// in paint order.
+///
+/// Memoized on the mouse position, which with the per-frame reset covers everything that
+/// can move the answer: gpui recomputes its hit test when the frame finishes and when the
+/// pointer moves, and nowhere else.
+fn front_most_span(spans: &[PointerSpan], window: &Window) -> Option<usize> {
+    let position = window.mouse_position();
+    if let Some((cached_position, index)) = FRONT_MOST.get()
+        && cached_position == position
+    {
+        return index;
+    }
+    let index = spans
+        .iter()
+        .rposition(|span| span.hitbox.is_hovered(window));
+    FRONT_MOST.set(Some((position, index)));
+    index
 }
 
 #[derive(Clone, Default)]
 pub struct DivPrepaintState {
     hitbox: Option<Hitbox>,
+    // index of this element's entry in the frame's `POINTER_SPANS`, for `pointer_reaches`.
+    pointer_span: Option<usize>,
     max_scroll_x: f32,
     max_scroll_y: f32,
     scroll_offset: Option<ScrollOffset>,
@@ -342,10 +427,6 @@ pub fn retain_pointer_state(present: &HashSet<u64>) {
         .unwrap()
         .retain(|id| present.contains(id));
     PRESSED.lock().unwrap().retain(|id| present.contains(id));
-    PSEUDO_HITBOXES
-        .lock()
-        .unwrap()
-        .retain(|id, _| present.contains(id));
 }
 
 /// Re-evaluate pseudo hover after a layout change (scroll, resize) that may have
@@ -354,28 +435,38 @@ pub fn retain_pointer_state(present: &HashSet<u64>) {
 /// only fires on actual mouse movement, not on scroll — the stuck-hover-in-scroll
 /// bug. Called from the scroll container's wheel handler after the offset update.
 ///
-/// Iterates every element that has a registered pseudo hitbox, checks whether the
-/// window's current mouse position is still inside that hitbox, and drops any
-/// stale entry. This is O(n) in the number of pseudo-enabled elements — the common
-/// case is the visible session rows + project picker menu (~dozens, not thousands).
+/// Reads the frame's pointer spans for the pseudo-enabled ids the mouse now reaches —
+/// the front-most node plus its ancestors — and flips everything else off. This is O(n)
+/// in the number of elements with a hitbox; the reached chain itself is a handful deep.
 pub fn re_evaluate_pseudo_hover(window: &Window) {
     if SCROLL_HOVER.lock().unwrap().suppressed {
         return;
     }
+    let reached = POINTER_SPANS.with_borrow(|spans| {
+        let mut reached: Vec<u64> = Vec::new();
+        let Some(top) = front_most_span(spans, window) else {
+            return reached;
+        };
+        for span in spans[..=top].iter().filter(|span| span.pseudo) {
+            if top < span.end {
+                reached.push(span.element);
+            }
+        }
+        reached
+    });
     let mut changed: Vec<(u64, bool)> = Vec::new();
     {
-        let hitboxes = PSEUDO_HITBOXES.lock().unwrap();
         let mut hover = PSEUDO_HOVER.lock().unwrap();
-        for (&id, hitbox) in hitboxes.iter() {
-            let was_hovered = hover.contains(&id);
-            let is_hovered = hitbox.is_hovered(window);
-            if was_hovered != is_hovered {
-                if is_hovered {
-                    hover.insert(id);
-                } else {
-                    hover.remove(&id);
-                }
-                changed.push((id, is_hovered));
+        hover.retain(|&id| {
+            let still = reached.contains(&id);
+            if !still {
+                changed.push((id, false));
+            }
+            still
+        });
+        for id in reached {
+            if hover.insert(id) {
+                changed.push((id, true));
             }
         }
     }
@@ -1664,6 +1755,15 @@ impl Element for ReactDivElement {
         } else {
             None
         };
+        // opened before the children prepaint below and closed after, so the span covers
+        // this element's whole subtree.
+        let pointer_span = hitbox.as_ref().map(|hitbox| {
+            open_pointer_span(
+                hitbox.id,
+                self.element.global_id,
+                self.element.pseudo_events,
+            )
+        });
 
         // record this element as a hit-test occluder when it has a visible background or
         // handles pointer input, so it blocks native webview passthrough wherever it
@@ -1689,8 +1789,12 @@ impl Element for ReactDivElement {
         let mut max_scroll_y = 0.0;
         let mut culled: Option<HashSet<usize>> = None;
         if !bounds_have_drawable_area(bounds) {
+            if let Some(index) = pointer_span {
+                close_pointer_span(index);
+            }
             return DivPrepaintState {
                 hitbox,
+                pointer_span,
                 max_scroll_x,
                 max_scroll_y,
                 scroll_offset: None,
@@ -1806,8 +1910,12 @@ impl Element for ReactDivElement {
             with_viewport(window, cx);
         }
 
+        if let Some(index) = pointer_span {
+            close_pointer_span(index);
+        }
         DivPrepaintState {
             hitbox,
+            pointer_span,
             max_scroll_x,
             max_scroll_y,
             scroll_offset,
@@ -1833,6 +1941,9 @@ impl Element for ReactDivElement {
             report_layout(&self.element, bounds);
             return;
         }
+        // every mouse listener registered below gates on this rather than on the
+        // hitbox alone, so nothing under an overlay hears the pointer.
+        let pointer_span = prepaint.pointer_span;
 
         // reuse the style request_layout built this frame (it differs only by the
         // native-layout size/inset overrides, which paint never reads — geometry comes
@@ -1907,16 +2018,15 @@ impl Element for ReactDivElement {
             });
         }
 
-        if let (Some(spec), Some(hitbox)) =
-            (self.element.native_resize.clone(), prepaint.hitbox.clone())
+        if pointer_span.is_some()
+            && let Some(spec) = self.element.native_resize.clone()
         {
             let id = self.element.global_id;
-            let event_bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
             let down_spec = spec.clone();
-            window.on_mouse_event(move |ev: &MouseDownEvent, phase, _window, cx| {
+            window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble
                     && ev.button == MouseButton::Left
-                    && event_bounds.contains(&ev.position)
+                    && pointer_reaches(pointer_span, window)
                 {
                     let start_value = native_layout_value(&down_spec.target, down_spec.edge)
                         .unwrap_or_else(|| down_spec.min.unwrap_or(0.0));
@@ -2039,14 +2149,15 @@ impl Element for ReactDivElement {
             || press_out;
         drop(event_flags_trace);
         if tracks_pointer {
-            if let Some(hitbox) = prepaint.hitbox.clone() {
+            // a span exists for exactly the elements that got a hitbox, and every listener
+            // below resolves through it.
+            if pointer_span.is_some() {
                 if context_menu {
-                    let event_bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
                     let layout_bounds = bounds;
-                    window.on_mouse_event(move |ev: &MouseDownEvent, phase, _window, _cx| {
+                    window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, _cx| {
                         if phase == DispatchPhase::Bubble
                             && ev.button == MouseButton::Right
-                            && event_bounds.contains(&ev.position)
+                            && pointer_reaches(pointer_span, window)
                         {
                             emit_mouse_button_if(
                                 id,
@@ -2061,14 +2172,13 @@ impl Element for ReactDivElement {
                     });
                 }
                 if listens_pointer_down(&self.element.events) {
-                    let event_bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
                     let layout_bounds = bounds;
                     let press_group_for_down = press_group.clone();
                     let event_names_for_down = event_names.clone();
-                    window.on_mouse_event(move |ev: &MouseDownEvent, phase, _window, _cx| {
+                    window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, _cx| {
                         if phase == DispatchPhase::Bubble
                             && ev.button == MouseButton::Left
-                            && event_bounds.contains(&ev.position)
+                            && pointer_reaches(pointer_span, window)
                         {
                             *CAPTURED_MOUSE_UP_TARGET.lock().unwrap() = None;
                             let mut active = ACTIVE_MOUSE_TARGET.lock().unwrap();
@@ -2170,13 +2280,12 @@ impl Element for ReactDivElement {
                     || press
                     || press_out
                 {
-                    let event_bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
                     let layout_bounds = bounds;
-                    window.on_mouse_event(move |ev: &MouseUpEvent, phase, _window, _cx| {
+                    window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, _cx| {
                         if phase != DispatchPhase::Bubble || ev.button != MouseButton::Left {
                             return;
                         }
-                        let inside = event_bounds.contains(&ev.position);
+                        let inside = pointer_reaches(pointer_span, window);
                         let active_target = *ACTIVE_MOUSE_TARGET.lock().unwrap();
                         let captured_up_target = *CAPTURED_MOUSE_UP_TARGET.lock().unwrap();
                         let captured = active_target == Some(id);
@@ -2275,7 +2384,6 @@ impl Element for ReactDivElement {
                     || responder_move
                     || press_action
                 {
-                    let hitbox_for_move = hitbox.clone();
                     let layout_bounds = bounds;
                     let press_group_for_move = press_group.clone();
                     let event_names_for_move = event_names.clone();
@@ -2283,7 +2391,7 @@ impl Element for ReactDivElement {
                         if phase != DispatchPhase::Bubble {
                             return;
                         }
-                        let inside = hitbox_for_move.is_hovered(window);
+                        let inside = pointer_reaches(pointer_span, window);
                         let mut hover = HOVER.lock().unwrap();
                         let was_inside = hover.contains(&id);
                         if inside && !was_inside {
@@ -2451,26 +2559,18 @@ impl Element for ReactDivElement {
         // coalesced `pseudo` event on native hover/press flips, so Tamagui can drive pseudo
         // state with no React mouse-event lane.
         let wants_events = self.element.pseudo_events;
-        if wants_events
-            && !SCROLL_HOVER.lock().unwrap().suppressed
-            && let Some(hitbox) = prepaint.hitbox.clone()
-        {
+        if wants_events && !SCROLL_HOVER.lock().unwrap().suppressed && pointer_span.is_some() {
             let id = self.element.global_id;
             let emit_pseudo = move |hovered: bool, pressed: bool| {
                 crate::bridge::pseudo(id, hovered, pressed);
             };
-            // remember this hitbox for hover re-evaluation after layout changes
-            // (scroll) — used by the scroll container's post-refresh drain.
-            PSEUDO_HITBOXES.lock().unwrap().insert(id, hitbox.clone());
-
             // re-evaluate hover state on every paint: the element is at its final
             // position (scroll offset applied in prepaint), but a stationary mouse
             // won't fire MouseMoveEvent after a layout change (scroll), causing the
             // old element's hover state to persist — the stuck-hover-in-scroll bug.
-            // The cost is one hitbox bounds-check per pseudo-enabled element per
-            // frame — negligible (~dozens of elements, simple rect test).
+            // The cost is one memoized span lookup per pseudo-enabled element per frame.
             {
-                let inside = hitbox.is_hovered(window);
+                let inside = pointer_reaches(pointer_span, window);
                 let mut hover = PSEUDO_HOVER.lock().unwrap();
                 if inside == hover.contains(&id) {
                     // no change — avoid the bridge call and press-state lock.
@@ -2487,12 +2587,11 @@ impl Element for ReactDivElement {
                 }
             }
 
-            let move_hitbox = hitbox.clone();
             window.on_mouse_event(move |_ev: &MouseMoveEvent, phase, window, _cx| {
                 if phase != DispatchPhase::Bubble {
                     return;
                 }
-                let inside = move_hitbox.is_hovered(window);
+                let inside = pointer_reaches(pointer_span, window);
                 let mut hover = PSEUDO_HOVER.lock().unwrap();
                 if inside == hover.contains(&id) {
                     return;
@@ -2512,11 +2611,10 @@ impl Element for ReactDivElement {
                 };
                 emit_pseudo(inside, pressed);
             });
-            let down_hitbox = hitbox.clone();
             window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, _cx| {
                 if phase == DispatchPhase::Bubble
                     && ev.button == MouseButton::Left
-                    && down_hitbox.is_hovered(window)
+                    && pointer_reaches(pointer_span, window)
                     && PRESSED.lock().unwrap().insert(id)
                 {
                     emit_pseudo(true, true);

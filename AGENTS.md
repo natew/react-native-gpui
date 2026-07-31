@@ -223,6 +223,12 @@ Non-obvious facts (these cost real debugging — don't relearn them):
   the half `conformance:hit-test` cannot see, since it only checks where a press resolves.
   The spans only cover elements that get a hitbox (interactive, scrollable, or custom
   cursor), so a purely decorative overlay with no listeners still does not occlude.
+- **Captured PNGs carry Display P3 values with no ICC profile, so raw bytes are not the
+  sRGB you declared.** `rngpui shot` writes what the display composited, untagged, and
+  `pixel-sample` reads bytes. Neutrals drift a couple of units (`#050507` reads `#050505`,
+  `#18181bfa` reads `#181818`) and saturated colors move a lot: `#39ac75` reads `#5aaa78`,
+  because matching that green in P3 needs more red. Judge a saturated color by converting
+  first or by comparing two captures; a `--expect` on a raw hex only holds for near-greys.
 - **Validate the event round trip with `do tap <native-selector>`**: the `DebugTap` handler
   routes a tapped native control to `native_control::perform_native_click` (real
   `performClick:` → target/action → bridge → JS) instead of a gpui synth-tap. Proven via

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
 const packageJsonCache = new Map()
@@ -20,9 +20,7 @@ const packageJsonCache = new Map()
 // resolves it natively. Keep that invariant: do not widen this filter.
 export function nativePackageExportsPlugin({ root, name = 'native package exports' } = {}) {
   const fallbackRoot = root ? resolve(root) : process.cwd()
-  const owned = packagesWithReactNativeCondition(fallbackRoot)
-  if (!owned.size) return { name, setup() {} }
-  const filter = new RegExp(`^(?:${[...owned].map(escapeRegExp).join('|')})(?:/.*)?$`)
+  const filter = reactNativePackageFilter(fallbackRoot)
   return {
     name,
     setup(build) {
@@ -33,61 +31,109 @@ export function nativePackageExportsPlugin({ root, name = 'native package export
   }
 }
 
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
-// every installed package whose export map mentions a react-native condition,
-// including nested node_modules (a hoisted tree still nests duplicates). ~1800
+// every installed package whose export map declares a react-native condition:
+// the root tree, the ancestor node_modules a workspace resolves through, and
+// nested node_modules (a hoisted tree still nests duplicates). realpath dedup
+// keeps a symlinked store from being walked twice or cycling. ~1800
 // package.json reads, ~110ms, once per build.
-function packagesWithReactNativeCondition(root) {
+function reactNativePackageFilter(root) {
   const names = new Set()
+  const nodeModulesStack = []
   for (let dir = root; ; dir = dirname(dir)) {
-    scanPackageDir(join(dir, 'node_modules'), names, 0)
+    nodeModulesStack.push(join(dir, 'node_modules'))
     if (dir === dirname(dir)) break
   }
-  return names
-}
+  const seenNodeModules = new Set()
 
-const MAX_NESTED_DEPTH = 6
-
-function scanPackageDir(dir, names, depth) {
-  if (depth > MAX_NESTED_DEPTH) return
-  let entries
-  try {
-    entries = readdirSync(dir, { withFileTypes: true })
-  } catch {
-    return
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
-    if (entry.name.startsWith('.')) continue
-    const full = join(dir, entry.name)
-    // @scope/ is a directory of packages, not a package.
-    if (entry.name.startsWith('@')) {
-      scanPackageDir(full, names, depth)
+  while (nodeModulesStack.length) {
+    const nodeModules = nodeModulesStack.pop()
+    let realNodeModules
+    let entries
+    try {
+      realNodeModules = realpathSync(nodeModules)
+      if (seenNodeModules.has(realNodeModules)) continue
+      seenNodeModules.add(realNodeModules)
+      entries = readdirSync(nodeModules, { withFileTypes: true })
+    } catch {
       continue
     }
-    const pkg = readPackageJson(join(full, 'package.json'))
-    if (pkg?.name && pkg.exports && JSON.stringify(pkg.exports).includes('"react-native"')) {
-      names.add(pkg.name)
+
+    const packageDirs = []
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue
+      const entryPath = join(nodeModules, entry.name)
+      let directory
+      try {
+        directory = statSync(entryPath).isDirectory()
+      } catch {
+        directory = false
+      }
+      if (!directory) continue
+      if (!entry.name.startsWith('@')) {
+        packageDirs.push(entryPath)
+        continue
+      }
+      let scopedEntries
+      try {
+        scopedEntries = readdirSync(entryPath, { withFileTypes: true })
+      } catch {
+        continue
+      }
+      for (const scopedEntry of scopedEntries) {
+        const scopedPath = join(entryPath, scopedEntry.name)
+        try {
+          if (statSync(scopedPath).isDirectory()) packageDirs.push(scopedPath)
+        } catch {}
+      }
     }
-    scanPackageDir(join(full, 'node_modules'), names, depth + 1)
+
+    for (const packageDir of packageDirs) {
+      const pkg = readPackageJson(join(packageDir, 'package.json'))
+      const values = [pkg?.exports]
+      let hasReactNativeTarget = false
+      while (values.length && !hasReactNativeTarget) {
+        const value = values.pop()
+        if (!value || typeof value !== 'object') continue
+        if (Object.prototype.hasOwnProperty.call(value, 'react-native')) {
+          hasReactNativeTarget = true
+          break
+        }
+        values.push(...Object.values(value))
+      }
+      if (hasReactNativeTarget && pkg?.name) names.add(pkg.name)
+      const nestedNodeModules = join(packageDir, 'node_modules')
+      if (existsSync(nestedNodeModules)) nodeModulesStack.push(nestedNodeModules)
+    }
   }
+
+  if (!names.size) return /\b\B/
+  const escaped = [...names]
+    .sort()
+    .map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  return new RegExp(`^(?:${escaped.join('|')})(?:/|$)`)
 }
 
 function resolveReactNativePackageExport(specifier, importer) {
   const parsed = parsePackageSpecifier(specifier)
   if (!parsed) return undefined
-  const packageJsonPath = findPackageJson(parsed.name, specifier, importer)
-  if (!packageJsonPath) return undefined
+  let defaultPath
+  try {
+    defaultPath = Bun.resolveSync(specifier, importer)
+  } catch {
+    return undefined
+  }
+  const packageJsonPath = findPackageJson(parsed.name, defaultPath, importer)
+  if (!packageJsonPath) return { path: defaultPath }
   const pkg = readPackageJson(packageJsonPath)
-  if (!pkg?.exports) return undefined
+  if (!pkg?.exports) return { path: defaultPath }
   const exportKey = parsed.subpath ? `.${parsed.subpath}` : '.'
   const match = exportValueForKey(pkg.exports, exportKey)
-  if (!match) return undefined
+  if (!match) return { path: defaultPath }
   const target = preferredReactNativeTarget(match.value)
-  if (!target) return undefined
+  // bun 1.3.9 can drop a re-exported module when a matching onResolve hook
+  // returns undefined. once the narrowed filter matches a package name, every
+  // successfully resolved subpath must return the path bun selected.
+  if (!target) return { path: defaultPath }
   const path = match.pattern ? target.replaceAll('*', match.pattern) : target
   return { path: resolve(dirname(packageJsonPath), path) }
 }
@@ -107,15 +153,11 @@ function parsePackageSpecifier(specifier) {
   return { name, subpath }
 }
 
-function findPackageJson(packageName, specifier, importer) {
+function findPackageJson(packageName, resolvedPath, importer) {
   try {
     return Bun.resolveSync(`${packageName}/package.json`, importer)
   } catch {}
-  try {
-    return findPackageJsonAbove(Bun.resolveSync(specifier, importer), packageName)
-  } catch {
-    return null
-  }
+  return findPackageJsonAbove(resolvedPath, packageName)
 }
 
 function findPackageJsonAbove(resolvedPath, packageName) {

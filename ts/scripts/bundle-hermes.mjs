@@ -40,10 +40,12 @@ const result = await Bun.build({
   // wire real react-native-reanimated@4 + worklets for the embedded Hermes target:
   // worklet babel transform (content-gated) + native-seam redirect to ts/src/reanimated.
   plugins: [
-    nativePackageExportsPlugin({ root, name: 'rngpui native package exports' }),
     ...(hotUpdate ? [rngpuiHotUpdateAliasPlugin()] : []),
     ...(refreshPlugin ? [refreshPlugin] : []),
     reanimatedBunPlugin({ rngTsRoot: root }),
+    // last because bun onResolve hooks do not chain; the aliases above own
+    // their package names before this handles react-native export conditions.
+    nativePackageExportsPlugin({ root, name: 'rngpui native package exports' }),
   ],
   sourcemap: 'none',
   throw: false,

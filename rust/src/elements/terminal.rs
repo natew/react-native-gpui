@@ -2,9 +2,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
+use std::thread;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use flume::{Receiver, Sender};
 use gpui::{
     App, Bounds, Display, Element, ElementId, ExternalPaths, FontStyle, FontWeight,
     GlobalElementId, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent,
@@ -35,7 +37,7 @@ thread_local! {
     // session id keeps each session's terminal warm, so a switch is just the
     // few new frames + a cached render. Bounded by an LRU cap so idle sessions
     // don't leak.
-    static TERMINALS: RefCell<HashMap<String, TerminalState>> = RefCell::new(HashMap::new());
+    static TERMINALS: RefCell<HashMap<String, TerminalSession>> = RefCell::new(HashMap::new());
     // imperative session changes sit above the last committed React props until
     // that tree catches up. This keeps the stable host on the native hot path.
     static TERMINAL_PRESENTATIONS: RefCell<HashMap<u64, TerminalPresentation>> = RefCell::new(HashMap::new());
@@ -163,6 +165,7 @@ pub struct ReactGhosttyTerminalElement {
     child: Option<gpui::AnyElement>,
     presented_session_id: String,
     presented_frame_count: usize,
+    presented_replaying: bool,
 }
 
 impl ReactGhosttyTerminalElement {
@@ -173,16 +176,22 @@ impl ReactGhosttyTerminalElement {
             child: None,
             presented_session_id: String::new(),
             presented_frame_count: 0,
+            presented_replaying: false,
         }
     }
 
     fn build_child(&mut self, window: &mut Window, cx: &mut App) -> gpui::AnyElement {
-        let (scroll_session_id, frame_count, rows, translate_y) = terminal_rows(
+        let (scroll_session_id, frame_count, rows, translate_y, replaying) = terminal_rows(
             &self.element,
             self.element.style.line_height.unwrap_or(18.0),
         );
+        if replaying {
+            crate::anim_overlay::arm_paint_only_frame();
+            window.refresh();
+        }
         self.presented_session_id = scroll_session_id.clone();
         self.presented_frame_count = frame_count;
+        self.presented_replaying = replaying;
         let style = &self.element.style;
         let font_size = style.font_size.unwrap_or(12.0);
         let line_height = style.line_height.unwrap_or(18.0);
@@ -472,7 +481,14 @@ impl Element for ReactGhosttyTerminalElement {
             return;
         }
 
-        self.measure_viewport(bounds, window);
+        let width: f32 = bounds.size.width.into();
+        let height: f32 = bounds.size.height.into();
+        // the 1px hidden warm primer uses this callback as its completion
+        // boundary. visible terminals still report their viewport immediately
+        // so the first measurement can attach the PTY and start its stream.
+        if !self.presented_replaying || width > 1.5 || height > 1.5 {
+            self.measure_viewport(bounds, window);
+        }
 
         if let Some(child) = self.child.as_mut() {
             child.prepaint(window, cx);
@@ -523,15 +539,51 @@ struct TerminalState {
     /// The ghostty viewport's current whole-row offset from the bottom. Tracked
     /// so `position_viewport` knows where it left the viewport.
     settled_rows: u16,
-    /// Monotonic tick of the last access, for LRU eviction of warm terminals.
-    last_used: u64,
-    /// Cached output of the last `render_rows()`, with the state it was computed
-    /// for. `build_child` runs in `request_layout`, which fires on EVERY full
-    /// tree re-render (input-cursor blink, the periodic session poll, mouse
-    /// moves, …) — not just when terminal bytes arrive. Re-running ghostty's
-    /// `render.update` + full cell iteration each time is wasted O(rows*cols)
-    /// work. Cache the rows and reuse them whenever nothing relevant changed.
+    /// cached output of the last `render_rows()`, with the state it was computed
+    /// for. the worker can receive geometry-only commands between byte frames;
+    /// re-running ghostty's `render.update` + full cell iteration then is wasted
+    /// O(rows*cols) work.
     cache: Option<RenderCache>,
+}
+
+/// appkit retains only rendered rows and channel handles. each warm session's
+/// ghostty emulator lives on its own worker, so VT replay and cell iteration can
+/// never monopolize the window's layout pass.
+struct TerminalSession {
+    commands: Sender<TerminalCommand>,
+    results: Receiver<TerminalResult>,
+    rows: Vec<RenderedRow>,
+    translate_y: f32,
+    last_seq: u64,
+    requested_seq: u64,
+    applied_revision: u64,
+    requested_revision: u64,
+    line_height: f32,
+    scroll_px: f32,
+    scrollback_rows: usize,
+    /// monotonic tick of the last access, for LRU eviction of warm terminals.
+    last_used: u64,
+}
+
+enum TerminalCommand {
+    Apply {
+        frames: Vec<TerminalFrame>,
+        line_height: f32,
+        revision: u64,
+    },
+    ScrollTo {
+        scroll_px: f32,
+        revision: u64,
+    },
+}
+
+struct TerminalResult {
+    rows: Vec<RenderedRow>,
+    translate_y: f32,
+    last_seq: u64,
+    revision: u64,
+    scroll_px: f32,
+    scrollback_rows: usize,
 }
 
 struct RenderCache {
@@ -571,13 +623,13 @@ struct RowHighlight {
 fn terminal_rows(
     element: &ReactElement,
     line_height: f32,
-) -> (String, usize, Vec<RenderedRow>, f32) {
+) -> (String, usize, Vec<RenderedRow>, f32, bool) {
     let (session_id, presented_frames) = resolve_presentation(element);
     let frames = presented_frames
         .as_ref()
         .map(|frames| frames.as_slice())
         .unwrap_or(element.terminal_frames.as_slice());
-    let mut result = (Vec::new(), 0.0);
+    let mut result = (Vec::new(), 0.0, false, 0usize);
     let tick = TERMINAL_CLOCK.with(|clock| {
         let mut clock = clock.borrow_mut();
         *clock = clock.wrapping_add(1);
@@ -597,7 +649,7 @@ fn terminal_rows(
             .unwrap_or(30);
 
         if !terminals.contains_key(&session_id) {
-            let Some(state) = TerminalState::new(initial_cols, initial_rows) else {
+            let Some(state) = TerminalSession::new(&session_id, initial_cols, initial_rows) else {
                 return;
             };
             terminals.insert(session_id.clone(), state);
@@ -605,16 +657,25 @@ fn terminal_rows(
         }
         let state = terminals.get_mut(&session_id).expect("terminal inserted");
         state.last_used = tick;
-        state.line_height = line_height.max(1.0);
-        state.apply_frames(frames);
-        result = state.rows_for_render().unwrap_or((Vec::new(), 0.0));
+        state.drain_results();
+        state.queue_frames(frames, line_height.max(1.0));
+        let applied_frame_count = frames
+            .iter()
+            .filter(|frame| frame.seq <= state.last_seq)
+            .count();
+        result = (
+            state.rows.clone(),
+            state.translate_y,
+            state.applied_revision < state.requested_revision,
+            applied_frame_count,
+        );
     });
-    (session_id, frames.len(), result.0, result.1)
+    (session_id, result.3, result.0, result.1, result.2)
 }
 
 /// Drop the least-recently-used warm terminals once the map exceeds the cap,
 /// never evicting the session being rendered this frame.
-fn evict_lru(terminals: &mut HashMap<String, TerminalState>, keep: &str) {
+fn evict_lru(terminals: &mut HashMap<String, TerminalSession>, keep: &str) {
     while terminals.len() > MAX_WARM_TERMINALS {
         let victim = terminals
             .iter()
@@ -626,6 +687,154 @@ fn evict_lru(terminals: &mut HashMap<String, TerminalState>, keep: &str) {
                 terminals.remove(&id);
             }
             None => break,
+        }
+    }
+}
+
+impl TerminalSession {
+    fn new(session_id: &str, cols: u16, rows: u16) -> Option<Self> {
+        let (command_tx, command_rx) = flume::unbounded();
+        let (result_tx, result_rx) = flume::unbounded();
+        let (initialized_tx, initialized_rx) = flume::bounded(1);
+        thread::Builder::new()
+            .name(format!("ghostty-terminal-{session_id}"))
+            .spawn(move || {
+                let Some(mut state) = TerminalState::new(cols, rows) else {
+                    let _ = initialized_tx.send(false);
+                    return;
+                };
+                if initialized_tx.send(true).is_err() {
+                    return;
+                }
+                while let Ok(command) = command_rx.recv() {
+                    let mut revision = apply_terminal_command(&mut state, command);
+                    for command in command_rx.try_iter() {
+                        revision = apply_terminal_command(&mut state, command);
+                    }
+                    let Ok((rows, translate_y)) = state.rows_for_render() else {
+                        continue;
+                    };
+                    if result_tx
+                        .send(TerminalResult {
+                            rows,
+                            translate_y,
+                            last_seq: state.last_seq,
+                            revision,
+                            scroll_px: state.scroll_px,
+                            scrollback_rows: state.scrollback_rows(),
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            })
+            .ok()?;
+        if initialized_rx.recv().ok() != Some(true) {
+            return None;
+        }
+        Some(Self {
+            commands: command_tx,
+            results: result_rx,
+            rows: Vec::new(),
+            translate_y: 0.0,
+            last_seq: 0,
+            requested_seq: 0,
+            applied_revision: 0,
+            requested_revision: 0,
+            line_height: 18.0,
+            scroll_px: 0.0,
+            scrollback_rows: 0,
+            last_used: 0,
+        })
+    }
+
+    fn drain_results(&mut self) {
+        for result in self.results.try_iter() {
+            self.rows = result.rows;
+            self.translate_y = result.translate_y;
+            self.last_seq = result.last_seq;
+            self.applied_revision = result.revision;
+            // a wheel event can queue a newer target while an older render is
+            // in flight. keep that requested position until its own result
+            // arrives, or the next delta would start from stale scroll state.
+            if result.revision == self.requested_revision {
+                self.scroll_px = result.scroll_px;
+            }
+            self.scrollback_rows = result.scrollback_rows;
+        }
+    }
+
+    fn queue_frames(&mut self, frames: &[TerminalFrame], line_height: f32) {
+        let next = frames
+            .iter()
+            .filter(|frame| frame.seq > self.requested_seq)
+            .cloned()
+            .collect::<Vec<_>>();
+        if next.is_empty() && (self.line_height - line_height).abs() < f32::EPSILON {
+            return;
+        }
+        let requested_seq = next
+            .last()
+            .map(|frame| frame.seq)
+            .unwrap_or(self.requested_seq);
+        let revision = self.requested_revision.wrapping_add(1).max(1);
+        if self
+            .commands
+            .send(TerminalCommand::Apply {
+                frames: next,
+                line_height,
+                revision,
+            })
+            .is_ok()
+        {
+            self.requested_seq = requested_seq;
+            self.requested_revision = revision;
+            self.line_height = line_height;
+        }
+    }
+
+    fn scroll_pixels(&mut self, dy: f32) -> bool {
+        let max_px = self.scrollback_rows as f32 * self.line_height.max(1.0);
+        let next = (self.scroll_px + dy).clamp(0.0, max_px);
+        if (next - self.scroll_px).abs() < 0.01 {
+            return false;
+        }
+        self.scroll_px = next;
+        let revision = self.requested_revision.wrapping_add(1).max(1);
+        if self
+            .commands
+            .send(TerminalCommand::ScrollTo {
+                scroll_px: next,
+                revision,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        self.requested_revision = revision;
+        true
+    }
+}
+
+fn apply_terminal_command(state: &mut TerminalState, command: TerminalCommand) -> u64 {
+    match command {
+        TerminalCommand::Apply {
+            frames,
+            line_height,
+            revision,
+        } => {
+            state.line_height = line_height;
+            state.apply_frames(&frames);
+            revision
+        }
+        TerminalCommand::ScrollTo {
+            scroll_px,
+            revision,
+        } => {
+            state.scroll_px = scroll_px;
+            state.cache = None;
+            revision
         }
     }
 }
@@ -648,7 +857,6 @@ impl TerminalState {
             line_height: 18.0,
             scroll_px: 0.0,
             settled_rows: 0,
-            last_used: 0,
             cache: None,
         })
     }
@@ -659,18 +867,6 @@ impl TerminalState {
 
     fn scrollback_rows(&self) -> usize {
         self.terminal.scrollback_rows().unwrap_or(0)
-    }
-
-    /// Apply an incoming pixel scroll delta (dy > 0 reveals history). Returns
-    /// whether the scroll position actually moved.
-    fn scroll_pixels(&mut self, dy: f32) -> bool {
-        let max_px = self.scrollback_rows() as f32 * self.line_height.max(1.0);
-        let next = (self.scroll_px + dy).clamp(0.0, max_px);
-        if (next - self.scroll_px).abs() < 0.01 {
-            return false;
-        }
-        self.scroll_px = next;
-        true
     }
 
     /// Move the ghostty viewport to `settled` whole rows up from the bottom,
@@ -1085,10 +1281,14 @@ mod tests {
         );
     }
 
-    use super::{MAX_WARM_TERMINALS, TerminalFrame, TerminalFrameKind, TerminalState, evict_lru};
+    use super::{
+        MAX_WARM_TERMINALS, TerminalFrame, TerminalFrameKind, TerminalSession, TerminalState,
+        evict_lru,
+    };
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as B64;
     use std::collections::HashMap;
+    use std::time::{Duration, Instant};
 
     fn bytes_frame(seq: u64, text: &str) -> TerminalFrame {
         TerminalFrame {
@@ -1108,6 +1308,39 @@ mod tests {
             .into_iter()
             .map(|r| r.text.trim_end().to_string())
             .collect()
+    }
+
+    #[test]
+    fn terminal_session_worker_returns_rendered_rows() {
+        let mut session = TerminalSession::new("worker-test", 20, 4).unwrap();
+        let text = (0..40)
+            .map(|line| format!("line {line:02}\r\n"))
+            .collect::<String>()
+            + "hello from worker";
+        session.queue_frames(&[bytes_frame(1, &text)], 18.0);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while session.applied_revision < session.requested_revision && Instant::now() < deadline {
+            session.drain_results();
+            std::thread::yield_now();
+        }
+
+        assert_eq!(session.last_seq, 1);
+        assert!(
+            session
+                .rows
+                .iter()
+                .any(|row| row.text.contains("hello from worker"))
+        );
+
+        assert!(session.scroll_pixels(45.0));
+        let scroll_revision = session.requested_revision;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while session.applied_revision < scroll_revision && Instant::now() < deadline {
+            session.drain_results();
+            std::thread::yield_now();
+        }
+        assert_eq!(session.applied_revision, scroll_revision);
+        assert!(session.translate_y < 0.0 && session.translate_y > -18.0);
     }
 
     #[test]
@@ -1146,7 +1379,7 @@ mod tests {
         assert_eq!(translate, 0.0);
 
         // scrolling up by a few rows parks in scrollback with a sub-row offset.
-        assert!(state.scroll_pixels(45.0));
+        state.scroll_px = 45.0;
         assert!(!state.following());
         let (_, translate) = state.rows_for_render().unwrap();
         assert!(
@@ -1155,7 +1388,7 @@ mod tests {
         );
 
         // scrolling back to the bottom re-follows; new output snaps to the tail.
-        assert!(state.scroll_pixels(-1000.0));
+        state.scroll_px = 0.0;
         assert!(state.following());
         state.apply_frames(&[bytes_frame(41, "line 41\r\n")]);
         assert!(state.following());
@@ -1164,9 +1397,9 @@ mod tests {
 
     #[test]
     fn evict_lru_drops_oldest_and_keeps_active_session() {
-        let mut terminals: HashMap<String, TerminalState> = HashMap::new();
+        let mut terminals: HashMap<String, TerminalSession> = HashMap::new();
         for i in 0..(MAX_WARM_TERMINALS + 3) {
-            let mut s = TerminalState::new(20, 4).unwrap();
+            let mut s = TerminalSession::new(&format!("session-{i}"), 20, 4).unwrap();
             s.last_used = i as u64; // session "0" is least-recently-used
             terminals.insert(format!("session-{i}"), s);
         }

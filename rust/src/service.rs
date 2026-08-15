@@ -2181,6 +2181,11 @@ pub(crate) enum Incoming {
     ScrollToEnd {
         id: u64,
     },
+    /// Repaint the app background tint (the layer `RNGPUI_APP_TINT` seeds at launch).
+    /// `None` restores raw glass.
+    AppTint {
+        color: Option<gpui::Hsla>,
+    },
     TerminalSession {
         id: u64,
         session_id: String,
@@ -2553,6 +2558,15 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
                 critical: v.get("critical").and_then(|x| x.as_bool()).unwrap_or(false),
             }),
             "openWindow" => Some(Incoming::OpenWindow),
+            // An absent/unparseable color clears the tint back to raw glass, which is
+            // also what the app wants when it has no opinion — so this deliberately
+            // does NOT reject the command on a bad color.
+            "appTint" => Some(Incoming::AppTint {
+                color: v
+                    .get("color")
+                    .and_then(|x| x.as_str())
+                    .and_then(crate::style::parse_css_color),
+            }),
             _ => None,
         };
     }
@@ -4466,6 +4480,21 @@ fn main() {
                     Incoming::DockBadge { label } => {
                         dock::set_badge(&label);
                     }
+                    Incoming::AppTint { color } => {
+                        // needs the real NSWindow, so it takes the window-access route
+                        // rather than the pump branch below.
+                        #[cfg(target_os = "macos")]
+                        if window_handle
+                            .update(cx, |_root, window, _cx| {
+                                liquid_glass::set_app_tint(window, color);
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        let _ = color;
+                    }
                     Incoming::RequestAttention { critical } => {
                         dock::request_attention(critical);
                     }
@@ -4716,6 +4745,9 @@ fn main() {
                                     "frameCount": presentation.as_ref().map(|value| value.frame_count).unwrap_or(0),
                                     "paintCount": presentation.as_ref().map(|value| value.paint_count).unwrap_or(0),
                                 }));
+                            }
+                            Incoming::AppTint { .. } => {
+                                unreachable!("app tint is handled with window access")
                             }
                             Incoming::DebugTap { .. } => {
                                 unreachable!("debug tap is handled with window access")

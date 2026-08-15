@@ -20,7 +20,9 @@ use once_cell::sync::Lazy;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 const NS_WINDOW_BELOW: i64 = -1;
+const NS_WINDOW_ABOVE: i64 = 1;
 const GLASS_VARIANT_CLEAR: i64 = 1;
+const APP_TINT_IDENTIFIER: &str = "rngpui-app-tint";
 
 static INSTALLED_CONTENT_VIEWS: Lazy<Mutex<HashSet<usize>>> =
     Lazy::new(|| Mutex::new(HashSet::new()));
@@ -68,6 +70,13 @@ pub fn install(window: &mut Window) {
             positioned: NS_WINDOW_BELOW
             relativeTo: nil
         ];
+
+        // Seed the tint AFTER the glass exists so the launch tint lands in the same
+        // place a later `set_app_tint` puts it — above the blur. Seeding it at all is
+        // what keeps a themed app from flashing raw glass before its first JS frame.
+        if let Some(color) = env_app_tint() {
+            apply_app_tint(content_view, Some(color));
+        }
     }
 }
 
@@ -373,39 +382,14 @@ unsafe fn configure_transparent_view(view: id, clear_color: id) {
     }
 
     let _: () = msg_send![layer, setOpaque: NO];
-    // One controllable app background tint: RNGPUI_APP_TINT="r,g,b,a" (r/g/b 0-255,
-    // a 0-1) paints the content view's backing layer, which sits at the very BOTTOM
-    // — below the glass blur, the Metal chrome, the WebView underlay, and every
-    // drop shadow. So it shows through the transparent chrome gutters as a uniform
-    // tint, is hidden behind the opaque stage WebView, and can never clip the
-    // stage's drop shadow (unlike a per-element Metal fill, which does). Unset =
-    // clearColor (raw glass), preserving the previous look.
-    let tint_cg_color: id =
-        unsafe { app_tint_cg_color() }.unwrap_or_else(|| msg_send![clear_color, CGColor]);
-    let _: () = msg_send![layer, setBackgroundColor: tint_cg_color];
+    let clear_cg: id = msg_send![clear_color, CGColor];
+    let _: () = msg_send![layer, setBackgroundColor: clear_cg];
 }
 
-// Parse RNGPUI_APP_TINT into a CGColor, or None when unset/invalid.
-unsafe fn app_tint_cg_color() -> Option<id> {
-    let raw = std::env::var("RNGPUI_APP_TINT").ok()?;
-    let parts: Vec<f64> = raw
-        .split(',')
-        .map(|p| p.trim().parse::<f64>())
-        .collect::<Result<_, _>>()
-        .ok()?;
-    if parts.len() != 4 {
-        return None;
-    }
-    let color: id = msg_send![class!(NSColor),
-        colorWithSRGBRed: parts[0] / 255.0
-        green: parts[1] / 255.0
-        blue: parts[2] / 255.0
-        alpha: parts[3]];
-    if color == nil {
-        return None;
-    }
-    let cg: id = msg_send![color, CGColor];
-    Some(cg)
+/// The launch-time app tint: `RNGPUI_APP_TINT` holding any CSS color the style
+/// parser accepts, e.g. `rgba(8,8,8,0.8)`. Unset = raw glass.
+fn env_app_tint() -> Option<gpui::Hsla> {
+    crate::style::parse_css_color(&std::env::var("RNGPUI_APP_TINT").ok()?)
 }
 
 fn raw_ns_view(window: &mut Window) -> Option<id> {
@@ -438,6 +422,131 @@ pub fn invalidate_window_shadow(window: &mut Window) {
         }
         let _: () = msg_send![ns_window, invalidateShadow];
     }
+}
+
+/// Set the app background tint, the one tone the whole window sits on. `None` is raw
+/// glass.
+///
+/// This is how translucent chrome gets a color at all. An app whose rails and bars
+/// paint their own opaque backgrounds covers the stage card's drop-shadow gutter and
+/// clips the shadow, so chrome that floats a shadowed card has to stay transparent —
+/// and then nothing is left to carry the shell tone. The tint is a single layer above
+/// the blur and below the Metal chrome and the WebView underlay, so it tones the blur
+/// like a frost, never covers content, and cannot clip a shadow.
+///
+/// Callable at runtime because a theme changes: `RNGPUI_APP_TINT` seeds the same layer
+/// at launch (so a themed app doesn't flash raw glass) but is read once and cannot
+/// follow a light/dark switch.
+pub fn set_app_tint(window: &mut Window, color: Option<gpui::Hsla>) {
+    let Some(ns_view) = raw_ns_view(window) else {
+        return;
+    };
+    unsafe {
+        let ns_window: id = msg_send![ns_view, window];
+        let content_view: id = if ns_window == nil {
+            ns_view
+        } else {
+            msg_send![ns_window, contentView]
+        };
+        if content_view != nil {
+            apply_app_tint(content_view, color);
+        }
+    }
+}
+
+unsafe fn apply_app_tint(content_view: id, color: Option<gpui::Hsla>) {
+    let existing = unsafe { subview_with_identifier(content_view, APP_TINT_IDENTIFIER) };
+    let Some(color) = color else {
+        if existing != nil {
+            let _: () = msg_send![existing, removeFromSuperview];
+        }
+        return;
+    };
+
+    let tint = if existing != nil {
+        existing
+    } else {
+        let bounds: NSRect = msg_send![content_view, bounds];
+        let view: id = msg_send![class!(NSView), alloc];
+        let view: id = msg_send![view, initWithFrame: bounds];
+        if view == nil {
+            return;
+        }
+        unsafe { configure_common_view(view) };
+        let identifier = unsafe { NSString::alloc(nil).init_str(APP_TINT_IDENTIFIER) };
+        let _: () = msg_send![view, setIdentifier: identifier];
+        // directly above the blur, so everything else in the window still stacks over
+        // it. with vibrancy off there is no blur to sit on, so it goes to the bottom.
+        let glass = unsafe { glass_subview(content_view) };
+        if glass != nil {
+            let _: () = msg_send![
+                content_view,
+                addSubview: view
+                positioned: NS_WINDOW_ABOVE
+                relativeTo: glass
+            ];
+        } else {
+            let _: () = msg_send![
+                content_view,
+                addSubview: view
+                positioned: NS_WINDOW_BELOW
+                relativeTo: nil
+            ];
+        }
+        view
+    };
+
+    let layer: id = msg_send![tint, layer];
+    if layer == nil {
+        return;
+    }
+    let rgba = gpui::Rgba::from(color);
+    let ns_color: id = msg_send![class!(NSColor),
+        colorWithSRGBRed: rgba.r as f64
+        green: rgba.g as f64
+        blue: rgba.b as f64
+        alpha: rgba.a as f64];
+    if ns_color == nil {
+        return;
+    }
+    let cg: id = msg_send![ns_color, CGColor];
+    let _: () = msg_send![layer, setBackgroundColor: cg];
+}
+
+unsafe fn subview_with_identifier(content_view: id, identifier: &str) -> id {
+    let wanted = unsafe { NSString::alloc(nil).init_str(identifier) };
+    let subviews: id = msg_send![content_view, subviews];
+    let count: usize = msg_send![subviews, count];
+    for index in 0..count {
+        let view: id = msg_send![subviews, objectAtIndex: index];
+        let found: id = msg_send![view, identifier];
+        if found != nil {
+            let same: BOOL = msg_send![found, isEqualToString: wanted];
+            if same == YES {
+                return view;
+            }
+        }
+    }
+    nil
+}
+
+unsafe fn glass_subview(content_view: id) -> id {
+    let subviews: id = msg_send![content_view, subviews];
+    let count: usize = msg_send![subviews, count];
+    for index in 0..count {
+        let view: id = msg_send![subviews, objectAtIndex: index];
+        if let Some(class) = Class::get("NSGlassEffectView") {
+            let is_glass: BOOL = msg_send![view, isKindOfClass: class];
+            if is_glass == YES {
+                return view;
+            }
+        }
+        let is_visual: BOOL = msg_send![view, isKindOfClass: class!(NSVisualEffectView)];
+        if is_visual == YES {
+            return view;
+        }
+    }
+    nil
 }
 
 pub fn gpui_ns_view_ptr(window: &mut Window) -> Option<usize> {

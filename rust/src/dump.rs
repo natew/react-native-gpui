@@ -213,6 +213,21 @@ fn resolved_style(style: &ElementStyle) -> Map<String, Value> {
     if let Some(v) = style.border_width {
         m.insert("borderWidth".into(), json!(v));
     }
+    // corner radius is a first-class visual fact — a design-parity check reads it
+    // off this dump the same way it reads padding, and had no other way to see it.
+    if let Some(v) = style.border_radius {
+        m.insert("borderRadius".into(), json!(v));
+    }
+    for (key, value) in [
+        ("borderTopLeftRadius", style.border_top_left_radius),
+        ("borderTopRightRadius", style.border_top_right_radius),
+        ("borderBottomLeftRadius", style.border_bottom_left_radius),
+        ("borderBottomRightRadius", style.border_bottom_right_radius),
+    ] {
+        if let Some(v) = value {
+            m.insert(key.into(), json!(v));
+        }
+    }
     if let Some(v) = style.overflow.as_ref() {
         m.insert("overflow".into(), json!(v));
     }

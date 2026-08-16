@@ -4944,10 +4944,23 @@ fn main() {
                             cx.spawn(async move |cx| {
                                 'driver: loop {
                                     while crate::anim_overlay_tween::tweens_active() {
-                                        cx.background_executor()
-                                            .timer(Duration::from_millis(8))
-                                            .await;
+                                        // a tween in flight is a transition someone is
+                                        // watching land, so it gets every frame. a
+                                        // repeating `_gpuiLoop` on its own does not: it
+                                        // would otherwise hold the window at 125fps for
+                                        // as long as one spinner is on screen.
+                                        let interval =
+                                            if crate::anim_overlay_tween::tweens_in_flight() {
+                                                Duration::from_millis(8)
+                                            } else {
+                                                crate::anim_overlay_tween::LOOP_TICK
+                                            };
+                                        cx.background_executor().timer(interval).await;
                                         crate::anim_overlay_tween::tick_tweens();
+                                        // repeating animations ride the same driver: one
+                                        // timer for every animation the renderer owns,
+                                        // one overlay for their results.
+                                        crate::anim_overlay_tween::tick_loops();
                                         if pump.update(cx, |_this, cx| cx.notify()).is_err() {
                                             break 'driver;
                                         }

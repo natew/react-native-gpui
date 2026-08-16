@@ -2988,6 +2988,46 @@ fn main() {
             })
             .detach();
         }
+        // App-supplied fonts. gpui resolves `font_family` against system-installed
+        // faces, so a bundled typeface is invisible to it until its bytes are handed
+        // to the text system. This is the app's call, not the library's: RNGPUI_FONT_DIR
+        // names a directory and every .ttf/.otf in it is registered under whatever
+        // family name the file itself declares, so `fontFamily: "Geist"` then resolves
+        // without the user having installed anything.
+        if let Some(dir) = std::env::var_os("RNGPUI_FONT_DIR") {
+            let mut fonts = Vec::new();
+            match std::fs::read_dir(&dir) {
+                Ok(entries) => {
+                    // sorted so a directory of faces registers in a stable order and a
+                    // family's weights never depend on filesystem enumeration order.
+                    let mut paths: Vec<_> = entries
+                        .flatten()
+                        .map(|e| e.path())
+                        .filter(|p| {
+                            matches!(
+                                p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(),
+                                Some("ttf") | Some("otf")
+                            )
+                        })
+                        .collect();
+                    paths.sort();
+                    for path in paths {
+                        match std::fs::read(&path) {
+                            Ok(bytes) => fonts.push(std::borrow::Cow::Owned(bytes)),
+                            Err(err) => eprintln!("[rngpui] font read failed {}: {err}", path.display()),
+                        }
+                    }
+                }
+                Err(err) => eprintln!("[rngpui] RNGPUI_FONT_DIR unreadable {:?}: {err}", dir),
+            }
+            if !fonts.is_empty() {
+                let count = fonts.len();
+                match cx.text_system().add_fonts(fonts) {
+                    Ok(()) => startup_mark("fonts registered"),
+                    Err(err) => eprintln!("[rngpui] add_fonts failed for {count} file(s): {err}"),
+                }
+            }
+        }
         // sets up gpui-component's theme + the input key bindings (backspace,
         // arrows, select-all, copy/paste, word-motion, …) used by InputState.
         gpui_component::init(cx);

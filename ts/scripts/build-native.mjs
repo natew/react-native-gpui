@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,7 @@ const nativeDir = join(root, "native");
 const serviceTarget = join(nativeDir, "rngpui-service");
 
 mkdirSync(nativeDir, { recursive: true });
-copyFileSync(serviceSource, serviceTarget);
+stage(serviceSource, serviceTarget);
 
 const linkedDylibs = linkedLibraries(serviceTarget);
 const needsHermes = linkedDylibs.some((line) => line.includes("libhermesvm"));
@@ -20,7 +20,7 @@ if (needsHermes) {
     if (!existsSync(hermesDylib)) {
         throw new Error(`rngpui-service links libhermesvm, but libhermesvm.dylib was not found at ${hermesDylib}`);
     }
-    copyFileSync(hermesDylib, join(nativeDir, "libhermesvm.dylib"));
+    stage(hermesDylib, join(nativeDir, "libhermesvm.dylib"));
 }
 
 const needsGhostty = linkedDylibs.some((line) => line.includes("libghostty-vt"));
@@ -36,8 +36,8 @@ if (needsGhostty && ghosttyDylibs.length === 0) {
 // suite that fails with no output and no explanation.
 for (const dylib of ghosttyDylibs) {
     const name = dylib.split("/").pop();
-    copyFileSync(dylib, join(nativeDir, name));
-    copyFileSync(dylib, join(releaseDir, name));
+    stage(dylib, join(nativeDir, name));
+    stage(dylib, join(releaseDir, name));
 }
 
 if (readdirSync(nativeDir).some((entry) => entry.endsWith(".dylib")) && !hasRpath(serviceTarget, "@executable_path")) {
@@ -49,6 +49,20 @@ if (readdirSync(nativeDir).some((entry) => entry.endsWith(".dylib")) && !hasRpat
 const uiRuntime = spawnSync("bun", ["scripts/build-ui-runtime.mjs"], { cwd: root, stdio: "inherit" });
 if (uiRuntime.status !== 0) {
     throw new Error("build-ui-runtime.mjs failed — the shipped package needs native/ui-runtime.js");
+}
+
+// Write beside the target and rename over it, never copy onto it. A plain
+// copyFileSync reuses the inode, and macOS caches a code signature per (device,
+// inode): overwrite the file a running service is mapped from and the NEXT launch
+// is SIGKILLed by AMFI with `EXC_BAD_ACCESS ... CODESIGNING / Invalid Page`, on a
+// binary `codesign --verify` still calls valid on disk. The launch fails before it
+// writes a line, so the harness reports only "service did not start (no service
+// log)" and the cause is invisible. A rename gives the new bytes a new inode and
+// nothing stale can be consulted.
+function stage(source, target) {
+    const temp = `${target}.staging`;
+    copyFileSync(source, temp);
+    renameSync(temp, target);
 }
 
 function findNativeDylibs(dir) {

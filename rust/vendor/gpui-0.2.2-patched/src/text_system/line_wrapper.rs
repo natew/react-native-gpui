@@ -152,6 +152,20 @@ impl LineWrapper {
             width += char_width;
 
             if width.floor() > truncate_width {
+                // react-native-gpui patch: this running total is a sum of per-character
+                // advances, so it does not kern. The box being fitted to came from
+                // `shape_text(...).width.ceil()`, which does. On a face whose kerning
+                // tightens the line the two disagree by a fraction of a pixel, and a box
+                // that hugs its own text gets told the text no longer fits and drops its
+                // last characters — a per-string coin flip that only shows up on some
+                // faces (Geist clipped "Local checkout" to "Local checko…" in a box laid
+                // out at exactly its width; SF Pro Text, whose advances this models
+                // exactly, never did). Confirm with the shaper before cutting anything.
+                // The check costs one layout only when the estimate says to truncate;
+                // text that comfortably fits leaves the loop without shaping at all.
+                if self.shaped_width(&line, runs).floor() <= truncate_width {
+                    return line;
+                }
                 let result =
                     SharedString::from(format!("{}{}", &line[..truncate_ix], truncation_suffix));
                 update_runs_after_truncation(&result, truncation_suffix, runs);
@@ -206,6 +220,34 @@ impl LineWrapper {
             self.cached_other_char_widths.insert(c, width);
             width
         }
+    }
+
+    /// The kerned width of `line`, measured the same way the layout box that a
+    /// truncation is fitted to was measured. `runs` carries the per-run fonts the
+    /// caller shaped with; an empty run list falls back to this wrapper's own font.
+    fn shaped_width(&self, line: &str, runs: &[TextRun]) -> Pixels {
+        let font_runs: Vec<FontRun> = runs
+            .iter()
+            .map(|run| FontRun {
+                len: run.len,
+                font_id: self
+                    .platform_text_system
+                    .font_id(&run.font)
+                    .unwrap_or(self.font_id),
+            })
+            .collect();
+        let fallback = [FontRun {
+            len: line.len(),
+            font_id: self.font_id,
+        }];
+        let font_runs = if font_runs.is_empty() {
+            &fallback[..]
+        } else {
+            &font_runs[..]
+        };
+        self.platform_text_system
+            .layout_line(line, self.font_size, font_runs)
+            .width
     }
 
     fn compute_width_for_char(&self, c: char) -> Pixels {

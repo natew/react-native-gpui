@@ -118,6 +118,29 @@ objc = "0.2"
 #    whole line. Do not reopen either; emulating them with a positioned element
 #    behind the text desynchronizes on every reflow. A background that wraps is
 #    painted one quad per line fragment and each fragment is rounded.
+#
+# 7. Glyph coverage contrast + gamma correction on mac (src/platform/mac/shaders.metal
+#    `apply_contrast_and_gamma_correction`, plumbed from `TextGammaParams` in
+#    src/platform/mac/metal_renderer.rs). gpui already HAS this, but only on the blade
+#    backend (src/platform/blade/shaders.wgsl `fs_mono_sprite` calls it; the mac glyph
+#    fragment was a bare `color.a *= sample.a`). The mac mask is raw CoreGraphics
+#    coverage (kCGImageAlphaOnly, and the rasterizer never enables font smoothing) and
+#    the drawable is BGRA8Unorm rather than BGRA8Unorm_sRGB, so the blend unit operates
+#    on sRGB-ENCODED values as if they were linear. For #111 text on white that puts a
+#    0.8-coverage pixel at 65 where a gamma-correct blend puts it at ~126, which is why
+#    our glyphs concentrate ink into fewer, darker pixels than the browser reference
+#    (measured on one body line: reference 1621 inked / 131 solid, ours 1394 inked /
+#    503 solid, advances matching within 0.5%).
+#
+#    DEFAULT OFF, and off is bit-exact rather than branched: `RNGPUI_TEXT_GAMMA`
+#    defaults to 1.0, whose ratio row is all zeros, and `RNGPUI_TEXT_ENHANCED_CONTRAST`
+#    defaults to 0.0, which makes `enhance_contrast` return its input. The shader math
+#    reduces to `a + a * (1 - a) * 0 == a`, so no capture or conformance baseline moves
+#    until someone sets the vars. (Upstream blade defaults to 1.8 / 1.0; we deliberately
+#    do not, because adopting the look is a visual decision that is not ours to make.)
+#    Deliberately NOT taken: flipping the layer to BGRA8Unorm_sRGB. That is one line and
+#    it fixes the same math, but it changes every quad, shadow and opacity blend in the
+#    app and would invalidate the opacity and occlusion baselines.
 [patch.crates-io]
 gpui = { path = "vendor/gpui-0.2.2-patched" }
 # Patched gpui-component 0.5.1 (vendored alongside gpui, same precedent). Divergences

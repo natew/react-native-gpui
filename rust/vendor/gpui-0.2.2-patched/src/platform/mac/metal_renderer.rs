@@ -262,6 +262,7 @@ pub(crate) struct MetalRenderer {
     retained_valid: bool,
     previous_scene: Option<SceneSnapshot>,
     path_sample_count: u32,
+    text_gamma: TextGammaParams,
 }
 
 #[repr(C)]
@@ -470,6 +471,7 @@ impl MetalRenderer {
             retained_valid: false,
             previous_scene: None,
             path_sample_count: PATH_SAMPLE_COUNT,
+            text_gamma: TextGammaParams::from_env(),
         }
     }
 
@@ -1619,6 +1621,11 @@ impl MetalRenderer {
             Some(&instance_buffer.metal_buffer),
             *instance_offset as u64,
         );
+        command_encoder.set_fragment_bytes(
+            SpriteInputIndex::TextGamma as u64,
+            mem::size_of::<TextGammaParams>() as u64,
+            &self.text_gamma as *const TextGammaParams as *const _,
+        );
         command_encoder.set_fragment_texture(SpriteInputIndex::AtlasTexture as u64, Some(&texture));
 
         unsafe {
@@ -2265,6 +2272,85 @@ enum SpriteInputIndex {
     ViewportSize = 2,
     AtlasTextureSize = 3,
     AtlasTexture = 4,
+    TextGamma = 5,
+}
+
+/// Glyph coverage correction parameters, read once from the environment.
+///
+/// Ported from the blade backend's `RenderingParameters`, which mac never had.
+/// Upstream blade defaults to gamma 1.8 / contrast 1.0; we default to the
+/// IDENTITY (gamma 1.0 -> all-zero ratios, contrast 0.0 -> `enhance_contrast`
+/// returns its input) so the correction ships OFF and no existing capture moves
+/// until someone asks for it.
+///
+/// * `RNGPUI_TEXT_GAMMA` - clamped to [1.0, 2.2], default 1.0 (off).
+/// * `RNGPUI_TEXT_ENHANCED_CONTRAST` - clamped to [0.0, ..), default 0.0 (off).
+///
+/// Field order and offsets must match `TextGammaParams` in shaders.metal:
+/// float4 at 0, float at 16, float at 20. MSL rounds that struct up to its
+/// float4 alignment, so it is 32 bytes there and `tail` pads this one to match;
+/// without it `set_fragment_bytes` would hand the shader a short buffer.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TextGammaParams {
+    gamma_ratios: [f32; 4],
+    enhanced_contrast: f32,
+    pad: f32,
+    tail: [f32; 2],
+}
+
+impl TextGammaParams {
+    fn from_env() -> Self {
+        let gamma = std::env::var("RNGPUI_TEXT_GAMMA")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(1.0)
+            .clamp(1.0, 2.2);
+        let enhanced_contrast = std::env::var("RNGPUI_TEXT_ENHANCED_CONTRAST")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0)
+            .max(0.0);
+        Self {
+            gamma_ratios: Self::gamma_ratios(gamma),
+            enhanced_contrast,
+            pad: 0.0,
+            tail: [0.0; 2],
+        }
+    }
+
+    // Gamma ratios for brightening/darkening edges for better contrast.
+    // https://github.com/microsoft/terminal/blob/1283c0f5b99a2961673249fa77c6b986efb5086c/src/renderer/atlas/dwrite.cpp#L50
+    fn gamma_ratios(gamma: f32) -> [f32; 4] {
+        const GAMMA_INCORRECT_TARGET_RATIOS: [[f32; 4]; 13] = [
+            [0.0000 / 4.0, 0.0000 / 4.0, 0.0000 / 4.0, 0.0000 / 4.0], // gamma = 1.0
+            [0.0166 / 4.0, -0.0807 / 4.0, 0.2227 / 4.0, -0.0751 / 4.0], // gamma = 1.1
+            [0.0350 / 4.0, -0.1760 / 4.0, 0.4325 / 4.0, -0.1370 / 4.0], // gamma = 1.2
+            [0.0543 / 4.0, -0.2821 / 4.0, 0.6302 / 4.0, -0.1876 / 4.0], // gamma = 1.3
+            [0.0739 / 4.0, -0.3963 / 4.0, 0.8167 / 4.0, -0.2287 / 4.0], // gamma = 1.4
+            [0.0933 / 4.0, -0.5161 / 4.0, 0.9926 / 4.0, -0.2616 / 4.0], // gamma = 1.5
+            [0.1121 / 4.0, -0.6395 / 4.0, 1.1588 / 4.0, -0.2877 / 4.0], // gamma = 1.6
+            [0.1300 / 4.0, -0.7649 / 4.0, 1.3159 / 4.0, -0.3080 / 4.0], // gamma = 1.7
+            [0.1469 / 4.0, -0.8911 / 4.0, 1.4644 / 4.0, -0.3234 / 4.0], // gamma = 1.8
+            [0.1627 / 4.0, -1.0170 / 4.0, 1.6051 / 4.0, -0.3347 / 4.0], // gamma = 1.9
+            [0.1773 / 4.0, -1.1420 / 4.0, 1.7385 / 4.0, -0.3426 / 4.0], // gamma = 2.0
+            [0.1908 / 4.0, -1.2652 / 4.0, 1.8650 / 4.0, -0.3476 / 4.0], // gamma = 2.1
+            [0.2031 / 4.0, -1.3864 / 4.0, 1.9851 / 4.0, -0.3501 / 4.0], // gamma = 2.2
+        ];
+
+        const NORM13: f32 = ((0x10000 as f64) / (255.0 * 255.0) * 4.0) as f32;
+        const NORM24: f32 = ((0x100 as f64) / (255.0) * 4.0) as f32;
+
+        let index = ((gamma * 10.0).round() as usize).clamp(10, 22) - 10;
+        let ratios = GAMMA_INCORRECT_TARGET_RATIOS[index];
+
+        [
+            ratios[0] * NORM13,
+            ratios[1] * NORM24,
+            ratios[2] * NORM13,
+            ratios[3] * NORM24,
+        ]
+    }
 }
 
 #[repr(C)]

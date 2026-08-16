@@ -37,15 +37,34 @@ export async function waitForServicePid(pidPath, { timeoutMs = 5000, isFixtureEx
     throw new Error(`timed out waiting for service pid at ${pidPath}${last ? `: ${last}` : ""}`);
 }
 
-export async function waitForWindow(match, { timeoutMs = 5000, isFixtureExited } = {}) {
-    const deadline = Date.now() + timeoutMs;
+// The budget bounds SILENCE, not wall time. `progress` returns a token (the
+// service log's size) and any change resets the clock, so a fixture merely
+// starved by concurrent work keeps its time while a wedged one still dies
+// promptly. An absolute deadline here is really a claim about how fast the
+// machine is, and it is wrong on a busy one.
+//
+// A fixture that has EXITED is reported as such rather than as a missing window.
+// The old code broke the loop on isFixtureExited and then threw the generic
+// "GPUI window was not found", so a self-terminating example (one that runs its
+// assertions and quits, like box-model-conformance) was indistinguishable from a
+// renderer that could not open a window — and it got read as the latter.
+export async function waitForWindow(match, { timeoutMs = 5000, isFixtureExited, progress } = {}) {
+    let deadline = Date.now() + timeoutMs;
+    let token = progress?.();
     while (Date.now() < deadline) {
         const window = listWindows().find(match);
         if (window) return window;
-        if (isFixtureExited?.()) break;
+        if (isFixtureExited?.()) {
+            throw new Error("the fixture exited before opening a window");
+        }
         await sleep(50);
+        const next = progress?.();
+        if (next !== token) {
+            token = next;
+            deadline = Date.now() + timeoutMs;
+        }
     }
-    throw new Error("GPUI window was not found");
+    throw new Error(`GPUI window was not found (no progress for ${timeoutMs}ms)`);
 }
 
 export function listWindows() {

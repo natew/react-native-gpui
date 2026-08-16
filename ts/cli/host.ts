@@ -321,8 +321,13 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
         } catch {
             /* already gone */
         }
-        rmSync(workdir, { recursive: true, force: true });
-        throw new Error(`${message}\n--- host log tail ---\n${logTail()}`);
+        // deliberately NOT rmSync(workdir) here. This is the ERROR path, and the
+        // service log inside the workdir is the only evidence of why it failed —
+        // but rmSync ran before the template below evaluated logTail(), so every
+        // failure printed "(no service log)" and deleted the one thing worth
+        // reading. Two agents lost real time to a window bug that way. A leaked
+        // temp dir is cheap; the log is not, so keep it and say where it is.
+        throw new Error(`${message}\n--- service log (${logPath}) ---\n${logTail()}`);
     };
 
     let servicePid = 0;
@@ -340,6 +345,15 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
         window = (await waitForWindow((win: GpuiWindow) => win.pid === servicePid, {
             timeoutMs: 15_000,
             isFixtureExited: () => child.exitCode != null,
+            // the service writing anything is progress, so a starved launch keeps
+            // its budget instead of dying at a fixed 15s that only suited an idle box.
+            progress: () => {
+                try {
+                    return statSync(logPath).size;
+                } catch {
+                    return -1;
+                }
+            },
         })) as GpuiWindow;
     } catch (error) {
         const seen = (listWindows() as GpuiWindow[])

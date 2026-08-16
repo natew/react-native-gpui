@@ -87,6 +87,7 @@ impl PlotLabel {
             let origin = origin_point(origin.x, origin.y, bounds.origin);
 
             let text_run = TextRun {
+                background_radius: None,
                 len: text.len(),
                 font: window.text_style().highlight(*font_weight).font(),
                 color: *color,

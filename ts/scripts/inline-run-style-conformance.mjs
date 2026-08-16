@@ -2,10 +2,10 @@
 // being flattened into a shaped text run. Launches examples/inline-run-style-conformance.tsx
 // offscreen with RNGPUI_CAPTURE_PNG and asserts three things against the capture:
 //
-//   PLATE    row A contains a run of the inline-code background colour. A run cannot
-//            express padding or a corner radius (gpui paints a run background as a
-//            square quad, glyph-advance wide by line-height tall), so this asserts the
-//            plate EXISTS and spans the code text, not that it is rounded or padded.
+//   PLATE    row A contains a run of the inline-code background colour, and that plate
+//            is ROUNDED. A run background is exactly the width of the run's glyph
+//            advances, so it can carry a colour and a radius but never padding — that
+//            would have to move the surrounding glyphs. This asserts colour + radius.
 //   NESTED   row B (nested <Text fontStyle=italic>) differs from row C (upright).
 //   PLAIN    row D (plain <Text fontStyle=italic>) differs from row C.
 //
@@ -90,6 +90,26 @@ for (let y = 0; y < Math.round(ROW * scale); y++) {
 const plateW = plateCount ? (plateMaxX - plateMinX + 1) / scale : 0;
 const plateH = plateCount ? (plateMaxY - plateMinY + 1) / scale : 0;
 
+// Rounded corners mean the plate's TOP row is inset from its widest row on both
+// sides. A square quad has identical spans, so cornerInset is 0 and this fails.
+function rowSpan(yDevice) {
+    let min = Infinity;
+    let max = -Infinity;
+    for (let x = 0; x < img.width; x++) {
+        if (isPlate(at(x, yDevice))) {
+            if (x < min) min = x;
+            if (x > max) max = x;
+        }
+    }
+    return min === Infinity ? null : { min, max };
+}
+const topSpan = rowSpan(plateMinY);
+const midSpan = rowSpan(Math.round((plateMinY + plateMaxY) / 2));
+const cornerInset =
+    topSpan && midSpan
+        ? Math.min(topSpan.min - midSpan.min, midSpan.max - topSpan.max) / scale
+        : 0;
+
 // --- ITALIC: compare each italic row's ink against the upright control ----------
 // Ink = any pixel meaningfully darker than the white background. Rows are compared
 // column-by-column as ink-coverage profiles, which is what a slant actually changes
@@ -135,6 +155,13 @@ const results = [
         name: "PLATE",
         ok: plateCount > 0 && plateW >= 40,
         detail: `plate px=${plateCount} spans ${plateW.toFixed(1)}x${plateH.toFixed(1)} logical`,
+    },
+    {
+        // borderRadius 5 at this size insets the top row by ~1.5px per side; a square
+        // quad insets by 0. 1.0 clears AA noise without demanding an exact radius.
+        name: "PLATE_ROUNDED",
+        ok: cornerInset >= 1.0,
+        detail: `top-row corner inset = ${cornerInset.toFixed(2)}px per side (need >= 1.0)`,
     },
     {
         name: "NESTED_ITALIC",

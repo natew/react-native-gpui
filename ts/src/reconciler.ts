@@ -964,20 +964,28 @@ function serializeAccessibility(inst: Instance, node: SerializedNode): Serialize
 
 // What a nested <Text> can carry once it is flattened into a shaped run. A run
 // lives inside a laid-out line, so it can express anything the shaper/painter
-// resolves per-run — family, weight, style, colour, and a background quad — but
-// NOT box styling (padding, border radius) or its own font size, because those
-// would have to change the line's advances. An inline code span therefore gets its
-// plate colour and mono face here; its padding/radius are dropped by design.
+// resolves per-run — family, weight, style, colour, and a rounded background quad
+// — but NOT padding or its own font size, because both would have to change the
+// line's advances. An inline code span therefore gets its plate (colour + radius)
+// and its mono face here, at the paragraph's font size, with padding dropped.
 type SerRun = {
     text: string;
     fontWeight?: string;
     color?: string;
     fontStyle?: string;
     backgroundColor?: string;
+    borderRadius?: number;
     fontFamily?: string;
 };
 
-const RUN_STYLE_KEYS = ["fontWeight", "color", "fontStyle", "fontFamily", "backgroundColor"] as const;
+const RUN_STYLE_KEYS = [
+    "fontWeight",
+    "color",
+    "fontStyle",
+    "fontFamily",
+    "backgroundColor",
+    "borderRadius",
+] as const;
 
 // Walk a <Text> tree into flowing styled runs, so a nested <Text bold> inside a
 // paragraph keeps its weight/color instead of being flattened to the parent's.
@@ -996,6 +1004,9 @@ function gatherRuns(inst: Instance, inherited: Omit<SerRun, "text">, isRoot = fa
         backgroundColor: isRoot
             ? undefined
             : ((own.backgroundColor as string) ?? inherited.backgroundColor),
+        borderRadius: isRoot
+            ? undefined
+            : ((own.borderRadius as number) ?? inherited.borderRadius),
     };
     const runs: SerRun[] = [];
     for (const c of inst.children) {

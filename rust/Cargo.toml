@@ -105,6 +105,19 @@ objc = "0.2"
 #    change advances. Because CoreText hands shaped runs back tagged by postscript name,
 #    and the variant shares one, `layout_line` re-tags glyphs from the requested byte
 #    ranges. Pinned by `ts/scripts/inline-run-style-conformance.mjs`.
+#
+# 6. Corner radius on a text run's background (`TextRun.background_radius` +
+#    `DecorationRun.background_radius`, painted in src/text_system/line.rs).
+#    Upstream paints a run background with `fill(bounds, color)`, a quad with no
+#    corner radii, so an inline code span could only ever be a hard-edged block
+#    while the design calls for a rounded plate. The three paint sites now carry
+#    the radius through. Note what this does NOT add: a run background is exactly
+#    the width of the run's glyph advances, so PADDING remains impossible — it
+#    would have to move the surrounding glyphs, which are already shaped. Per-run
+#    font size is likewise impossible, since `layout_line` takes one size for the
+#    whole line. Do not reopen either; emulating them with a positioned element
+#    behind the text desynchronizes on every reflow. A background that wraps is
+#    painted one quad per line fragment and each fragment is rounded.
 [patch.crates-io]
 gpui = { path = "vendor/gpui-0.2.2-patched" }
 # Patched gpui-component 0.5.1 (vendored alongside gpui, same precedent). Divergences

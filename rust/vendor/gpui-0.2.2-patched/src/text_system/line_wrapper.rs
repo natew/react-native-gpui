@@ -384,6 +384,7 @@ mod tests {
                 },
                 color: Hsla::default(),
                 background_color: None,
+                background_radius: None,
                 underline: None,
                 strikethrough: None,
             })
@@ -736,6 +737,7 @@ mod tests {
                 underline: Default::default(),
                 strikethrough: None,
                 background_color: None,
+                background_radius: None,
             };
             let bold = TextRun {
                 len: 0,
@@ -744,6 +746,7 @@ mod tests {
                 underline: Default::default(),
                 strikethrough: None,
                 background_color: None,
+                background_radius: None,
             };
 
             let text = "aa bbb cccc ddddd eeee".into();

@@ -468,6 +468,10 @@ fn parse_json_tree(
                             .get("backgroundColor")
                             .and_then(|v| v.as_str())
                             .and_then(crate::style::parse_css_color),
+                        background_radius: o
+                            .get("borderRadius")
+                            .and_then(|v| v.as_f64())
+                            .map(|v| v as f32),
                         font_family: o
                             .get("fontFamily")
                             .and_then(|v| v.as_str())

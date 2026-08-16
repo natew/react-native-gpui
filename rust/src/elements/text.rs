@@ -98,16 +98,16 @@ impl ReactTextElement {
         // to name its font outright. What a run still CANNOT express, because it is a
         // span inside an already-shaped line rather than a box:
         //
-        //   * padding and border radius. gpui paints a run background as one square
-        //     quad, glyph-advance wide by line-height tall (text_system/line.rs).
-        //     Honouring padding would have to move the surrounding glyphs, i.e. change
-        //     the line's advances, and a radius would need the painter to round it.
+        //   * padding. The run background is exactly the width of the run's glyph
+        //     advances, so padding would have to move the surrounding glyphs, i.e.
+        //     change the line's own advances. This is structural, not a TODO.
         //   * its own font size. `layout_line` takes ONE font size for the whole line.
         //
-        // So an inline code span gets its plate colour and its mono face here, and
-        // MarkdownBody's paddingLeft/paddingRight/borderRadius/fontSize on that span
-        // are dropped on purpose. Do not emulate them with a separate positioned
-        // element behind the text — that desynchronizes on every reflow.
+        // Corner radius DOES work (divergence 6 in rust/Cargo.toml added it to gpui's
+        // run background), so an inline code span gets a rounded plate in its mono
+        // face at the paragraph's size. Do not emulate the missing padding with a
+        // separate positioned element behind the text — that desynchronizes on every
+        // reflow.
         let mut base = window.text_style();
         base.color = color;
         base.font_size = px(size).into();
@@ -151,6 +151,7 @@ impl ReactTextElement {
                 font,
                 color: r.color.unwrap_or(color),
                 background_color: r.background_color,
+                background_radius: r.background_radius.map(px),
                 underline: None,
                 strikethrough: None,
             });
@@ -164,6 +165,7 @@ impl ReactTextElement {
                 font: base_font,
                 color,
                 background_color: None,
+                background_radius: None,
                 underline: None,
                 strikethrough: None,
             });

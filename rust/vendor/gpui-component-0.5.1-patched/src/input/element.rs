@@ -540,6 +540,7 @@ impl TextElement {
                 "+".repeat(line_number_len).into(),
                 font_size,
                 &[TextRun {
+                    background_radius: None,
                     len: line_number_len,
                     font: style.font(),
                     color: gpui::black(),
@@ -602,6 +603,7 @@ impl TextElement {
         let first_text: SharedString = lines[0].to_string().into();
         let first_line = if !first_text.is_empty() {
             let first_run = TextRun {
+                background_radius: None,
                 len: first_text.len(),
                 font: font.clone(),
                 color: completion_color,
@@ -625,6 +627,7 @@ impl TextElement {
                 let text: SharedString = line_text.to_string().into();
                 let len = text.len().max(1); // Ensure at least 1 for empty lines
                 let run = TextRun {
+                    background_radius: None,
                     len,
                     font: font.clone(),
                     color: completion_color,
@@ -993,6 +996,7 @@ impl Element for TextElement {
         };
 
         let run = TextRun {
+            background_radius: None,
             len: display_text.len(),
             font: style.font(),
             color: text_color,
@@ -1001,6 +1005,7 @@ impl Element for TextElement {
             strikethrough: None,
         };
         let marked_run = TextRun {
+            background_radius: None,
             len: 0,
             font: style.font(),
             color: text_color,
@@ -1040,15 +1045,18 @@ impl Element for TextElement {
             // IME marked text
             vec![
                 TextRun {
+                    background_radius: None,
                     len: ime_marked_range.start,
                     ..run.clone()
                 },
                 TextRun {
+                    background_radius: None,
                     len: ime_marked_range.end - ime_marked_range.start,
                     underline: marked_run.underline,
                     ..run.clone()
                 },
                 TextRun {
+                    background_radius: None,
                     len: display_text.len() - ime_marked_range.end,
                     ..run.clone()
                 },
@@ -1085,6 +1093,7 @@ impl Element for TextElement {
                     longest_line.clone(),
                     text_size,
                     &[TextRun {
+                        background_radius: None,
                         len: longest_line.len(),
                         font: style.font(),
                         color: gpui::black(),
@@ -1174,6 +1183,7 @@ impl Element for TextElement {
         let line_numbers = if state.mode.line_number() {
             let mut line_numbers = vec![];
             let other_line_runs = vec![TextRun {
+                background_radius: None,
                 len: line_number_len,
                 font: style.font(),
                 color: cx.theme().muted_foreground,
@@ -1182,6 +1192,7 @@ impl Element for TextElement {
                 strikethrough: None,
             }];
             let current_line_runs = vec![TextRun {
+                background_radius: None,
                 len: line_number_len,
                 font: style.font(),
                 color: cx.theme().foreground,
@@ -1560,6 +1571,7 @@ fn split_runs_by_bg_segments(
             if run_start < bg_range.start {
                 // Add the part before the background range
                 result.push(TextRun {
+                    background_radius: None,
                     len: bg_range.start - run_start,
                     ..run.clone()
                 });
@@ -1577,6 +1589,7 @@ fn split_runs_by_bg_segments(
             let run_len = overlap_end.saturating_sub(overlap_start);
             if run_len > 0 {
                 result.push(TextRun {
+                    background_radius: None,
                     len: run_len,
                     color: text_color,
                     ..run.clone()
@@ -1590,6 +1603,7 @@ fn split_runs_by_bg_segments(
         if run_end > cursor {
             // Add the part after the background range
             result.push(TextRun {
+                background_radius: None,
                 len: run_end - cursor,
                 ..run.clone()
             });
@@ -1608,6 +1622,7 @@ mod tests {
     #[test]
     fn test_runs_for_range() {
         let run = TextRun {
+            background_radius: None,
             len: 0,
             font: gpui::font(".SystemUIFont"),
             color: gpui::black(),
@@ -1620,26 +1635,31 @@ mod tests {
         let runs = vec![
             // use
             TextRun {
+                background_radius: None,
                 len: 3,
                 ..run.clone()
             },
             // \s
             TextRun {
+                background_radius: None,
                 len: 1,
                 ..run.clone()
             },
             // hello
             TextRun {
+                background_radius: None,
                 len: 5,
                 ..run.clone()
             },
             // \s
             TextRun {
+                background_radius: None,
                 len: 1,
                 ..run.clone()
             },
             // this-is-test
             TextRun {
+                background_radius: None,
                 len: 12,
                 ..run.clone()
             },
@@ -1666,6 +1686,7 @@ mod tests {
     #[test]
     fn test_split_runs_by_bg_segments() {
         let run = TextRun {
+            background_radius: None,
             len: 0,
             font: gpui::font(".SystemUIFont"),
             color: gpui::blue(),
@@ -1676,14 +1697,17 @@ mod tests {
 
         let runs = vec![
             TextRun {
+                background_radius: None,
                 len: 5,
                 ..run.clone()
             },
             TextRun {
+                background_radius: None,
                 len: 7,
                 ..run.clone()
             },
             TextRun {
+                background_radius: None,
                 len: 24,
                 ..run.clone()
             },

@@ -187,6 +187,18 @@ const COMMIT_TRACE = typeof process !== "undefined" && !!process.env?.RNGPUI_COM
 declare const __rngpui_applyTree: (json: string) => void;
 declare const __rngpui_close: (() => void) | undefined;
 
+/**
+ * Send one `$cmd` envelope to the host without a bridge.
+ *
+ * `startBridge` does not run until the first commit, so anything the host needs
+ * *before* React has rendered has no bridge to travel on. The host fns are
+ * installed before this bundle is even evaluated, so the channel itself is ready
+ * long before the bridge is.
+ */
+export function sendHostCommand(cmd: object): void {
+    __rngpui_applyTree(JSON.stringify(cmd));
+}
+
 // the host batches high-frequency events (resize/layout/scroll/move during a window
 // resize or drag) into one call; this wraps their dispatch in a single React update so a
 // flood produces ONE re-render, not one per event. render.ts injects the reconciler's
@@ -237,7 +249,9 @@ export function startBridge(initial: SerializedNode, options: BridgeOptions = {}
         return { bytes: json.length, stringifyMs };
     };
 
-    // push the first tree during bundle evaluation so the native host can size the window.
+    // push the first tree during bundle evaluation so the window fills as early as
+    // it can. Sizing no longer waits on this: `createRoot` announces the size with a
+    // `windowSize` command before React renders, so the window is already open.
     const initialUpdate = send(initial);
     if (options.inspector) {
         send({ $cmd: "inspector", enabled: true });

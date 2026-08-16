@@ -77,6 +77,13 @@ static STARTUP: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::n
 static FIRST_LAYOUT_LOGGED: AtomicBool = AtomicBool::new(false);
 static FIRST_PREPAINT_LOGGED: AtomicBool = AtomicBool::new(false);
 static FIRST_PAINT_LOGGED: AtomicBool = AtomicBool::new(false);
+/// The window now opens before the first tree exists, so "first paint complete"
+/// marks an EMPTY window and no longer answers "how long until the app is on
+/// screen". These two carry that: the pump sets `FIRST_TREE_APPLIED` when it
+/// installs the first real tree, and the next paint after that is the one worth
+/// timing. Cold-start budgets read `first content paint`, never `first paint`.
+static FIRST_TREE_APPLIED: AtomicBool = AtomicBool::new(false);
+static FIRST_CONTENT_PAINT_LOGGED: AtomicBool = AtomicBool::new(false);
 
 // RNGPUI_DISABLE_RENDER_GATE=1 forces the per-frame tree lifecycle to run EVERY render
 // (the pre-fix behavior), so the on-screen validator can A/B the freeze: gate-off = the
@@ -931,10 +938,15 @@ impl Element for FrameMarker {
         self.child.paint(window, cx);
         bridge::flush_layout_frame();
         let frame = anim_trace::on_frame_painted();
-        if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some()
-            && !FIRST_PAINT_LOGGED.swap(true, Ordering::SeqCst)
-        {
-            startup_mark("first paint complete");
+        if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some() {
+            if !FIRST_PAINT_LOGGED.swap(true, Ordering::SeqCst) {
+                startup_mark("first paint complete");
+            }
+            if FIRST_TREE_APPLIED.load(Ordering::SeqCst)
+                && !FIRST_CONTENT_PAINT_LOGGED.swap(true, Ordering::SeqCst)
+            {
+                startup_mark("first content paint complete");
+            }
         }
         if gpui::presentation_trace::is_active() {
             gpui::presentation_trace::mark_content(frame);
@@ -2165,6 +2177,14 @@ enum AppCommandMenuItem {
 pub(crate) enum Incoming {
     Quit,
     Tree(Arc<ReactElement>),
+    /// The window's size, sent by `createRoot` before React renders. This is what
+    /// startup blocks on: it arrives as the bundle finishes evaluating, roughly a
+    /// render ahead of the first tree, so GPUI/Metal window creation overlaps that
+    /// render rather than queueing behind it.
+    WindowSize {
+        width: f32,
+        height: f32,
+    },
     /// reanimated per-frame style overrides, coalesced to one host crossing per rAF
     /// tick. Applied to the `anim_overlay` map + `cx.notify()` WITHOUT rebuilding
     /// `root` — the off-thread-reanimated fast path.
@@ -2505,6 +2525,11 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
                 }),
                 _ => None,
             },
+            "windowSize" => {
+                let width = v.get("width").and_then(|x| x.as_f64())? as f32;
+                let height = v.get("height").and_then(|x| x.as_f64())? as f32;
+                Some(Incoming::WindowSize { width, height })
+            }
             "reload" => id.map(|id| Incoming::Reload { id }),
             "inspector" => Some(Incoming::Inspector {
                 enabled: v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true),
@@ -3076,25 +3101,37 @@ fn main() {
         })
         .detach();
 
-        // await the first tree HERE (after the tree-independent GPUI init above, which
-        // overlapped the JS eval). it bootstraps the window size + initial content.
-        startup_mark("awaiting first tree");
-        let initial = loop {
+        // Await the SIZE here, not the first tree.
+        //
+        // `createRoot` sends `windowSize` before React renders anything, so this
+        // unblocks as the bundle finishes evaluating — about one full render ahead
+        // of the first tree. Everything below (anchoring, ~36ms of GPUI/Metal window
+        // creation) therefore runs *while* React renders, instead of after it. The
+        // window opens empty and the pump fills it with the first tree, which is the
+        // same path every later commit takes.
+        //
+        // Blocking on the tree was the older shape and it bought nothing: the root's
+        // declared width/height IS this value, handed to the reconciler by the very
+        // same call, so the wait only delayed a number JS already knew.
+        startup_mark("awaiting window size");
+        // Anything that arrives before the size is HELD, never dropped. React commits
+        // its first tree during the same bundle evaluation that sends the size, so on
+        // a loaded machine that tree is already sitting in the channel when this loop
+        // runs. Discarding it left the window permanently empty for any app whose
+        // first commit is also its last.
+        let mut startup_backlog: Vec<Incoming> = Vec::new();
+        let (win_w, win_h) = loop {
             match tree_rx.recv() {
-                Ok(Incoming::Tree(t)) => break t,
+                Ok(Incoming::WindowSize { width, height }) => break (width, height),
                 Ok(Incoming::Quit) => {
                     cx.quit();
                     return;
                 }
-                Ok(_) => continue,
-                Err(_) => break fallback_root(),
+                Ok(other) => startup_backlog.push(other),
+                Err(_) => break (1180.0, 760.0),
             }
         };
-        startup_mark("first tree received");
-        // window opens at the root's declared width/height (RNGPUI_WINDOW_SIZE overrides);
-        // after that it fills.
-        let win_w = initial.style.width.and_then(Dim::as_px).unwrap_or(720.0);
-        let win_h = initial.style.height.and_then(Dim::as_px).unwrap_or(800.0);
+        startup_mark("window size received");
         let (win_w, win_h) = parse_point_env("RNGPUI_WINDOW_SIZE")
             .map(|p| (f32::from(p.x), f32::from(p.y)))
             .unwrap_or((win_w, win_h));
@@ -3105,7 +3142,7 @@ fn main() {
         } else {
             anchored_window_origin(win_w, win_h, cx).unwrap_or(window_origin)
         };
-        let app_root = fill_root(initial);
+        let app_root = fill_root(fallback_root());
         let tree_metadata = TreeMetadata::collect(&app_root);
         tree_metadata.retain_native_state();
         bridge::ready(win_w, win_h);
@@ -3380,8 +3417,13 @@ fn main() {
         // from starving native scroll presentation with obsolete intermediate trees.
         cx.spawn(async move |cx| {
             let mut pending_msg = None;
+            // whatever arrived while startup was waiting for the window size, in the
+            // order it arrived, ahead of anything the channel delivers from here.
+            let mut startup_backlog = startup_backlog.into_iter();
             loop {
                 let msg = if let Some(msg) = pending_msg.take() {
+                    msg
+                } else if let Some(msg) = startup_backlog.next() {
                     msg
                 } else {
                     let Ok(msg) = tree_rx.recv_async().await else {
@@ -4613,6 +4655,10 @@ fn main() {
                         let mut drive_native_layout_animation = false;
                         let mut drive_gpui_tweens = false;
                         let applied = pump.update(cx, |this, cx| match msg {
+                            // consumed by the startup wait before this pump exists;
+                            // the window owns its size from here on, and a second one
+                            // would fight the user's own resize.
+                            Incoming::WindowSize { .. } => {}
                             Incoming::Tree(t) => {
                                 let apply_t0 = std::time::Instant::now();
                                 let next_root = fill_root(t);
@@ -4664,6 +4710,7 @@ fn main() {
                                 this.root_lifecycle_dirty |= lifecycle_changed;
                                 this.tree_metadata = next_metadata;
                                 this.root = next_root;
+                                FIRST_TREE_APPLIED.store(true, Ordering::SeqCst);
                                 crate::anim_overlay::mark_content_mutation();
                                 this.root_dirty = true;
                                 this.write_debug_dump(cx);

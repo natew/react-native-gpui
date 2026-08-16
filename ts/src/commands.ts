@@ -38,6 +38,9 @@ export type AppCommandConfig = {
 };
 
 export type Command =
+    // sent once by createRoot, before the first render, so the host can open its
+    // window concurrently with that render instead of after it.
+    | { $cmd: "windowSize"; width: number; height: number }
     | { $cmd: "eval"; id: number; js: string }
     | { $cmd: "reload"; id: number }
     | { $cmd: "scrollTo"; id: number; x?: number; y?: number }

@@ -109,3 +109,20 @@ gpui = { path = "vendor/gpui-0.2.2-patched" }
 # The patch also applies to nothing else (gpui-component is only used for Input here).
 gpui-component = { path = "vendor/gpui-component-0.5.1-patched" }
 gpui-component-macros = { path = "vendor/gpui-component-macros-0.5.1-patched" }
+# Patched taffy 0.9.0 (the layout engine gpui solves with; gpui pins `=0.9.0`).
+# One divergence, in src/compute/flexbox.rs `determine_container_main_size`:
+#
+# 1. The max-content flex fraction is divided by `max(1, shrink * basis)` and then
+#    multiplied back by `max(1, shrink) * basis`. The multiply is meant to invert the
+#    divide — taffy skips the spec's line-max-fraction step, so an item's contribution
+#    should come back out as its own outer contribution — but the two floor different
+#    things. They agree only when `shrink * basis >= 1`, which the web default
+#    `flex-shrink: 1` always satisfies. React Native defaults to `flexShrink: 0`, so in
+#    an RN tree every item takes the broken path and the factor becomes the item's whole
+#    flex basis. It only shows when the contribution is BELOW the basis, i.e. a negative
+#    margin: `width: 15, marginLeft: -1, flexShrink: 0` contributes -15 to a content-sized
+#    parent instead of 14, so the parent lays out 29px narrower than its own children and
+#    clips them. Reproduced against stock taffy 0.9.0 AND 0.13.0; not an rngpui-only
+#    behavior, and worth reporting upstream.
+#    Guard: `ts/examples/negative-margin-conformance.tsx`.
+taffy = { path = "vendor/taffy-0.9.0-patched" }

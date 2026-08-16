@@ -236,6 +236,11 @@ fn resolved_style(style: &ElementStyle) -> Map<String, Value> {
     insert_dim(&mut m, "paddingRight", style.padding_right);
     insert_dim(&mut m, "paddingBottom", style.padding_bottom);
     insert_dim(&mut m, "paddingLeft", style.padding_left);
+    insert_dim(&mut m, "margin", style.margin);
+    insert_dim(&mut m, "marginTop", style.margin_top);
+    insert_dim(&mut m, "marginRight", style.margin_right);
+    insert_dim(&mut m, "marginBottom", style.margin_bottom);
+    insert_dim(&mut m, "marginLeft", style.margin_left);
     if let Some(v) = style.box_shadow.as_ref() {
         m.insert("boxShadow".into(), json!(v));
     }

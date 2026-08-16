@@ -17,6 +17,7 @@ const tasks = [
     { name: "animated-driver", command: "bun", args: ["run", "scripts/animated-driver-unit.mjs"], cwd: root, timeoutMs: 10_000 },
     { name: "keyboard-navigation", command: "bun", args: ["run", "scripts/keyboard-navigation-unit.mjs"], cwd: root, timeoutMs: 10_000 },
     { name: "surfaces", command: "bun", args: ["run", "scripts/surfaces-unit.mjs"], cwd: root, timeoutMs: 10_000 },
+    { name: "native-package-exports", command: "bun", args: ["run", "scripts/native-package-exports-unit.mjs"], cwd: root, timeoutMs: 10_000 },
     { name: "wire-delta", command: "bun", args: ["run", "scripts/wire-delta-unit.mjs"], cwd: root, timeoutMs: 10_000 },
     { name: "worklet-runtime", command: "bun", args: ["run", "scripts/worklet-runtime-unit.mjs"], cwd: root, timeoutMs: 10_000 },
     { name: "appearance-serialize", command: "bun", args: ["run", "scripts/appearance-serialize-unit.tsx"], cwd: root, timeoutMs: 15_000 },

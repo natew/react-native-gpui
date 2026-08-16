@@ -6,6 +6,12 @@ import { conformanceEnv, frontmostProcess } from "./conformance-utils.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repo = resolve(root, "..");
+// 8 on an 8-core box, where most tasks spawn a GPUI window, looks like heavy
+// oversubscription and it was suspected of causing the timeout failures. It was
+// not: once the budgets below stopped measuring wall time, the whole suite ran in
+// 33.3s wall with 24 passing, on a machine that had three other agents on it. The
+// number was measured and deliberately left alone — starvation costs throughput
+// here, not correctness, and lowering it would only make the suite slower.
 const concurrency = Number(process.env.RNGPUI_TEST_CONCURRENCY ?? 8);
 const frontBefore = frontmostProcess();
 const frontBeforeKey = frontKey(frontBefore);
@@ -115,16 +121,45 @@ function runTask(task) {
             env: task.env ?? process.env,
             stdio: ["ignore", "pipe", "pipe"],
         });
-        const timeout = setTimeout(() => {
-            output += `\n${task.name} timed out after ${task.timeoutMs ?? 8000}ms\n`;
+        // timeoutMs bounds SILENCE, not wall time. Most tasks here spawn a GPUI
+        // window, the runner starts 8 at once, and this box has 8 logical cores —
+        // so tasks starve each other by design. An absolute deadline turns that
+        // starvation into a spurious timeout: a run on a genuinely quiet machine
+        // (74% idle) still lost 16 tasks to timeouts, and the output was unreadable
+        // because a task that was merely slow and one that had actually wedged
+        // looked identical. Any output resets the clock, so a starved task keeps
+        // its budget and a stopped one still dies promptly.
+        //
+        // For a task that prints nothing until it finishes (typecheck, cargo test)
+        // this is exactly the old behavior, so nothing regressed to buy that.
+        const silenceMs = task.timeoutMs ?? 8000;
+        // ...and a ceiling, because bounding only silence means a task that chatters
+        // forever never dies and the suite never returns.
+        const ceilingMs = task.maxMs ?? silenceMs * 8;
+        const startedAt = Date.now();
+        let timeout;
+        const giveUp = () => {
+            output +=
+                Date.now() - startedAt >= ceilingMs
+                    ? `\n${task.name} exceeded its ${ceilingMs}ms ceiling\n`
+                    : `\n${task.name} produced no output for ${silenceMs}ms\n`;
             child.kill("SIGTERM");
-        }, task.timeoutMs ?? 8000);
-        child.stdout?.on("data", (chunk) => {
+        };
+        const arm = () => {
+            clearTimeout(timeout);
+            const remaining = ceilingMs - (Date.now() - startedAt);
+            // already past the ceiling: kill now rather than returning unarmed,
+            // which would leave a chattering task with no timer at all.
+            if (remaining <= 0) return giveUp();
+            timeout = setTimeout(giveUp, Math.min(silenceMs, remaining));
+        };
+        arm();
+        const onChunk = (chunk) => {
             output += chunk.toString();
-        });
-        child.stderr?.on("data", (chunk) => {
-            output += chunk.toString();
-        });
+            arm();
+        };
+        child.stdout?.on("data", onChunk);
+        child.stderr?.on("data", onChunk);
         child.on("exit", (code, signal) => {
             clearTimeout(timeout);
             const seconds = (performance.now() - started) / 1000;

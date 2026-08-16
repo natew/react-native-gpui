@@ -323,12 +323,12 @@ try {
         `max 100k physical-footprint delta <=110MB, saw ${report.memory.physicalFootprintMaxDeltaMb}MB`,
     );
     assert(wireSamples.length >= 20, `captured enough delta-wire commits, saw ${wireSamples.length}`);
-    assert(startup.nativeFirstRenderMs !== null, "captured native first-render timing");
+    assert(startup.nativeFirstPaintMs !== null, "captured native first-paint timing");
     assert(startup.legendAppMs !== null, "captured LegendList onLoad timing");
     // Startup is an idle acceptance metric. The contention lane records it for
     // diagnostics, then gates the sustained scroll that the owned burners target.
     if (!contentionMode) {
-        assert(startup.nativeFirstRenderMs <= 200, `native first render <=200ms, saw ${startup.nativeFirstRenderMs}ms`);
+        assert(startup.nativeFirstPaintMs <= 200, `native first paint <=200ms, saw ${startup.nativeFirstPaintMs}ms`);
         assert(startup.legendAppMs <= 150, `LegendList onLoad <=150ms, saw ${startup.legendAppMs}ms`);
     }
     assert(
@@ -509,10 +509,10 @@ function intersectsWindow(bounds) {
 }
 
 function startupMetrics(log, launchToUsableMs) {
-    const firstRender = /\[startup\] first render \+([\d.]+)ms/.exec(log);
+    const firstPaint = /\[startup\] first paint complete \+([\d.]+)ms/.exec(log);
     const legend = /LEGEND_100K_LOAD loaded:([\d.]+)ms app:([\d.]+)ms/.exec(log);
     return {
-        nativeFirstRenderMs: firstRender ? Number(firstRender[1]) : null,
+        nativeFirstPaintMs: firstPaint ? Number(firstPaint[1]) : null,
         legendLoadMs: legend ? Number(legend[1]) : null,
         legendAppMs: legend ? Number(legend[2]) : null,
         launchToUsableMs: Number(launchToUsableMs.toFixed(1)),

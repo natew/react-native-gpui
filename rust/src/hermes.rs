@@ -238,18 +238,33 @@ pub(crate) fn start_tree_parser(tree_tx: Sender<Incoming>) -> Sender<String> {
     std::thread::Builder::new()
         .name("hermes-tree-parser".into())
         .spawn(move || {
+            let mut first = true;
             while let Ok(json) = tree_json_rx.recv() {
+                if first {
+                    crate::startup_mark("first tree json received");
+                }
                 let incoming = match serde_json::from_str::<serde_json::Value>(&json) {
-                    Ok(value) => crate::parse_incoming(&value),
+                    Ok(value) => {
+                        if first {
+                            crate::startup_mark("first tree json decoded");
+                        }
+                        crate::parse_incoming(&value)
+                    }
                     Err(error) => {
                         eprintln!("[hermes] applyTree: bad json: {error}");
                         None
                     }
                 };
+                if first {
+                    crate::startup_mark("first tree parsed");
+                }
                 if let Some(incoming) = incoming
                     && tree_tx.send(incoming).is_err()
                 {
                     break;
+                }
+                if first {
+                    first = false;
                 }
             }
         })

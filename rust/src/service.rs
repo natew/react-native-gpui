@@ -71,10 +71,12 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 // commands compose into a real drag (ev.dragging() == true mid-scrub).
 static DEBUG_LEFT_HELD: AtomicBool = AtomicBool::new(false);
 
-// startup timing: process-start instant + a one-shot first-render marker. gated on
+// startup timing: process-start instant + a one-shot first-paint marker. gated on
 // RNGPUI_STARTUP_TIMING so it's silent in normal runs. used to drive cold start < 200ms.
 static STARTUP: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-static FIRST_RENDER_LOGGED: AtomicBool = AtomicBool::new(false);
+static FIRST_LAYOUT_LOGGED: AtomicBool = AtomicBool::new(false);
+static FIRST_PREPAINT_LOGGED: AtomicBool = AtomicBool::new(false);
+static FIRST_PAINT_LOGGED: AtomicBool = AtomicBool::new(false);
 
 // RNGPUI_DISABLE_RENDER_GATE=1 forces the per-frame tree lifecycle to run EVERY render
 // (the pre-fix behavior), so the on-screen validator can A/B the freeze: gate-off = the
@@ -85,7 +87,7 @@ fn render_gate_disabled() -> bool {
     *RENDER_GATE_DISABLED.get_or_init(|| std::env::var_os("RNGPUI_DISABLE_RENDER_GATE").is_some())
 }
 
-fn startup_mark(label: &str) {
+pub(crate) fn startup_mark(label: &str) {
     if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some() {
         if let Some(t0) = STARTUP.get() {
             eprintln!(
@@ -880,7 +882,13 @@ impl Element for FrameMarker {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
-        (self.child.request_layout(window, cx), ())
+        let layout = self.child.request_layout(window, cx);
+        if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some()
+            && !FIRST_LAYOUT_LOGGED.swap(true, Ordering::SeqCst)
+        {
+            startup_mark("first layout requested");
+        }
+        (layout, ())
     }
 
     fn prepaint(
@@ -894,6 +902,11 @@ impl Element for FrameMarker {
     ) {
         bridge::begin_layout_frame();
         self.child.prepaint(window, cx);
+        if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some()
+            && !FIRST_PREPAINT_LOGGED.swap(true, Ordering::SeqCst)
+        {
+            startup_mark("first prepaint complete");
+        }
     }
 
     fn paint(
@@ -910,6 +923,11 @@ impl Element for FrameMarker {
         self.child.paint(window, cx);
         bridge::flush_layout_frame();
         let frame = anim_trace::on_frame_painted();
+        if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some()
+            && !FIRST_PAINT_LOGGED.swap(true, Ordering::SeqCst)
+        {
+            startup_mark("first paint complete");
+        }
         if gpui::presentation_trace::is_active() {
             gpui::presentation_trace::mark_content(frame);
         }
@@ -1461,16 +1479,6 @@ impl Render for ServiceApp {
         hit_passthrough::set_input_grab(self.inspector.wants_input_grab());
         // flush the previous frame's stage breakdown + reset accumulators for this frame.
         frame_trace::begin_render(self.root_dirty);
-        if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some()
-            && !FIRST_RENDER_LOGGED.swap(true, Ordering::SeqCst)
-        {
-            if let Some(t0) = STARTUP.get() {
-                eprintln!(
-                    "[startup] first render +{:.1}ms",
-                    t0.elapsed().as_secs_f64() * 1000.0
-                );
-            }
-        }
         // The tree is applied (and a re-render scheduled) by the hermes JS thread's
         // foreground task in `main`, not polled here — rendering is fully on-demand: this
         // runs only on a new tree, input, scroll, or resize, so the app idles at ~0fps.

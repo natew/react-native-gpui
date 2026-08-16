@@ -1,6 +1,6 @@
 // Measure single-process Hermes cold start: process launch → first painted frame.
 // Uses the invisible on-screen capture window (paints, no focus theft) and reads the
-// binary's "[startup] first render +Xms" marker (RNGPUI_STARTUP_TIMING).
+// binary's "[startup] first paint complete +Xms" marker (RNGPUI_STARTUP_TIMING).
 //
 //   node scripts/measure-hermes-startup.mjs <binary> <bundle.js|.hbc> [runs]
 //   node scripts/measure-hermes-startup.mjs <binary> <bundle.js|.hbc> --runs 8 --max-ms 200
@@ -59,10 +59,10 @@ function once() {
     }, timeoutMs)
     child.stderr.on('data', (c) => {
       buf += c.toString()
-      const m = buf.match(/\[startup\] first render \+([\d.]+)ms/)
+      const m = buf.match(/\[startup\] first paint complete \+([\d.]+)ms/)
       if (m) {
         const wall = Number(process.hrtime.bigint() - t0) / 1e6
-        finish({ ok: true, wall, internal: Number(m[1]) })
+        finish({ ok: true, wall, internal: Number(m[1]), marks: startupMarks(buf) })
       }
     })
     child.on('exit', (code, signal) => {
@@ -94,8 +94,18 @@ const wall = ok.map((r) => r.wall)
 const internal = ok.map((r) => r.internal)
 console.log('\n' + '─'.repeat(56))
 console.log(`bundle: ${bundle}`)
-console.log(`wall (launch → first paint):  ${stat(wall)}`)
-console.log(`internal (main → first paint): ${stat(internal)}`)
+console.log(`wall (launch → paint complete):  ${stat(wall)}`)
+console.log(`internal (main → paint complete): ${stat(internal)}`)
+console.log('phase medians:')
+const labels = [...new Set(ok.flatMap((r) => r.marks.map((mark) => mark.label)))]
+let previous = 0
+for (const label of labels) {
+  const values = ok.map((r) => r.marks.find((mark) => mark.label === label)?.ms).filter(Number.isFinite)
+  if (values.length !== ok.length) continue
+  const current = med(values)
+  console.log(`  ${label}: +${current.toFixed(1)}ms (Δ ${(current - previous).toFixed(1)}ms)`)
+  previous = current
+}
 if (maxMs > 0) {
   const worst = Math.max(...wall)
   if (worst > maxMs) {
@@ -103,6 +113,13 @@ if (maxMs > 0) {
     process.exit(1)
   }
   console.log(`STARTUP_CONFORMANCE_PASS wall max ${worst.toFixed(1)}ms <= ${maxMs}ms`)
+}
+
+function startupMarks(log) {
+  return [...log.matchAll(/^\[(?:hermes )?startup\] (.+?) \+([\d.]+)ms$/gm)].map((match) => ({
+    label: match[1],
+    ms: Number(match[2]),
+  }))
 }
 
 function stageServiceDylibs(binary) {

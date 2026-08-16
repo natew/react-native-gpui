@@ -65,25 +65,114 @@ static GPUI_TWEENS: Lazy<Mutex<HashMap<(u64, String), Tween>>> =
 static PREV_APPLIED: Lazy<Mutex<HashMap<u64, Map<String, Value>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// cubic-bezier-ish easings. ease-out delegates to the shared `ease_out_cubic`; the others
-/// are the standard CSS curve approximations. an unknown name falls back to ease-out.
+/// CSS timing functions. The four named curves are their real CSS definitions rather
+/// than polynomial lookalikes, and `cubic-bezier(x1, y1, x2, y2)` is accepted verbatim,
+/// so a design can name any curve it wants instead of picking the nearest of four.
+///
+/// The named curves used to be cubic approximations: "ease" in particular was aliased to
+/// ease-in-out, which is symmetric, while the real "ease" is not. An unknown name still
+/// falls back to ease-out.
 pub fn ease(name: &str, t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     match name {
         "linear" => t,
-        "ease-in" => t * t * t,
-        "ease-in-out" => {
-            if t < 0.5 {
-                4.0 * t * t * t
-            } else {
-                1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
-            }
-        }
-        // "ease" is close to a slow-in/slow-out; reuse ease-in-out so it's not linear.
-        "ease" => ease("ease-in-out", t),
-        // "ease-out" and any unknown name → ease-out.
-        _ => ease_out_cubic(t),
+        "ease" => CubicBezier::new(0.25, 0.1, 0.25, 1.0).eval(t),
+        "ease-in" => CubicBezier::new(0.42, 0.0, 1.0, 1.0).eval(t),
+        "ease-out" => CubicBezier::new(0.0, 0.0, 0.58, 1.0).eval(t),
+        "ease-in-out" => CubicBezier::new(0.42, 0.0, 0.58, 1.0).eval(t),
+        other => match parse_cubic_bezier(other) {
+            Some(curve) => curve.eval(t),
+            None => ease_out_cubic(t),
+        },
     }
+}
+
+/// `cubic-bezier(x1, y1, x2, y2)`. Whitespace is free-form; anything else is None so the
+/// caller can fall back.
+fn parse_cubic_bezier(name: &str) -> Option<CubicBezier> {
+    let inner = name.trim().strip_prefix("cubic-bezier")?.trim();
+    let inner = inner.strip_prefix('(')?.strip_suffix(')')?;
+    let mut parts = inner.split(',').map(|n| n.trim().parse::<f32>());
+    let x1 = parts.next()?.ok()?;
+    let y1 = parts.next()?.ok()?;
+    let x2 = parts.next()?.ok()?;
+    let y2 = parts.next()?.ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if ![x1, y1, x2, y2].iter().all(|n| n.is_finite()) {
+        return None;
+    }
+    Some(CubicBezier::new(x1, y1, x2, y2))
+}
+
+/// A CSS cubic-bezier timing function: endpoints fixed at (0,0) and (1,1), the two control
+/// points given. Solving y for a given x is the standard UnitBezier approach — Newton
+/// iteration, falling back to bisection when the derivative is too flat to trust.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CubicBezier {
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+}
+
+impl CubicBezier {
+    pub const fn new(x1: f32, y1: f32, x2: f32, y2: f32) -> Self {
+        Self { x1, y1, x2, y2 }
+    }
+
+    pub fn eval(&self, x: f32) -> f32 {
+        if x <= 0.0 {
+            return 0.0;
+        }
+        if x >= 1.0 {
+            return 1.0;
+        }
+        bezier_axis(self.solve_t(x), self.y1, self.y2)
+    }
+
+    fn solve_t(&self, x: f32) -> f32 {
+        let mut t = x;
+        for _ in 0..8 {
+            let error = bezier_axis(t, self.x1, self.x2) - x;
+            if error.abs() < 1e-6 {
+                return t;
+            }
+            let slope = bezier_axis_slope(t, self.x1, self.x2);
+            if slope.abs() < 1e-6 {
+                break;
+            }
+            t -= error / slope;
+        }
+        // Newton stalled (a flat or non-monotonic x curve); bisect, which always converges.
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        let mut t = x.clamp(0.0, 1.0);
+        for _ in 0..24 {
+            let value = bezier_axis(t, self.x1, self.x2);
+            if (value - x).abs() < 1e-6 {
+                return t;
+            }
+            if value > x {
+                hi = t;
+            } else {
+                lo = t;
+            }
+            t = (lo + hi) * 0.5;
+        }
+        t
+    }
+}
+
+/// One axis of a unit cubic bezier with endpoints 0 and 1.
+fn bezier_axis(t: f32, a: f32, b: f32) -> f32 {
+    let u = 1.0 - t;
+    3.0 * u * u * t * a + 3.0 * u * t * t * b + t * t * t
+}
+
+fn bezier_axis_slope(t: f32, a: f32, b: f32) -> f32 {
+    let u = 1.0 - t;
+    3.0 * u * u * a + 6.0 * u * t * (b - a) + 3.0 * t * t * (1.0 - b)
 }
 
 /// lerp two colors in RGB space (not HSL — avoids hue wraparound between, say, red↔green).
@@ -563,10 +652,88 @@ mod tests {
             "ease-in",
             "ease-out",
             "ease-in-out",
+            "cubic-bezier(0.16, 1, 0.3, 1)",
             "wat",
         ] {
             assert!(ease(name, 0.0).abs() < 1e-6, "{name} t=0");
             assert!((ease(name, 1.0) - 1.0).abs() < 1e-6, "{name} t=1");
+        }
+    }
+
+    #[test]
+    fn named_curves_match_their_css_definitions() {
+        // the four CSS names ARE cubic-beziers; spelling one out must give the same
+        // number as naming it.
+        for (name, spelled) in [
+            ("ease", "cubic-bezier(0.25, 0.1, 0.25, 1)"),
+            ("ease-in", "cubic-bezier(0.42, 0, 1, 1)"),
+            ("ease-out", "cubic-bezier(0, 0, 0.58, 1)"),
+            ("ease-in-out", "cubic-bezier(0.42, 0, 0.58, 1)"),
+        ] {
+            for step in 1..10 {
+                let t = step as f32 / 10.0;
+                let a = ease(name, t);
+                let b = ease(spelled, t);
+                assert!((a - b).abs() < 1e-4, "{name} @ {t}: {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn expo_out_front_loads_its_travel() {
+        // the reference entrance curve: most of the distance is covered early, which is
+        // what separates it from a symmetric ease.
+        let quarter = ease("cubic-bezier(0.16, 1, 0.3, 1)", 0.25);
+        assert!(quarter > 0.6, "expo-out at t=0.25 was {quarter}");
+        let symmetric = ease("ease-in-out", 0.25);
+        assert!(symmetric < 0.2, "ease-in-out at t=0.25 was {symmetric}");
+    }
+
+    #[test]
+    fn a_committed_curve_reaches_the_interpolated_value() {
+        let _g = TEST_LOCK.lock().unwrap();
+        reset();
+        // the whole path a design actually uses: a named easing on the JS transition
+        // descriptor, through key_config, into the value the renderer paints.
+        let transition = json!({
+            "keys": ["opacity"],
+            "byKey": {},
+            "default": {"duration": 400, "easing": "cubic-bezier(0.16, 1, 0.3, 1)"},
+            "delay": 0,
+        });
+        note_commit(
+            42,
+            json!({"opacity": 0.0, "_gpuiTransition": transition})
+                .as_object()
+                .unwrap(),
+        );
+        assert!(note_commit(
+            42,
+            json!({"opacity": 1.0, "_gpuiTransition": transition})
+                .as_object()
+                .unwrap()
+        ));
+
+        let tweens = GPUI_TWEENS.lock().unwrap();
+        let tween = tweens.get(&(42, "opacity".to_string())).expect("armed");
+        // a quarter of the way through a 400ms expo-out, most of the travel is done.
+        let quarter = tween.start + Duration::from_millis(100);
+        let value = tween_current_value(tween, "opacity", quarter)
+            .and_then(|v| v.as_f64())
+            .expect("a value mid-flight");
+        assert!(value > 0.6 && value < 1.0, "expo-out at 25% was {value}");
+    }
+
+    #[test]
+    fn a_malformed_curve_falls_back_instead_of_panicking() {
+        for name in [
+            "cubic-bezier(1, 2, 3)",
+            "cubic-bezier(a, b, c, d)",
+            "cubic-bezier(0, 0, 1, 1, 1)",
+            "cubic-bezier",
+        ] {
+            let mid = ease(name, 0.5);
+            assert!((0.0..=1.0).contains(&mid), "{name} gave {mid}");
         }
     }
 

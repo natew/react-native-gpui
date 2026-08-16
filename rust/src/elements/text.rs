@@ -129,6 +129,29 @@ impl ReactTextElement {
 }
 
 fn apply_layout_style(mut el: gpui::Div, style: &ElementStyle) -> gpui::Div {
+    // A text node lays out as a box like any other, so it owns its margins. Div nodes
+    // get theirs from build_gpui_style, which this path does not go through, so leaving
+    // margin out here silently dropped it on every text node: RN and web both honor it,
+    // and a caller setting marginBottom on a <Text> saw the next block butt straight
+    // into it while the gap it did see was only line-height. Measured in a capture tree,
+    // where a list carrying marginBottom 12 produced a 12px gap from its wrapping view
+    // and a heading carrying marginBottom 20 was followed by the next block at exactly
+    // y+height.
+    if let Some(m) = style.margin {
+        el = el.m(m.to_length());
+    }
+    if let Some(m) = style.margin_top {
+        el = el.mt(m.to_length());
+    }
+    if let Some(m) = style.margin_right {
+        el = el.mr(m.to_length());
+    }
+    if let Some(m) = style.margin_bottom {
+        el = el.mb(m.to_length());
+    }
+    if let Some(m) = style.margin_left {
+        el = el.ml(m.to_length());
+    }
     if let Some(width) = style.width {
         el = el.w(width.to_length());
     }

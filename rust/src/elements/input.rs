@@ -96,6 +96,14 @@ impl ReactInputElement {
                 if self.element.element_type == "textarea" {
                     input = input.h_full();
                 }
+                // gpui-component sizes its input for a standalone control, so it
+                // carries its own vertical padding even with `appearance(false)`.
+                // Ours is never standalone: the host lays out the box and pads it,
+                // so that padding is a second inset the layout tree cannot see. It
+                // pushed a single-line composer's text ~9pt below its own measured
+                // box, past the box's bottom edge, while every sibling `text` node
+                // painted centred. Zero it and the host's box IS the text box.
+                input = input.p_0();
                 div()
                     .size_full()
                     // focus through the host's resolved editor box so the fixed layout

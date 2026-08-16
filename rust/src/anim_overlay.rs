@@ -52,6 +52,26 @@ static OVERLAY: Lazy<Mutex<HashMap<u64, OverlayEntry>>> = Lazy::new(|| Mutex::ne
 static OVERLAY_COUNT: AtomicUsize = AtomicUsize::new(0);
 static MUTATION_EPOCH: AtomicU64 = AtomicU64::new(0);
 
+/// See `take_paint_patch_batch`. Accumulates across every `apply_ops` since the last take,
+/// because one animation tick applies tweens and loops in two separate batches and a frame
+/// that patched only the second would leave the first's nodes showing stale pixels. Any
+/// non-opacity change poisons the whole accumulation until it is taken, which is the safe
+/// direction: a poisoned batch just means the frame goes through a real draw.
+#[derive(Default)]
+struct PaintPatchBatch {
+    moves: Vec<(u64, f32)>,
+    poisoned: bool,
+}
+
+static PAINT_PATCH_BATCH: Lazy<Mutex<PaintPatchBatch>> =
+    Lazy::new(|| Mutex::new(PaintPatchBatch::default()));
+
+/// The nodes with an animated opacity, and its size mirrored for a lock-free "is anything
+/// fading at all" check. See `has_opacity_overlay`.
+static OPACITY_OVERLAY_IDS: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static OPACITY_OVERLAY_COUNT: AtomicUsize = AtomicUsize::new(0);
+static OPACITY_IDS_EPOCH: AtomicU64 = AtomicU64::new(0);
+
 pub fn mutation_epoch() -> u64 {
     MUTATION_EPOCH.load(Ordering::Relaxed)
 }
@@ -210,6 +230,12 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
     // Starts true; any changed layout key flips it false. A pure overlay-clear (revert to
     // committed style) keeps it true — the committed layout was already solved.
     let mut all_paint_only = true;
+    // the paint-patch candidate set for this batch: every node whose opacity moved, and its
+    // new value. Any other changed key (including an overlay clear, which reverts to a
+    // committed value this path never recorded) empties it, so the frame goes through a real
+    // draw. See `take_paint_patch_batch`.
+    let mut opacity_moves: Vec<(u64, f32)> = Vec::new();
+    let mut opacity_only = true;
     for (id, style) in ops {
         if trace {
             eprintln!(
@@ -222,6 +248,7 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
             if overlay.remove(&id).is_some() {
                 MERGED.lock().unwrap().remove(&id);
                 changed = true;
+                opacity_only = false;
             }
             continue;
         }
@@ -251,6 +278,7 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
                         if !is_paint_only_key(&k) {
                             all_paint_only = false;
                         }
+                        opacity_only = false;
                         entry_changed = true;
                     }
                     continue;
@@ -267,6 +295,10 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
                         // retained-layout reuse for this frame (force a full taffy solve).
                         if !is_paint_only_key(&k) {
                             all_paint_only = false;
+                        }
+                        match (k.as_str(), v.as_f64()) {
+                            ("opacity", Some(value)) => opacity_moves.push((id, value as f32)),
+                            _ => opacity_only = false,
                         }
                         entry.style.insert(k, v);
                         entry_changed = true;
@@ -297,8 +329,69 @@ pub fn apply_ops(ops: Vec<(u64, serde_json::Map<String, Value>)>) -> bool {
     OVERLAY_COUNT.store(overlay.len(), Ordering::Relaxed);
     if changed {
         mark_content_mutation();
+        refresh_opacity_overlay_ids(&overlay);
+        let mut batch = PAINT_PATCH_BATCH.lock().unwrap();
+        // 512 is far past any real animation and only reachable when nothing is taking the
+        // batch, so treat it as "stop accumulating" rather than growing without bound.
+        if !opacity_only || batch.moves.len() + opacity_moves.len() > 512 {
+            batch.poisoned = true;
+            batch.moves.clear();
+        } else {
+            batch.moves.append(&mut opacity_moves);
+        }
     }
     changed
+}
+
+/// The nodes whose opacity — and nothing else — has moved since the last take, with their new
+/// values, or `None` if anything else moved too. The animation driver uses this to decide
+/// whether the frame can be a paint patch (rewrite those nodes' primitives and present)
+/// instead of a whole-window draw. Taken, not read, so one change can only drive one frame.
+pub fn take_paint_patch_batch() -> Option<Vec<(u64, f32)>> {
+    let mut batch = PAINT_PATCH_BATCH.lock().unwrap();
+    let taken = std::mem::take(&mut *batch);
+    (!taken.poisoned && !taken.moves.is_empty()).then_some(taken.moves)
+}
+
+/// Does this node currently have an animated opacity? The paint pass asks per node, to decide
+/// whether to record where its primitives landed so a later tick can patch them.
+///
+/// Gated on its OWN count rather than `OVERLAY_COUNT`, which stays permanently large because
+/// tamagui's hover path leaves an entry per row: reusing it would make every node in the
+/// window take the overlay lock on every paint just because the pointer had once been over
+/// the sidebar. With nothing fading this is one relaxed load per node.
+pub fn has_opacity_overlay(id: u64) -> bool {
+    if OPACITY_OVERLAY_COUNT.load(Ordering::Relaxed) == 0 {
+        return false;
+    }
+    OPACITY_OVERLAY_IDS.lock().unwrap().contains(&id)
+}
+
+/// Which generation of the opacity-animated id set is live. A paint records this alongside its
+/// bracketing, and a patch refuses unless it still matches. That equality is what lets a patch
+/// treat a node it has no recording for as "not painted this frame" (scrolled out of a culling
+/// list, or display:none) and leave it alone, instead of having to assume the worst and force a
+/// draw. Without it a single spinner scrolled off the end of the sidebar would put the window
+/// back on a full redraw per tick, which is the whole cost this mechanism exists to remove.
+pub fn opacity_ids_epoch() -> u64 {
+    OPACITY_IDS_EPOCH.load(Ordering::Relaxed)
+}
+
+/// Re-derive the opacity-animated id set. Called from the two places that mutate the overlay,
+/// so the set cannot drift from it.
+fn refresh_opacity_overlay_ids(overlay: &HashMap<u64, OverlayEntry>) {
+    let mut ids = OPACITY_OVERLAY_IDS.lock().unwrap();
+    let next: HashSet<u64> = overlay
+        .iter()
+        .filter(|(_, entry)| entry.style.contains_key("opacity"))
+        .map(|(id, _)| *id)
+        .collect();
+    if next == *ids {
+        return;
+    }
+    *ids = next;
+    OPACITY_OVERLAY_COUNT.store(ids.len(), Ordering::Relaxed);
+    OPACITY_IDS_EPOCH.fetch_add(1, Ordering::Relaxed);
 }
 
 /// The committed style for `global_id` with any live animated overrides merged on top,
@@ -392,6 +485,7 @@ pub fn retain(present: &HashSet<u64>) {
     let mut overlay = OVERLAY.lock().unwrap();
     overlay.retain(|id, _| present.contains(id));
     OVERLAY_COUNT.store(overlay.len(), Ordering::Relaxed);
+    refresh_opacity_overlay_ids(&overlay);
     drop(overlay);
     MERGED.lock().unwrap().clear();
 }

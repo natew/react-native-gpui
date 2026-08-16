@@ -939,6 +939,9 @@ impl Element for FrameMarker {
         cx: &mut App,
     ) {
         window.set_scene_content_epoch(self.content_epoch);
+        // stamp the animating-node generation this scene is painted against, before any node
+        // brackets itself for paint patching (crate::anim_overlay::opacity_ids_epoch).
+        window.set_paint_patch_epoch(crate::anim_overlay::opacity_ids_epoch());
         self.child.paint(window, cx);
         bridge::flush_layout_frame();
         let frame = anim_trace::on_frame_painted();
@@ -5049,6 +5052,15 @@ fn main() {
                             let pump = pump.clone();
                             let active = gpui_tween_driver_active.clone();
                             cx.spawn(async move |cx| {
+                                let paint_patch_trace =
+                                    std::env::var_os("RNGPUI_PAINT_PATCH_TRACE").is_some();
+                                let paint_patch_verify =
+                                    std::env::var_os("RNGPUI_PAINT_PATCH_VERIFY").is_some();
+                                // the A/B escape hatch, mirroring RNGPUI_DISABLE_RETAINED_LAYOUT:
+                                // forces every animation tick back through the full draw, which
+                                // is how the before/after cost of this path gets measured.
+                                let paint_patch_disabled =
+                                    std::env::var_os("RNGPUI_DISABLE_PAINT_PATCH").is_some();
                                 'driver: loop {
                                     while crate::anim_overlay_tween::tweens_active() {
                                         // a tween in flight is a transition someone is
@@ -5068,6 +5080,44 @@ fn main() {
                                         // timer for every animation the renderer owns,
                                         // one overlay for their results.
                                         crate::anim_overlay_tween::tick_loops();
+                                        // paint patch: when the only thing that moved is
+                                        // opacity on nodes the last draw recorded, rewrite
+                                        // those primitives and present. gpui is immediate
+                                        // mode, so the alternative — `refresh()` — rebuilds,
+                                        // re-solves and repaints EVERY node in the window,
+                                        // which is why a single spinner used to hold the
+                                        // whole window at a full redraw ~20 times a second
+                                        // for as long as it was on screen. The patch is
+                                        // O(animating nodes) instead of O(tree), and the
+                                        // compositor's damage pass then repairs only the
+                                        // pixels that changed. Anything else this tick — a
+                                        // colour, a transform, a node with no recording —
+                                        // returns false and falls through to the draw.
+                                        let batch = crate::anim_overlay::take_paint_patch_batch()
+                                            .filter(|_| !paint_patch_disabled);
+                                        let nodes = batch.as_ref().map_or(0, |moves| moves.len());
+                                        let patched = batch.is_some_and(|moves| {
+                                            window_handle
+                                                .update(cx, |_root, window, _cx| {
+                                                    window.patch_paint_opacities(
+                                                        &moves,
+                                                        crate::anim_overlay::mutation_epoch(),
+                                                        crate::anim_overlay::opacity_ids_epoch(),
+                                                    )
+                                                })
+                                                .unwrap_or(false)
+                                        });
+                                        if paint_patch_trace {
+                                            eprintln!(
+                                                "[paint-patch] patched={patched} nodes={nodes}"
+                                            );
+                                        }
+                                        // verify mode deliberately falls through to the full
+                                        // draw even on success: the draw is what compares
+                                        // itself against the patch it just replaced.
+                                        if patched && !paint_patch_verify {
+                                            continue;
+                                        }
                                         if pump.update(cx, |_this, cx| cx.notify()).is_err() {
                                             break 'driver;
                                         }

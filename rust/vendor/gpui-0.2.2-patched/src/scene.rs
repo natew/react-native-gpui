@@ -152,6 +152,58 @@ impl Scene {
         SceneDamage::Bounds(damage)
     }
 
+    /// react-native-gpui paint-patch patch: compare this scene against one a patch produced.
+    /// Returns the largest alpha difference seen, and a description of the first operation
+    /// whose difference is NOT explainable as an alpha rounding within `alpha_tolerance`.
+    ///
+    /// The tolerance exists because a patch reaches its alpha by a different arithmetic route
+    /// than a draw: a draw multiplies the base colour by the animation value, a patch scales
+    /// an already-multiplied colour by the ratio between two animation values. Both round, and
+    /// they round differently in the last bit. A real defect is nowhere near that scale — the
+    /// clamped-factor bug this gate caught differed by 4.4e-1, five 8-bit levels short of half
+    /// the channel, against a tolerance eight orders of magnitude smaller.
+    pub(crate) fn visual_difference(
+        &self,
+        previous: &SceneSnapshot,
+        alpha_tolerance: f32,
+    ) -> (f32, Option<String>) {
+        if self.paint_operations.len() != previous.paint_operations.len() {
+            return (
+                0.0,
+                Some(format!(
+                    "operation count {} vs {}",
+                    self.paint_operations.len(),
+                    previous.paint_operations.len()
+                )),
+            );
+        }
+        let mut max_delta = 0.0f32;
+        let mut offender = None;
+        for (index, (current, prev)) in self
+            .paint_operations
+            .iter()
+            .zip(&previous.paint_operations)
+            .enumerate()
+        {
+            if current.visual_eq(prev) {
+                continue;
+            }
+            match current.alpha_only_difference(prev) {
+                Some(delta) => {
+                    max_delta = max_delta.max(delta);
+                    if delta > alpha_tolerance && offender.is_none() {
+                        offender = Some(format!("op {index} alpha off by {delta:e}"));
+                    }
+                }
+                None if offender.is_none() => {
+                    offender = Some(format!("op {index} differs in more than alpha"));
+                }
+                None => {}
+            }
+        }
+        (max_delta, offender)
+    }
+
     pub(crate) fn snapshot(&self) -> SceneSnapshot {
         SceneSnapshot {
             paint_operations: self.paint_operations.clone(),
@@ -366,6 +418,83 @@ impl Scene {
         }
     }
 
+    /// react-native-gpui paint-patch patch: clone the paint operations in `range`, so a node's
+    /// primitives can later be rewritten from the values they were first painted with instead
+    /// of from whatever the previous patch left behind. Patching from the live scene would
+    /// compound its own rounding every tick and drift the animation off its curve.
+    pub(crate) fn clone_ops(&self, range: Range<usize>) -> Vec<PaintOperation> {
+        self.paint_operations[range].to_vec()
+    }
+
+    /// react-native-gpui paint-patch patch: rewrite `paint_operations[start..]` from
+    /// `originals`, folding `opacity` into every alpha channel exactly the way the
+    /// `Window::paint_*` entry points fold in the element-opacity stack when a primitive is
+    /// first built. This is how an opacity animation repaints without a draw: the element
+    /// tree, taffy, prepaint and paint are all skipped, and only the handful of primitives
+    /// the animated node produced are touched.
+    ///
+    /// Returns false — changing nothing — when the range no longer lines up with the scene or
+    /// an operation has changed kind under it. A caller that gets false must run a real draw;
+    /// writing a value into whatever now occupies those indices is how you get a correct
+    /// colour on the wrong element.
+    pub(crate) fn patch_ops_opacity(
+        &mut self,
+        start: usize,
+        originals: &[PaintOperation],
+        opacity: f32,
+    ) -> bool {
+        let end = start + originals.len();
+        if end > self.paint_operations.len() {
+            return false;
+        }
+        if !self.paint_operations[start..end]
+            .iter()
+            .zip(originals)
+            .all(|(live, original)| live.same_shape(original))
+        {
+            return false;
+        }
+        for (live, original) in self.paint_operations[start..end].iter_mut().zip(originals) {
+            *live = original.with_element_opacity(opacity);
+        }
+        true
+    }
+
+    /// react-native-gpui paint-patch patch: re-derive the per-kind primitive lanes the Metal
+    /// batcher actually reads from `paint_operations`, which `patch_ops_opacity` is the only
+    /// thing that edits in place. A patch never changes a primitive's `order` or its bounds,
+    /// so the sort is stable against the same sequence and every primitive lands back where
+    /// it was — this rebuilds the lanes rather than tracking each primitive's post-sort index
+    /// because an index map is only correct until someone adds a lane.
+    pub(crate) fn rebuild_lanes(&mut self) {
+        self.shadows.clear();
+        self.quads.clear();
+        self.paths.clear();
+        self.underlines.clear();
+        self.monochrome_sprites.clear();
+        self.polychrome_sprites.clear();
+        self.surfaces.clear();
+        self.backdrop_blurs.clear();
+        self.fades.clear();
+        for operation in &self.paint_operations {
+            let PaintOperation::Primitive(primitive) = operation else {
+                continue;
+            };
+            match primitive {
+                Primitive::Shadow(shadow) => self.shadows.push(shadow.clone()),
+                Primitive::Quad(quad) => self.quads.push(quad.clone()),
+                Primitive::Fade(fade) => self.fades.push(fade.clone()),
+                Primitive::Path(path) => self.paths.push(path.clone()),
+                Primitive::Underline(underline) => self.underlines.push(underline.clone()),
+                Primitive::MonochromeSprite(sprite) => self.monochrome_sprites.push(sprite.clone()),
+                Primitive::PolychromeSprite(sprite) => self.polychrome_sprites.push(sprite.clone()),
+                Primitive::Surface(surface) => self.surfaces.push(surface.clone()),
+                Primitive::BackdropBlur(blur) => self.backdrop_blurs.push(blur.clone()),
+            }
+        }
+        self.finish();
+    }
+
     pub fn finish(&mut self) {
         self.shadows.sort_by_key(|shadow| shadow.order);
         self.quads.sort_by_key(|quad| quad.order);
@@ -491,6 +620,35 @@ impl PaintOperation {
         }
     }
 
+    /// react-native-gpui paint-patch patch: see `Primitive::alpha_only_difference`.
+    fn alpha_only_difference(&self, other: &Self) -> Option<f32> {
+        match (self, other) {
+            (Self::Primitive(a), Self::Primitive(b)) => a.alpha_only_difference(b),
+            _ => None,
+        }
+    }
+
+    /// react-native-gpui paint-patch patch: same operation kind in the same slot. The guard on
+    /// patching a recorded range — a recording is only meaningful against the scene that
+    /// produced it, and this is the cheap check that the scene underneath still matches.
+    fn same_shape(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Primitive(a), Self::Primitive(b)) => a.kind() == b.kind(),
+            (Self::StartLayer(_), Self::StartLayer(_)) => true,
+            (Self::EndLayer, Self::EndLayer) => true,
+            _ => false,
+        }
+    }
+
+    /// react-native-gpui paint-patch patch: this operation as it would have been painted with
+    /// `opacity` on the element-opacity stack.
+    fn with_element_opacity(&self, opacity: f32) -> Self {
+        match self {
+            Self::Primitive(primitive) => Self::Primitive(primitive.with_element_opacity(opacity)),
+            other => other.clone(),
+        }
+    }
+
     fn changed_bounds(
         &self,
         other: &Self,
@@ -534,6 +692,69 @@ impl Primitive {
             Self::PolychromeSprite(_) => PrimitiveKind::PolychromeSprite,
             Self::Surface(_) => PrimitiveKind::Surface,
             Self::BackdropBlur(_) => PrimitiveKind::BackdropBlur,
+        }
+    }
+
+    /// react-native-gpui paint-patch patch: this primitive as it would have been built with
+    /// `opacity` on the element-opacity stack. Every arm mirrors the corresponding
+    /// `Window::paint_*` entry point — keep the two in step, since a missed field is a
+    /// primitive that animates on a real draw and holds still on a patched one. `Fade`
+    /// deliberately ignores the stack when it is painted, and a hosted `Surface` carries no
+    /// alpha, so both pass through.
+    fn with_element_opacity(&self, opacity: f32) -> Self {
+        // NOT `Hsla::opacity`/`Background::opacity`: those clamp the FACTOR to [0,1], which is
+        // right for the element-opacity stack (never above 1) and wrong here. A patch factor is
+        // a ratio between two animation values and exceeds 1 on every tick where the animation
+        // brightens — clamping it silently left the old alpha in place, so the patched frame
+        // held still for half of every spinner cycle. Clamp the RESULT instead.
+        let scale = |color: Hsla| Hsla {
+            a: (color.a * opacity).clamp(0., 1.),
+            ..color
+        };
+        let scale_background = |background: &Background| {
+            let mut background = *background;
+            background.set_alphas(|alpha| (alpha * opacity).clamp(0., 1.));
+            background
+        };
+        match self {
+            Self::Shadow(shadow) => {
+                let mut shadow = shadow.clone();
+                shadow.color = scale(shadow.color);
+                Self::Shadow(shadow)
+            }
+            Self::Quad(quad) => {
+                let mut quad = quad.clone();
+                quad.background = scale_background(&quad.background);
+                quad.border_color = scale(quad.border_color);
+                Self::Quad(quad)
+            }
+            Self::Fade(fade) => Self::Fade(fade.clone()),
+            Self::Path(path) => {
+                let mut path = path.clone();
+                path.color = scale_background(&path.color);
+                Self::Path(path)
+            }
+            Self::Underline(underline) => {
+                let mut underline = underline.clone();
+                underline.color = scale(underline.color);
+                Self::Underline(underline)
+            }
+            Self::MonochromeSprite(sprite) => {
+                let mut sprite = sprite.clone();
+                sprite.color = scale(sprite.color);
+                Self::MonochromeSprite(sprite)
+            }
+            Self::PolychromeSprite(sprite) => {
+                let mut sprite = sprite.clone();
+                sprite.opacity = (sprite.opacity * opacity).clamp(0., 1.);
+                Self::PolychromeSprite(sprite)
+            }
+            Self::Surface(surface) => Self::Surface(surface.clone()),
+            Self::BackdropBlur(blur) => {
+                let mut blur = blur.clone();
+                blur.tint = scale(blur.tint);
+                Self::BackdropBlur(blur)
+            }
         }
     }
 
@@ -596,6 +817,71 @@ impl Primitive {
                 .max(quad.corner_radii.bottom_right.0)
         };
         Some(extent)
+    }
+
+    /// react-native-gpui paint-patch patch: every alpha this primitive carries, in a fixed
+    /// order. Paired with `with_alphas` so a comparison can ask "is alpha the ONLY thing that
+    /// differs" without enumerating every other field.
+    fn alphas(&self) -> Vec<f32> {
+        match self {
+            Self::Shadow(shadow) => vec![shadow.color.a],
+            Self::Quad(quad) => vec![
+                quad.background.solid.a,
+                quad.background.colors[0].color.a,
+                quad.background.colors[1].color.a,
+                quad.border_color.a,
+            ],
+            Self::Path(path) => vec![
+                path.color.solid.a,
+                path.color.colors[0].color.a,
+                path.color.colors[1].color.a,
+            ],
+            Self::Underline(underline) => vec![underline.color.a],
+            Self::MonochromeSprite(sprite) => vec![sprite.color.a],
+            Self::PolychromeSprite(sprite) => vec![sprite.opacity],
+            Self::BackdropBlur(blur) => vec![blur.tint.a],
+            Self::Fade(_) | Self::Surface(_) => Vec::new(),
+        }
+    }
+
+    fn with_alphas(&self, alphas: &[f32]) -> Self {
+        let mut primitive = self.clone();
+        match &mut primitive {
+            Self::Shadow(shadow) => shadow.color.a = alphas[0],
+            Self::Quad(quad) => {
+                quad.background.solid.a = alphas[0];
+                quad.background.colors[0].color.a = alphas[1];
+                quad.background.colors[1].color.a = alphas[2];
+                quad.border_color.a = alphas[3];
+            }
+            Self::Path(path) => {
+                path.color.solid.a = alphas[0];
+                path.color.colors[0].color.a = alphas[1];
+                path.color.colors[1].color.a = alphas[2];
+            }
+            Self::Underline(underline) => underline.color.a = alphas[0],
+            Self::MonochromeSprite(sprite) => sprite.color.a = alphas[0],
+            Self::PolychromeSprite(sprite) => sprite.opacity = alphas[0],
+            Self::BackdropBlur(blur) => blur.tint.a = alphas[0],
+            Self::Fade(_) | Self::Surface(_) => {}
+        }
+        primitive
+    }
+
+    /// react-native-gpui paint-patch patch: `Some(largest alpha difference)` when these two
+    /// primitives are identical apart from their alphas, `None` when anything else differs.
+    fn alpha_only_difference(&self, other: &Self) -> Option<f32> {
+        let mine = self.alphas();
+        let theirs = other.alphas();
+        if mine.len() != theirs.len() || mine.is_empty() {
+            return None;
+        }
+        let delta = mine
+            .iter()
+            .zip(&theirs)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        self.visual_eq(&other.with_alphas(&mine)).then_some(delta)
     }
 
     fn clipped_bounds(&self) -> Bounds<ScaledPixels> {

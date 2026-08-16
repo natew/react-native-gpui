@@ -689,6 +689,26 @@ pub(crate) struct Frame {
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) inspector_hitboxes: FxHashMap<HitboxId, crate::InspectorElementId>,
     pub(crate) tab_stops: TabStopMap,
+    /// react-native-gpui paint-patch patch: where each bracketed node's primitives ended up in
+    /// `scene`, so an opacity animation can rewrite them without a draw. Deliberately lives on
+    /// `Frame` rather than on `Window`: a recording is only meaningful against the scene that
+    /// produced it, and living here means it swaps into `rendered_frame` with that scene and is
+    /// wiped by `clear()` the moment a new draw starts. Nothing carries a recording across a
+    /// draw, so a patch can never write the right value into an element that has since moved.
+    pub(crate) paint_patches: FxHashMap<u64, PaintPatch>,
+    /// Animating nodes this frame declined to record, so a patch must refuse them rather than
+    /// read their absence as "not painted". See [`Window::end_paint_patch`].
+    pub(crate) paint_patch_blocked: FxHashSet<u64>,
+    /// Which generation of the animating-node set this frame was painted against.
+    pub(crate) paint_patch_epoch: u64,
+}
+
+/// react-native-gpui paint-patch patch: one node's contribution to the scene, and the
+/// element-opacity that was folded into it when it was painted.
+pub(crate) struct PaintPatch {
+    start: usize,
+    originals: Vec<crate::scene::PaintOperation>,
+    painted_opacity: f32,
 }
 
 #[derive(Clone, Default)]
@@ -738,10 +758,15 @@ impl Frame {
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector_hitboxes: FxHashMap::default(),
             tab_stops: TabStopMap::default(),
+            paint_patches: FxHashMap::default(),
+            paint_patch_blocked: FxHashSet::default(),
+            paint_patch_epoch: 0,
         }
     }
 
     pub(crate) fn clear(&mut self) {
+        self.paint_patches.clear();
+        self.paint_patch_blocked.clear();
         self.element_states.clear();
         self.accessed_element_states.clear();
         self.mouse_listeners.clear();
@@ -821,6 +846,13 @@ impl Frame {
 
 /// Holds the state for a specific window.
 pub struct Window {
+    /// react-native-gpui paint-patch patch: under `RNGPUI_PAINT_PATCH_VERIFY`, the scene a
+    /// patch produced plus the overlay epoch it was produced at. The next real draw compares
+    /// itself against it, which is the gate on the whole mechanism: a patched frame has to be
+    /// indistinguishable from the frame a full draw would have built from the same animation
+    /// values. Comparing scenes rather than screenshots makes the check exact and needs no
+    /// alignment between two runs of a free-running animation.
+    pub(crate) paint_patch_verify: Option<(crate::scene::SceneSnapshot, u64)>,
     pub(crate) handle: AnyWindowHandle,
     pub(crate) invalidator: WindowInvalidator,
     pub(crate) removed: bool,
@@ -1228,6 +1260,7 @@ impl Window {
             rendered_entity_stack: Vec::new(),
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
+            paint_patch_verify: None,
             element_opacity: 1.0,
             element_transform: TransformationMatrix::unit(),
             requested_autoscroll: None,
@@ -2095,6 +2128,28 @@ impl Window {
                 t0.elapsed().as_secs_f64() * 1000.0
             );
         }
+        // react-native-gpui paint-patch patch: this draw rebuilt from scratch what the last
+        // patch produced by rewriting primitives. Under the verify env they must be identical
+        // — that is the whole claim the mechanism rests on. Skipped when the overlay moved in
+        // between, since the two would then legitimately describe different animation values.
+        if let Some((patched, epoch)) = self.paint_patch_verify.take() {
+            if epoch != self.rendered_frame.scene.content_epoch {
+                eprintln!("[paint-patch-verify] skipped (overlay moved between patch and draw)");
+            } else {
+                // 1e-6 is four thousand times finer than one level of an 8-bit channel, so a
+                // difference under it cannot reach a pixel, while anything that can is caught.
+                let (max_alpha_delta, offender) =
+                    self.rendered_frame.scene.visual_difference(&patched, 1e-6);
+                match offender {
+                    None => eprintln!(
+                        "[paint-patch-verify] ok maxAlphaDelta={max_alpha_delta:e}"
+                    ),
+                    Some(why) => eprintln!(
+                        "[paint-patch-verify] MISMATCH {why} maxAlphaDelta={max_alpha_delta:e}"
+                    ),
+                }
+            }
+        }
         ArenaClearNeeded
     }
 
@@ -2452,6 +2507,138 @@ impl Window {
             range.start.scene_index..range.end.scene_index,
             &self.rendered_frame.scene,
         );
+    }
+
+    /// react-native-gpui paint-patch patch: stamp which generation of the animating-node set
+    /// this frame is being painted against. Call once per draw, before any node is bracketed.
+    pub fn set_paint_patch_epoch(&mut self, epoch: u64) {
+        self.next_frame.paint_patch_epoch = epoch;
+    }
+
+    /// react-native-gpui paint-patch patch: mark where a node's primitives start in this
+    /// frame's scene. Pair with [`Window::end_paint_patch`] from inside the node's
+    /// element-opacity scope, so the recorded opacity is the cumulative one its primitives
+    /// were actually built with.
+    pub fn begin_paint_patch(&self) -> usize {
+        self.next_frame.scene.len()
+    }
+
+    /// react-native-gpui paint-patch patch: record everything painted since `start` as this
+    /// node's contribution, so a later opacity tick can rewrite it without a draw. Call only
+    /// for nodes that are actually animating — the recording clones the operations, and a
+    /// node's range spans its whole subtree, so bracketing every node would be quadratic.
+    ///
+    /// `painted_opacity` is the node's OWN opacity for this paint, not the cumulative stack
+    /// value. Patching then scales by `new / painted`, which cancels the enclosing stack, so a
+    /// node inside a fading dialog animates correctly without knowing anything about it. A
+    /// node painted fully transparent records nothing: its primitives carry no colour to scale
+    /// back up, so it has to go through a real draw.
+    pub fn end_paint_patch(&mut self, key: u64, start: usize, painted_opacity: f32) {
+        let end = self.next_frame.scene.len();
+        if end < start || !(painted_opacity > 0.0) {
+            // Blocked, not merely unrecorded. A patch reads "no recording" as "this node was
+            // not painted, so it has no pixels to update" — true for a culled node, false for
+            // one painted at zero alpha, which is exactly where every fade-in starts. Without
+            // this the first tick of a fade from 0 would be skipped and the element would
+            // never appear.
+            self.next_frame.paint_patch_blocked.insert(key);
+            return;
+        }
+        // A node's span covers its subtree, so an animating node nested inside another one
+        // gets recorded twice over. Patching both would compose them wrongly: the inner
+        // node's originals already have the OUTER node's painted opacity folded in, so
+        // rescaling them by the inner's new value alone reapplies the outer's old one. Since
+        // paints nest, anything recorded at or after this bracket's start is a descendant —
+        // drop the OUTER recording and keep the inner, which is self-consistent against the
+        // opacity its ancestor is currently painted at. The outer's own animation then goes
+        // through a real draw, which re-records the inner against the new state.
+        if self
+            .next_frame
+            .paint_patches
+            .values()
+            .any(|patch| patch.start >= start)
+        {
+            self.next_frame.paint_patch_blocked.insert(key);
+            return;
+        }
+        let originals = self.next_frame.scene.clone_ops(start..end);
+        self.next_frame.paint_patches.insert(
+            key,
+            PaintPatch {
+                start,
+                originals,
+                painted_opacity,
+            },
+        );
+    }
+
+    /// react-native-gpui paint-patch patch: repaint animating nodes at new opacities by
+    /// rewriting the primitives they produced on the last draw — no element tree, no taffy,
+    /// no prepaint, no paint. On success it re-derives the primitive lanes the Metal batcher
+    /// reads, stamps the content epoch so the compositor treats this as a mutation rather
+    /// than a reusable scroll, and asks for a present. The invalidator is left clean and no
+    /// draw is scheduled, so the display link takes its present-only branch and the
+    /// compositor's damage pass reduces the whole frame to a scissored repair of the pixels
+    /// that actually moved.
+    ///
+    /// Returns false, having changed nothing the display will see, when any node has no
+    /// recording against the CURRENT scene — the case after any draw that did not bracket it
+    /// and after any tree change. False means the caller must run a real draw. It is never a
+    /// reason to patch what did match: recorded indices only address the scene that produced
+    /// them, and patching a stale one paints a correct value onto the wrong element.
+    pub fn patch_paint_opacities(
+        &mut self,
+        moves: &[(u64, f32)],
+        content_epoch: u64,
+        animating_ids_epoch: u64,
+    ) -> bool {
+        let frame = &mut self.rendered_frame;
+        // The scene was painted against a different set of animating nodes, so a node with no
+        // recording might be one this draw simply did not know was animating. Only when the
+        // sets match does "no recording" reliably mean "not painted" — culled out of a scroll
+        // list, or display:none — which has no pixels to update and is safe to leave alone.
+        if animating_ids_epoch != frame.paint_patch_epoch {
+            return false;
+        }
+        if moves
+            .iter()
+            .any(|(key, _)| frame.paint_patch_blocked.contains(key))
+        {
+            return false;
+        }
+        let trace = std::env::var_os("RNGPUI_PAINT_PATCH_TRACE").is_some();
+        let mut patched = true;
+        for (key, opacity) in moves {
+            let Some(patch) = frame.paint_patches.get(key) else {
+                continue;
+            };
+            if trace {
+                eprintln!(
+                    "[paint-patch] id={key} requested={opacity} painted={} scale={}",
+                    patch.painted_opacity,
+                    opacity / patch.painted_opacity
+                );
+            }
+            patched &= frame.scene.patch_ops_opacity(
+                patch.start,
+                &patch.originals,
+                opacity / patch.painted_opacity,
+            );
+        }
+        // rebuild the lanes even on the failure path: a partial patch has already edited
+        // `paint_operations`, and leaving the lanes derived from a different set of
+        // operations would present a scene the damage diff no longer describes. The caller's
+        // full draw discards all of it either way.
+        frame.scene.rebuild_lanes();
+        if !patched {
+            return false;
+        }
+        frame.scene.set_content_epoch(content_epoch);
+        if std::env::var_os("RNGPUI_PAINT_PATCH_VERIFY").is_some() {
+            self.paint_patch_verify = Some((self.rendered_frame.scene.snapshot(), content_epoch));
+        }
+        self.needs_present.set(true);
+        true
     }
 
     /// Push a text style onto the stack, and call a function with that style active.

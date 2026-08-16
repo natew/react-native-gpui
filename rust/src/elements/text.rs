@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Bounds, DefiniteLength, Display, Element, ElementId, FontStyle,
-    GlobalElementId, HighlightStyle, Hsla, IntoElement, LayoutId, Length, ParentElement, Pixels,
-    Styled, StyledText, Window, div, px,
+    GlobalElementId, Hsla, IntoElement, LayoutId, Length, ParentElement, Pixels, Styled,
+    StyledText, Window, div, px,
 };
 
 use crate::elements::{ReactElement, bounds_have_drawable_area, report_layout};
@@ -45,6 +45,7 @@ impl ReactTextElement {
         let size = style.font_size.unwrap_or(14.0);
         let family = style.gpui_font_family();
         let weight = style.gpui_font_weight();
+        let font_style = style.gpui_font_style();
         let text = self.element.cached_text.clone();
 
         let mut el = div()
@@ -57,6 +58,15 @@ impl ReactTextElement {
         }
         if let Some(w) = weight {
             el = el.font_weight(w);
+        }
+        if let Some(fs) = font_style {
+            // `fontStyle` on a plain <Text> never reached the renderer at all: it was
+            // only ever carried on a nested run, so `<Text style={{fontStyle:'italic'}}>`
+            // with no nesting rendered upright. Both paths set it now.
+            el = match fs {
+                FontStyle::Normal => el.not_italic(),
+                _ => el.italic(),
+            };
         }
         if let Some(lh) = style.line_height {
             // gpui 0.2.2 centers glyphs in the line box the CSS way (half-leading);
@@ -78,8 +88,26 @@ impl ReactTextElement {
 
         // Nested `<Text>` → flowing styled runs. StyledText doesn't inherit the
         // div's text size/family, so build an explicit base TextStyle (otherwise
-        // the text renders at a wrong default size), then override each run's
-        // weight/color via highlights.
+        // the text renders at a wrong default size), then give every run an explicit
+        // font derived from it.
+        //
+        // These are built as gpui `TextRun`s rather than through `HighlightStyle`
+        // highlights because a HighlightStyle carries no font family — it can only
+        // override weight/style/colour on top of one base font. An inline code span
+        // needs its own (mono) FAMILY as well as a background plate, so the run has
+        // to name its font outright. What a run still CANNOT express, because it is a
+        // span inside an already-shaped line rather than a box:
+        //
+        //   * padding and border radius. gpui paints a run background as one square
+        //     quad, glyph-advance wide by line-height tall (text_system/line.rs).
+        //     Honouring padding would have to move the surrounding glyphs, i.e. change
+        //     the line's advances, and a radius would need the painter to round it.
+        //   * its own font size. `layout_line` takes ONE font size for the whole line.
+        //
+        // So an inline code span gets its plate colour and its mono face here, and
+        // MarkdownBody's paddingLeft/paddingRight/borderRadius/fontSize on that span
+        // are dropped on purpose. Do not emulate them with a separate positioned
+        // element behind the text — that desynchronizes on every reflow.
         let mut base = window.text_style();
         base.color = color;
         base.font_size = px(size).into();
@@ -88,6 +116,9 @@ impl ReactTextElement {
         }
         if let Some(w) = weight {
             base.font_weight = w;
+        }
+        if let Some(fs) = font_style {
+            base.font_style = fs;
         }
         if let Some(lh) = style.line_height {
             base.line_height = px(lh).into();
@@ -98,31 +129,46 @@ impl ReactTextElement {
         } else {
             self.element.runs.iter().map(|r| r.text.as_str()).collect()
         };
-        let mut highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = Vec::new();
-        let mut ix = 0usize;
+        let base_font = base.font();
+        let mut text_runs: Vec<gpui::TextRun> = Vec::new();
         for r in &self.element.runs {
             let len = r.text.len();
             if len == 0 {
                 continue;
             }
-            highlights.push((
-                ix..ix + len,
-                HighlightStyle {
-                    color: r.color,
-                    font_weight: r
-                        .font_weight
-                        .as_deref()
-                        .map(crate::style::parse_font_weight),
-                    font_style: r.font_style.as_deref().and_then(|s| {
-                        s.eq_ignore_ascii_case("italic")
-                            .then_some(FontStyle::Italic)
-                    }),
-                    ..Default::default()
-                },
-            ));
-            ix += len;
+            let mut font = base_font.clone();
+            if let Some(fam) = r.font_family.as_deref() {
+                font.family = crate::style::map_font_family(fam);
+            }
+            if let Some(w) = r.font_weight.as_deref() {
+                font.weight = crate::style::parse_font_weight(w);
+            }
+            if let Some(s) = r.font_style.as_deref() {
+                font.style = crate::style::parse_font_style(s);
+            }
+            text_runs.push(gpui::TextRun {
+                len,
+                font,
+                color: r.color.unwrap_or(color),
+                background_color: r.background_color,
+                underline: None,
+                strikethrough: None,
+            });
         }
-        let styled = StyledText::new(flat).with_default_highlights(&base, highlights);
+        // `with_runs` asserts the runs tile the string exactly. A selectable node with
+        // no nested runs still takes this path (paint needs a TextLayout handle), so
+        // it gets one run covering everything.
+        if text_runs.is_empty() && !flat.is_empty() {
+            text_runs.push(gpui::TextRun {
+                len: flat.len(),
+                font: base_font,
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        }
+        let styled = StyledText::new(flat).with_runs(text_runs);
         self.text_layout = self.element.selectable.then(|| styled.layout().clone());
         el.child(styled).into_any_element()
     }

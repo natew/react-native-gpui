@@ -90,6 +90,21 @@ objc = "0.2"
 #    shadow bleed through the now-translucent background — the "shadow underneath"
 #    artifact. The shadow fragment shaders now cut out the element's own rounded rect
 #    via `quad_sdf` on the new `occluder_bounds` field.
+#
+# 5. Synthetic oblique for families with no italic face (src/platform/mac/text_system.rs).
+#    Upstream asks font-kit's `find_best_match` for an italic and, when the family has
+#    none, silently gets the upright face back and renders upright — so `fontStyle:
+#    "italic"` was a no-op for our bundled Geist, which ships no italic. A browser
+#    instead synthesizes an oblique, and web is the parity oracle here: the same React
+#    tree renders on web with the same Geist. Measured in headless Chrome, Geist +
+#    `font-style: italic` diverges 0.3263 from upright, and adding `font-synthesis:
+#    none` drops that to exactly 0.0000 — i.e. stock gpui behaved as `font-synthesis:
+#    none`. `MacTextSystemState::oblique_variant` allocates a distinct FontId per face
+#    that shares the face's CTFont, and the raster paths shear by tan(12°). Shaping
+#    still runs against the upright face, which is correct: synthetic oblique does not
+#    change advances. Because CoreText hands shaped runs back tagged by postscript name,
+#    and the variant shares one, `layout_line` re-tags glyphs from the requested byte
+#    ranges. Pinned by `ts/scripts/inline-run-style-conformance.mjs`.
 [patch.crates-io]
 gpui = { path = "vendor/gpui-0.2.2-patched" }
 # Patched gpui-component 0.5.1 (vendored alongside gpui, same precedent). Divergences

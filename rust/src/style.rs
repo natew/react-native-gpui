@@ -1,5 +1,6 @@
 use gpui::{
-    AbsoluteLength, BoxShadow, CursorStyle, DefiniteLength, FontWeight, Hsla, Length, Rgba,
+    AbsoluteLength, BoxShadow, CursorStyle, DefiniteLength, FontStyle, FontWeight, Hsla, Length,
+    Rgba,
     linear_color_stop, linear_gradient, point, px,
 };
 use serde_json::Value;
@@ -132,6 +133,7 @@ pub struct ElementStyle {
     pub font_size: Option<f32>,
     pub font_weight: Option<String>,
     pub font_family: Option<String>,
+    pub font_style: Option<String>,
     pub line_height: Option<f32>,
     pub text_align: Option<String>,
     pub letter_spacing: Option<f32>,
@@ -269,6 +271,7 @@ impl ElementStyle {
         s!(overflow, "overflow");
         s!(font_weight, "fontWeight");
         s!(font_family, "fontFamily");
+        s!(font_style, "fontStyle");
         s!(text_align, "textAlign");
         s!(cursor, "cursor");
         s.transform = o.get("transform").and_then(parse_transform_ops);
@@ -567,9 +570,22 @@ impl ElementStyle {
     pub fn gpui_font_family(&self) -> Option<gpui::SharedString> {
         self.font_family.as_deref().map(map_font_family)
     }
+
+    /// Resolved GPUI font style, if `fontStyle` was set.
+    pub fn gpui_font_style(&self) -> Option<FontStyle> {
+        self.font_style.as_deref().map(parse_font_style)
+    }
 }
 
-fn map_font_family(f: &str) -> gpui::SharedString {
+pub fn parse_font_style(s: &str) -> FontStyle {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "italic" => FontStyle::Italic,
+        "oblique" => FontStyle::Oblique,
+        _ => FontStyle::Normal,
+    }
+}
+
+pub fn map_font_family(f: &str) -> gpui::SharedString {
     // take the first family in a CSS stack, strip quotes
     let first = f
         .split(',')

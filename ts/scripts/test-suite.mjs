@@ -22,6 +22,7 @@ const tasks = [
     { name: "appearance-serialize", command: "bun", args: ["run", "scripts/appearance-serialize-unit.tsx"], cwd: root, timeoutMs: 15_000 },
     { name: "semantic-serialize", command: "bun", args: ["run", "scripts/semantic-serialize-unit.tsx"], cwd: root, timeoutMs: 15_000 },
     { name: "text-baseline", command: "bun", args: ["run", "scripts/text-baseline-conformance.mjs"], cwd: root, timeoutMs: 60_000 },
+    { name: "inline-run-style", command: "node", args: ["scripts/inline-run-style-conformance.mjs"], cwd: root, timeoutMs: 60_000 },
     { name: "input-visual", command: "node", args: ["scripts/input-visual-conformance.mjs"], cwd: root, timeoutMs: 60_000 },
     { name: "cargo-test", command: "cargo", args: ["test"], cwd: `${repo}/rust`, timeoutMs: 25_000 },
     { name: "appearance", command: "bun", args: ["run", "scripts/appearance-conformance.ts"], cwd: root, timeoutMs: 10_000 },

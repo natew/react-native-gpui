@@ -457,6 +457,14 @@ fn parse_json_tree(
                             .get("fontStyle")
                             .and_then(|v| v.as_str())
                             .map(String::from),
+                        background_color: o
+                            .get("backgroundColor")
+                            .and_then(|v| v.as_str())
+                            .and_then(crate::style::parse_css_color),
+                        font_family: o
+                            .get("fontFamily")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
                     })
                 })
                 .collect()

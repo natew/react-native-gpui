@@ -51,7 +51,19 @@ extern "C" {
 void* rng_hermes_create(void) {
   try {
     auto* box = new Box();
-    box->rt = facebook::hermes::makeHermesRuntime(::hermes::vm::RuntimeConfig());
+    // ES6BlockScoping defaults to FALSE in this Hermes build, which makes `let`
+    // compile with FUNCTION scoping: one binding for the whole loop rather than a
+    // fresh binding per iteration, so every closure created in a loop reads the
+    // final value. It breaks `for`, `for-of`, and `for-in` alike, and it silently
+    // destroys the CJS/ESM interop namespace bundlers emit
+    // (`for (let key of keys) defineProperty(ns, key, {get: () => mod[key]})`),
+    // where every getter then returns the module's LAST export. That made
+    // `React.createContext` evaluate to the string "19.2.6" (React's `version`) and
+    // killed the app at startup. This governs source we hand the VM to compile,
+    // such as the ui-runtime bundle; the hermesc `-Xes6-block-scoping` flag in
+    // ts/scripts/hermesc-args.mjs covers the bytecode we precompile.
+    box->rt = facebook::hermes::makeHermesRuntime(
+        ::hermes::vm::RuntimeConfig::Builder().withES6BlockScoping(true).build());
     return box;
   } catch (...) {
     return nullptr;

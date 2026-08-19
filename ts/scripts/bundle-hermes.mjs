@@ -13,6 +13,7 @@ import { reanimatedBunPlugin } from './reanimated-bun-plugin.mjs'
 import { rngpuiHotUpdateAliasPlugin } from './hot-update-alias-plugin.mjs'
 import { createReactRefreshSwcTransform } from './react-refresh-swc.mjs'
 import { nativePackageExportsPlugin } from './native-package-exports-plugin.mjs'
+import { hermescArgs } from './hermesc-args.mjs'
 
 const root = resolve(import.meta.dirname, '..') // ts/
 const args = process.argv.slice(2).filter((a) => !a.startsWith('--'))
@@ -86,7 +87,7 @@ if (wantBytecode) {
 if (wantBytecode) {
   const hermesc = process.env.HERMESC || join(homedir(), 'github', 'hermes', 'build', 'bin', 'hermesc')
   const outHbc = outJs.replace(/\.js$/, '.hbc')
-  const r = spawnSync(hermesc, ['-emit-binary', '-O', '-out', outHbc, outJs], { stdio: 'inherit' })
+  const r = spawnSync(hermesc, [...hermescArgs, '-out', outHbc, outJs], { stdio: 'inherit' })
   if (r.status !== 0) {
     console.error('[bundle-hermes] hermesc failed')
     process.exit(1)

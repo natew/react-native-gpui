@@ -22,6 +22,7 @@ import { dirname, join, resolve } from 'node:path'
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { reanimatedBunPlugin } from './reanimated-bun-plugin.mjs'
+import { hermescArgs } from './hermesc-args.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const tsRoot = resolve(here, '..')
@@ -153,7 +154,7 @@ const code = await result.outputs.find((o) => o.kind === 'entry-point').text()
 await Bun.write(outJs, code)
 
 const hermesc = process.env.HERMESC || join(homedir(), 'github', 'hermes', 'build', 'bin', 'hermesc')
-const hbc = spawnSync(hermesc, ['-emit-binary', '-O', '-out', outHbc, outJs], { encoding: 'utf8' })
+const hbc = spawnSync(hermesc, [...hermescArgs, '-out', outHbc, outJs], { encoding: 'utf8' })
 if (hbc.status !== 0) {
   process.stderr.write(hbc.stderr || '')
   fail('hermesc failed')

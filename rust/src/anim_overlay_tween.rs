@@ -58,32 +58,143 @@ struct Tween {
     easing: String,
 }
 
+/// One node's endlessly repeating keyframe animation — the CSS `@keyframes … infinite`
+/// analog, where a `Tween` is the CSS `transition` analog. Declared once on the committed
+/// style and then driven entirely here: a spinner, a pulse, or a blinking caret costs the
+/// JS side nothing per frame, because nothing about it changes on the JS side per frame.
+///
+/// `offset` is where in the cycle this node starts, 0..1, which is how a grid of cells
+/// running one shared animation reads as a wave. It is CSS's negative `animation-delay`
+/// expressed as the fraction it actually means.
+struct KeyframeLoop {
+    /// `(position 0..1, value)` pairs, sorted by position. Values are raw style JSON, so
+    /// this interpolates colors and transforms through the same code a tween uses.
+    stops: Vec<(f32, Value)>,
+    duration: Duration,
+    offset: f32,
+    easing: String,
+    start: Instant,
+}
+
 // (node, key) → in-flight tween, and last-committed animatable values per node so the next
 // commit can diff against them.
 static GPUI_TWEENS: Lazy<Mutex<HashMap<(u64, String), Tween>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static PREV_APPLIED: Lazy<Mutex<HashMap<u64, Map<String, Value>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+// (node, key) → its repeating keyframe animation. Separate from the tween map because a
+// loop never finishes: it lives until the node leaves the tree or stops declaring it.
+static GPUI_LOOPS: Lazy<Mutex<HashMap<(u64, String), KeyframeLoop>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// cubic-bezier-ish easings. ease-out delegates to the shared `ease_out_cubic`; the others
-/// are the standard CSS curve approximations. an unknown name falls back to ease-out.
+/// CSS timing functions. The four named curves are their real CSS definitions rather
+/// than polynomial lookalikes, and `cubic-bezier(x1, y1, x2, y2)` is accepted verbatim,
+/// so a design can name any curve it wants instead of picking the nearest of four.
+///
+/// The named curves used to be cubic approximations: "ease" in particular was aliased to
+/// ease-in-out, which is symmetric, while the real "ease" is not. An unknown name still
+/// falls back to ease-out.
 pub fn ease(name: &str, t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     match name {
         "linear" => t,
-        "ease-in" => t * t * t,
-        "ease-in-out" => {
-            if t < 0.5 {
-                4.0 * t * t * t
-            } else {
-                1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
-            }
-        }
-        // "ease" is close to a slow-in/slow-out; reuse ease-in-out so it's not linear.
-        "ease" => ease("ease-in-out", t),
-        // "ease-out" and any unknown name → ease-out.
-        _ => ease_out_cubic(t),
+        "ease" => CubicBezier::new(0.25, 0.1, 0.25, 1.0).eval(t),
+        "ease-in" => CubicBezier::new(0.42, 0.0, 1.0, 1.0).eval(t),
+        "ease-out" => CubicBezier::new(0.0, 0.0, 0.58, 1.0).eval(t),
+        "ease-in-out" => CubicBezier::new(0.42, 0.0, 0.58, 1.0).eval(t),
+        other => match parse_cubic_bezier(other) {
+            Some(curve) => curve.eval(t),
+            None => ease_out_cubic(t),
+        },
     }
+}
+
+/// `cubic-bezier(x1, y1, x2, y2)`. Whitespace is free-form; anything else is None so the
+/// caller can fall back.
+fn parse_cubic_bezier(name: &str) -> Option<CubicBezier> {
+    let inner = name.trim().strip_prefix("cubic-bezier")?.trim();
+    let inner = inner.strip_prefix('(')?.strip_suffix(')')?;
+    let mut parts = inner.split(',').map(|n| n.trim().parse::<f32>());
+    let x1 = parts.next()?.ok()?;
+    let y1 = parts.next()?.ok()?;
+    let x2 = parts.next()?.ok()?;
+    let y2 = parts.next()?.ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if ![x1, y1, x2, y2].iter().all(|n| n.is_finite()) {
+        return None;
+    }
+    Some(CubicBezier::new(x1, y1, x2, y2))
+}
+
+/// A CSS cubic-bezier timing function: endpoints fixed at (0,0) and (1,1), the two control
+/// points given. Solving y for a given x is the standard UnitBezier approach — Newton
+/// iteration, falling back to bisection when the derivative is too flat to trust.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CubicBezier {
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+}
+
+impl CubicBezier {
+    pub const fn new(x1: f32, y1: f32, x2: f32, y2: f32) -> Self {
+        Self { x1, y1, x2, y2 }
+    }
+
+    pub fn eval(&self, x: f32) -> f32 {
+        if x <= 0.0 {
+            return 0.0;
+        }
+        if x >= 1.0 {
+            return 1.0;
+        }
+        bezier_axis(self.solve_t(x), self.y1, self.y2)
+    }
+
+    fn solve_t(&self, x: f32) -> f32 {
+        let mut t = x;
+        for _ in 0..8 {
+            let error = bezier_axis(t, self.x1, self.x2) - x;
+            if error.abs() < 1e-6 {
+                return t;
+            }
+            let slope = bezier_axis_slope(t, self.x1, self.x2);
+            if slope.abs() < 1e-6 {
+                break;
+            }
+            t -= error / slope;
+        }
+        // Newton stalled (a flat or non-monotonic x curve); bisect, which always converges.
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        let mut t = x.clamp(0.0, 1.0);
+        for _ in 0..24 {
+            let value = bezier_axis(t, self.x1, self.x2);
+            if (value - x).abs() < 1e-6 {
+                return t;
+            }
+            if value > x {
+                hi = t;
+            } else {
+                lo = t;
+            }
+            t = (lo + hi) * 0.5;
+        }
+        t
+    }
+}
+
+/// One axis of a unit cubic bezier with endpoints 0 and 1.
+fn bezier_axis(t: f32, a: f32, b: f32) -> f32 {
+    let u = 1.0 - t;
+    3.0 * u * u * t * a + 3.0 * u * t * t * b + t * t * t
+}
+
+fn bezier_axis_slope(t: f32, a: f32, b: f32) -> f32 {
+    let u = 1.0 - t;
+    3.0 * u * u * a + 6.0 * u * t * (b - a) + 3.0 * t * t * (1.0 - b)
 }
 
 /// lerp two colors in RGB space (not HSL — avoids hue wraparound between, say, red↔green).
@@ -301,11 +412,165 @@ fn tween_current_value(tw: &Tween, key: &str, now: Instant) -> Option<Value> {
     interpolate(&tw.from_json, &tw.to_json, key, ease(&tw.easing, raw))
 }
 
+/// Read a `_gpuiLoop` descriptor off a committed style and register (or drop) the node's
+/// repeating animations. Returns true if the node has any loop running afterwards.
+///
+/// The descriptor is one entry per animated key:
+///
+/// ```json
+/// "_gpuiLoop": [
+///   { "key": "opacity", "duration": 750, "offset": 0.333,
+///     "stops": [[0, 1], [0.45, 0.1], [0.92, 0.1], [1, 1]] }
+/// ]
+/// ```
+///
+/// A commit that declares the SAME animation leaves it running from its original start.
+/// That is what lets an ordinary re-render happen underneath a spinner without the
+/// spinner jumping back to the top of its cycle, which is the whole reason this is
+/// declarative rather than a per-frame style write.
+fn note_loops(global_id: u64, style_json: &Map<String, Value>) -> bool {
+    let declared = style_json.get("_gpuiLoop").and_then(|v| v.as_array());
+    let mut loops = GPUI_LOOPS.lock().unwrap();
+
+    let Some(declared) = declared else {
+        // a node that stopped declaring loops (or never did) keeps none. cheap: the map is
+        // empty in the common case, so this is a hash lookup miss per committed node.
+        if loops.is_empty() {
+            return false;
+        }
+        loops.retain(|(id, _), _| *id != global_id);
+        return false;
+    };
+
+    let now = Instant::now();
+    let mut live_keys: HashSet<String> = HashSet::new();
+    let mut any = false;
+
+    for entry in declared {
+        let Some(entry) = entry.as_object() else {
+            continue;
+        };
+        let Some(key) = entry.get("key").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !ANIMATABLE_KEYS.contains(&key) {
+            continue;
+        }
+        let Some(stops) = entry.get("stops").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        let mut parsed: Vec<(f32, Value)> = stops
+            .iter()
+            .filter_map(|stop| {
+                let pair = stop.as_array()?;
+                let at = pair.first()?.as_f64()? as f32;
+                Some((at.clamp(0.0, 1.0), pair.get(1)?.clone()))
+            })
+            .collect();
+        if parsed.len() < 2 {
+            continue;
+        }
+        parsed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let duration_ms = entry
+            .get("duration")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+            .max(1.0);
+        let offset = entry
+            .get("offset")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+            .rem_euclid(1.0) as f32;
+        let easing = entry
+            .get("easing")
+            .and_then(|v| v.as_str())
+            .unwrap_or("linear")
+            .to_string();
+        let next = KeyframeLoop {
+            stops: parsed,
+            duration: Duration::from_secs_f64(duration_ms / 1000.0),
+            offset,
+            easing,
+            start: now,
+        };
+        live_keys.insert(key.to_string());
+        any = true;
+        match loops.entry((global_id, key.to_string())) {
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                let existing = slot.get();
+                let unchanged = existing.duration == next.duration
+                    && existing.offset == next.offset
+                    && existing.easing == next.easing
+                    && existing.stops == next.stops;
+                if !unchanged {
+                    slot.insert(next);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(next);
+            }
+        }
+    }
+
+    // a key this node used to animate but no longer declares stops running.
+    loops.retain(|(id, key), _| *id != global_id || live_keys.contains(key));
+    any
+}
+
+/// the value a loop holds at `now`: the phase, walked into its stop list and interpolated
+/// between the bracketing pair.
+fn loop_value(lp: &KeyframeLoop, key: &str, now: Instant) -> Option<Value> {
+    let elapsed = now.saturating_duration_since(lp.start).as_secs_f32();
+    let phase = (elapsed / lp.duration.as_secs_f32() + lp.offset).rem_euclid(1.0);
+    let mut lower = &lp.stops[0];
+    let mut upper = lp.stops.last().unwrap();
+    for pair in lp.stops.windows(2) {
+        if phase >= pair[0].0 && phase <= pair[1].0 {
+            lower = &pair[0];
+            upper = &pair[1];
+            break;
+        }
+    }
+    let span = upper.0 - lower.0;
+    if span <= 0.0 {
+        return Some(lower.1.clone());
+    }
+    interpolate(
+        &lower.1,
+        &upper.1,
+        key,
+        ease(&lp.easing, (phase - lower.0) / span),
+    )
+}
+
+/// advance every repeating animation one tick, writing into the same overlay the tweens
+/// use so paint merges them identically.
+pub fn tick_loops() {
+    let now = Instant::now();
+    let mut ops: HashMap<u64, Map<String, Value>> = HashMap::new();
+    {
+        let loops = GPUI_LOOPS.lock().unwrap();
+        for ((id, key), lp) in loops.iter() {
+            if let Some(value) = loop_value(lp, key, now) {
+                ops.entry(*id).or_default().insert(key.clone(), value);
+            }
+        }
+    }
+    if !ops.is_empty() {
+        crate::anim_overlay::apply_ops(ops.into_iter().collect());
+    }
+}
+
+pub fn loops_active() -> bool {
+    !GPUI_LOOPS.lock().unwrap().is_empty()
+}
+
 /// detection entry, called once per committed node. diffs the committed animatable values
 /// against the prior commit and arms a tween for each changed key the transition names.
 /// returns true if any tween was armed. with no `_gpuiTransition` it just refreshes the
 /// stored prev values (so a later transition diffs against the right baseline).
 pub fn note_commit(global_id: u64, style_json: &Map<String, Value>) -> bool {
+    let looping = note_loops(global_id, style_json);
     let transition = style_json
         .get("_gpuiTransition")
         .and_then(|v| v.as_object());
@@ -317,7 +582,7 @@ pub fn note_commit(global_id: u64, style_json: &Map<String, Value>) -> bool {
         // node only starts transitioning from the first commit that carries
         // `_gpuiTransition`; not animating on that opt-in commit also matches CSS (a
         // property doesn't transition on the same commit that first sets `transition`).
-        return false;
+        return looping;
     };
 
     let TransitionDesc {
@@ -371,7 +636,7 @@ pub fn note_commit(global_id: u64, style_json: &Map<String, Value>) -> bool {
         }
     }
 
-    armed
+    armed || looping
 }
 
 /// emitter entry — the analog of `note_commit` for a zero-commit (avoidReRenders) driver
@@ -526,13 +791,32 @@ pub fn tick_tweens() -> bool {
     tweens_active()
 }
 
-pub fn tweens_active() -> bool {
+/// whether any TWEEN is mid-flight. distinct from `tweens_active` because a tween is
+/// what needs the driver running at full frame rate: it is a transition a hand started
+/// and is watching land.
+pub fn tweens_in_flight() -> bool {
     !GPUI_TWEENS.lock().unwrap().is_empty()
 }
 
-/// drop tween + prev-value state for ids no longer in the live tree.
+/// whether the driver loop has anything to tick. a repeating animation counts: unlike a
+/// tween it never settles, so the driver stays armed for as long as one is on screen.
+pub fn tweens_active() -> bool {
+    tweens_in_flight() || loops_active()
+}
+
+/// How often a repeating animation is worth advancing. A spinner is a few pixels of
+/// opacity, and pinning the whole window to the tween driver's frame rate to move it was
+/// paying a full repaint every 8ms for something nobody can see move that fast. The
+/// reference app runs its entire loader family off one 30fps tick for the same reason.
+pub const LOOP_TICK: Duration = Duration::from_millis(33);
+
+/// drop tween + loop + prev-value state for ids no longer in the live tree.
 pub fn retain(present: &HashSet<u64>) {
     GPUI_TWEENS
+        .lock()
+        .unwrap()
+        .retain(|(id, _), _| present.contains(id));
+    GPUI_LOOPS
         .lock()
         .unwrap()
         .retain(|(id, _), _| present.contains(id));
@@ -553,6 +837,125 @@ mod tests {
     fn reset() {
         GPUI_TWEENS.lock().unwrap().clear();
         PREV_APPLIED.lock().unwrap().clear();
+        GPUI_LOOPS.lock().unwrap().clear();
+    }
+
+    fn pulse_style(offset: f64) -> Map<String, Value> {
+        json!({
+            "opacity": 1.0,
+            "_gpuiLoop": [{
+                "key": "opacity",
+                "duration": 1000,
+                "offset": offset,
+                "stops": [[0.0, 1.0], [0.5, 0.0], [1.0, 1.0]],
+            }],
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    fn value_at(id: u64, key: &str, phase_secs: f32) -> f32 {
+        let loops = GPUI_LOOPS.lock().unwrap();
+        let lp = loops.get(&(id, key.to_string())).expect("loop registered");
+        let now = lp.start + Duration::from_secs_f32(phase_secs);
+        loop_value(lp, key, now).unwrap().as_f64().unwrap() as f32
+    }
+
+    #[test]
+    fn a_declared_loop_runs_forever_and_reads_its_stops() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        assert!(note_commit(700, &pulse_style(0.0)));
+        // a loop never settles, so the driver stays armed with no tween in flight.
+        assert!(GPUI_TWEENS.lock().unwrap().is_empty());
+        assert!(loops_active());
+        // 1000ms period, 1 → 0 → 1: quarter of the way down is halfway to zero.
+        assert!((value_at(700, "opacity", 0.0) - 1.0).abs() < 1e-3);
+        assert!((value_at(700, "opacity", 0.25) - 0.5).abs() < 1e-3);
+        assert!((value_at(700, "opacity", 0.5) - 0.0).abs() < 1e-3);
+        assert!((value_at(700, "opacity", 0.75) - 0.5).abs() < 1e-3);
+        // and it wraps rather than clamping at the end of the list.
+        assert!((value_at(700, "opacity", 2.25) - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn an_offset_starts_the_cycle_further_along() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        note_commit(701, &pulse_style(0.5));
+        // half a period of head start: at t=0 it is already at the trough.
+        assert!((value_at(701, "opacity", 0.0) - 0.0).abs() < 1e-3);
+        assert!((value_at(701, "opacity", 0.5) - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn re_declaring_the_same_loop_does_not_restart_it() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        note_commit(702, &pulse_style(0.0));
+        let first = GPUI_LOOPS
+            .lock()
+            .unwrap()
+            .get(&(702, "opacity".to_string()))
+            .unwrap()
+            .start;
+        std::thread::sleep(Duration::from_millis(5));
+        // an unrelated re-render commits the same style again. a spinner must not snap
+        // back to the top of its cycle every time React touches the row it sits in.
+        note_commit(702, &pulse_style(0.0));
+        let second = GPUI_LOOPS
+            .lock()
+            .unwrap()
+            .get(&(702, "opacity".to_string()))
+            .unwrap()
+            .start;
+        assert_eq!(first, second);
+        // but a DIFFERENT animation replaces it.
+        note_commit(702, &pulse_style(0.25));
+        assert_ne!(
+            GPUI_LOOPS
+                .lock()
+                .unwrap()
+                .get(&(702, "opacity".to_string()))
+                .unwrap()
+                .start,
+            second
+        );
+    }
+
+    #[test]
+    fn a_loop_stops_when_the_node_stops_declaring_it_or_leaves() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        note_commit(703, &pulse_style(0.0));
+        assert!(loops_active());
+        // the node re-commits without the descriptor (the session stopped working).
+        note_commit(703, json!({"opacity": 1.0}).as_object().unwrap());
+        assert!(!loops_active());
+        // and an unmounted node's loop is pruned with the rest of its state.
+        note_commit(704, &pulse_style(0.0));
+        assert!(loops_active());
+        retain(&HashSet::new());
+        assert!(!loops_active());
+    }
+
+    #[test]
+    fn ticking_a_loop_writes_into_the_shared_overlay() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        // half a period of head start, so the very first tick lands at the trough and the
+        // overlay's value is distinguishable from the committed 1.0.
+        note_commit(705, &pulse_style(0.5));
+        tick_loops();
+        let merged =
+            crate::anim_overlay::merged_element_style(705, &json!({"opacity": 1.0})).unwrap();
+        assert!(
+            merged.opacity.unwrap() < 0.05,
+            "overlay should carry the loop's value, got {:?}",
+            merged.opacity
+        );
+        crate::anim_overlay::retain(&HashSet::new());
     }
 
     #[test]
@@ -563,10 +966,88 @@ mod tests {
             "ease-in",
             "ease-out",
             "ease-in-out",
+            "cubic-bezier(0.16, 1, 0.3, 1)",
             "wat",
         ] {
             assert!(ease(name, 0.0).abs() < 1e-6, "{name} t=0");
             assert!((ease(name, 1.0) - 1.0).abs() < 1e-6, "{name} t=1");
+        }
+    }
+
+    #[test]
+    fn named_curves_match_their_css_definitions() {
+        // the four CSS names ARE cubic-beziers; spelling one out must give the same
+        // number as naming it.
+        for (name, spelled) in [
+            ("ease", "cubic-bezier(0.25, 0.1, 0.25, 1)"),
+            ("ease-in", "cubic-bezier(0.42, 0, 1, 1)"),
+            ("ease-out", "cubic-bezier(0, 0, 0.58, 1)"),
+            ("ease-in-out", "cubic-bezier(0.42, 0, 0.58, 1)"),
+        ] {
+            for step in 1..10 {
+                let t = step as f32 / 10.0;
+                let a = ease(name, t);
+                let b = ease(spelled, t);
+                assert!((a - b).abs() < 1e-4, "{name} @ {t}: {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn expo_out_front_loads_its_travel() {
+        // the reference entrance curve: most of the distance is covered early, which is
+        // what separates it from a symmetric ease.
+        let quarter = ease("cubic-bezier(0.16, 1, 0.3, 1)", 0.25);
+        assert!(quarter > 0.6, "expo-out at t=0.25 was {quarter}");
+        let symmetric = ease("ease-in-out", 0.25);
+        assert!(symmetric < 0.2, "ease-in-out at t=0.25 was {symmetric}");
+    }
+
+    #[test]
+    fn a_committed_curve_reaches_the_interpolated_value() {
+        let _g = TEST_LOCK.lock().unwrap();
+        reset();
+        // the whole path a design actually uses: a named easing on the JS transition
+        // descriptor, through key_config, into the value the renderer paints.
+        let transition = json!({
+            "keys": ["opacity"],
+            "byKey": {},
+            "default": {"duration": 400, "easing": "cubic-bezier(0.16, 1, 0.3, 1)"},
+            "delay": 0,
+        });
+        note_commit(
+            42,
+            json!({"opacity": 0.0, "_gpuiTransition": transition})
+                .as_object()
+                .unwrap(),
+        );
+        assert!(note_commit(
+            42,
+            json!({"opacity": 1.0, "_gpuiTransition": transition})
+                .as_object()
+                .unwrap()
+        ));
+
+        let tweens = GPUI_TWEENS.lock().unwrap();
+        let tween = tweens.get(&(42, "opacity".to_string())).expect("armed");
+        // a quarter of the way through a 400ms expo-out, most of the travel is done.
+        let quarter = tween.start + Duration::from_millis(100);
+        let value = tween_current_value(tween, "opacity", quarter)
+            .and_then(|v| v.as_f64())
+            .expect("a value mid-flight");
+        assert!(value > 0.6 && value < 1.0, "expo-out at 25% was {value}");
+    }
+
+    #[test]
+    fn a_malformed_curve_falls_back_instead_of_panicking() {
+        for name in [
+            "cubic-bezier(1, 2, 3)",
+            "cubic-bezier(a, b, c, d)",
+            "cubic-bezier(0, 0, 1, 1, 1)",
+            "cubic-bezier",
+        ] {
+            let mid = ease(name, 0.5);
+            assert!((0.0..=1.0).contains(&mid), "{name} gave {mid}");
         }
     }
 

@@ -71,10 +71,19 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 // commands compose into a real drag (ev.dragging() == true mid-scrub).
 static DEBUG_LEFT_HELD: AtomicBool = AtomicBool::new(false);
 
-// startup timing: process-start instant + a one-shot first-render marker. gated on
+// startup timing: process-start instant + a one-shot first-paint marker. gated on
 // RNGPUI_STARTUP_TIMING so it's silent in normal runs. used to drive cold start < 200ms.
 static STARTUP: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-static FIRST_RENDER_LOGGED: AtomicBool = AtomicBool::new(false);
+static FIRST_LAYOUT_LOGGED: AtomicBool = AtomicBool::new(false);
+static FIRST_PREPAINT_LOGGED: AtomicBool = AtomicBool::new(false);
+static FIRST_PAINT_LOGGED: AtomicBool = AtomicBool::new(false);
+/// The window now opens before the first tree exists, so "first paint complete"
+/// marks an EMPTY window and no longer answers "how long until the app is on
+/// screen". These two carry that: the pump sets `FIRST_TREE_APPLIED` when it
+/// installs the first real tree, and the next paint after that is the one worth
+/// timing. Cold-start budgets read `first content paint`, never `first paint`.
+static FIRST_TREE_APPLIED: AtomicBool = AtomicBool::new(false);
+static FIRST_CONTENT_PAINT_LOGGED: AtomicBool = AtomicBool::new(false);
 
 // RNGPUI_DISABLE_RENDER_GATE=1 forces the per-frame tree lifecycle to run EVERY render
 // (the pre-fix behavior), so the on-screen validator can A/B the freeze: gate-off = the
@@ -85,7 +94,7 @@ fn render_gate_disabled() -> bool {
     *RENDER_GATE_DISABLED.get_or_init(|| std::env::var_os("RNGPUI_DISABLE_RENDER_GATE").is_some())
 }
 
-fn startup_mark(label: &str) {
+pub(crate) fn startup_mark(label: &str) {
     if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some() {
         if let Some(t0) = STARTUP.get() {
             eprintln!(
@@ -453,6 +462,18 @@ fn parse_json_tree(
                             .and_then(crate::style::parse_css_color),
                         font_style: o
                             .get("fontStyle")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        background_color: o
+                            .get("backgroundColor")
+                            .and_then(|v| v.as_str())
+                            .and_then(crate::style::parse_css_color),
+                        background_radius: o
+                            .get("borderRadius")
+                            .and_then(|v| v.as_f64())
+                            .map(|v| v as f32),
+                        font_family: o
+                            .get("fontFamily")
                             .and_then(|v| v.as_str())
                             .map(String::from),
                     })
@@ -880,7 +901,13 @@ impl Element for FrameMarker {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
-        (self.child.request_layout(window, cx), ())
+        let layout = self.child.request_layout(window, cx);
+        if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some()
+            && !FIRST_LAYOUT_LOGGED.swap(true, Ordering::SeqCst)
+        {
+            startup_mark("first layout requested");
+        }
+        (layout, ())
     }
 
     fn prepaint(
@@ -894,6 +921,11 @@ impl Element for FrameMarker {
     ) {
         bridge::begin_layout_frame();
         self.child.prepaint(window, cx);
+        if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some()
+            && !FIRST_PREPAINT_LOGGED.swap(true, Ordering::SeqCst)
+        {
+            startup_mark("first prepaint complete");
+        }
     }
 
     fn paint(
@@ -907,9 +939,22 @@ impl Element for FrameMarker {
         cx: &mut App,
     ) {
         window.set_scene_content_epoch(self.content_epoch);
+        // stamp the animating-node generation this scene is painted against, before any node
+        // brackets itself for paint patching (crate::anim_overlay::opacity_ids_epoch).
+        window.set_paint_patch_epoch(crate::anim_overlay::opacity_ids_epoch());
         self.child.paint(window, cx);
         bridge::flush_layout_frame();
         let frame = anim_trace::on_frame_painted();
+        if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some() {
+            if !FIRST_PAINT_LOGGED.swap(true, Ordering::SeqCst) {
+                startup_mark("first paint complete");
+            }
+            if FIRST_TREE_APPLIED.load(Ordering::SeqCst)
+                && !FIRST_CONTENT_PAINT_LOGGED.swap(true, Ordering::SeqCst)
+            {
+                startup_mark("first content paint complete");
+            }
+        }
         if gpui::presentation_trace::is_active() {
             gpui::presentation_trace::mark_content(frame);
         }
@@ -1461,16 +1506,6 @@ impl Render for ServiceApp {
         hit_passthrough::set_input_grab(self.inspector.wants_input_grab());
         // flush the previous frame's stage breakdown + reset accumulators for this frame.
         frame_trace::begin_render(self.root_dirty);
-        if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some()
-            && !FIRST_RENDER_LOGGED.swap(true, Ordering::SeqCst)
-        {
-            if let Some(t0) = STARTUP.get() {
-                eprintln!(
-                    "[startup] first render +{:.1}ms",
-                    t0.elapsed().as_secs_f64() * 1000.0
-                );
-            }
-        }
         // The tree is applied (and a re-render scheduled) by the hermes JS thread's
         // foreground task in `main`, not polled here — rendering is fully on-demand: this
         // runs only on a new tree, input, scroll, or resize, so the app idles at ~0fps.
@@ -2149,6 +2184,14 @@ enum AppCommandMenuItem {
 pub(crate) enum Incoming {
     Quit,
     Tree(Arc<ReactElement>),
+    /// The window's size, sent by `createRoot` before React renders. This is what
+    /// startup blocks on: it arrives as the bundle finishes evaluating, roughly a
+    /// render ahead of the first tree, so GPUI/Metal window creation overlaps that
+    /// render rather than queueing behind it.
+    WindowSize {
+        width: f32,
+        height: f32,
+    },
     /// reanimated per-frame style overrides, coalesced to one host crossing per rAF
     /// tick. Applied to the `anim_overlay` map + `cx.notify()` WITHOUT rebuilding
     /// `root` — the off-thread-reanimated fast path.
@@ -2180,6 +2223,11 @@ pub(crate) enum Incoming {
     },
     ScrollToEnd {
         id: u64,
+    },
+    /// Repaint the app background tint (the layer `RNGPUI_APP_TINT` seeds at launch).
+    /// `None` restores raw glass.
+    AppTint {
+        color: Option<gpui::Hsla>,
     },
     TerminalSession {
         id: u64,
@@ -2484,6 +2532,11 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
                 }),
                 _ => None,
             },
+            "windowSize" => {
+                let width = v.get("width").and_then(|x| x.as_f64())? as f32;
+                let height = v.get("height").and_then(|x| x.as_f64())? as f32;
+                Some(Incoming::WindowSize { width, height })
+            }
             "reload" => id.map(|id| Incoming::Reload { id }),
             "inspector" => Some(Incoming::Inspector {
                 enabled: v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true),
@@ -2553,6 +2606,15 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
                 critical: v.get("critical").and_then(|x| x.as_bool()).unwrap_or(false),
             }),
             "openWindow" => Some(Incoming::OpenWindow),
+            // An absent/unparseable color clears the tint back to raw glass, which is
+            // also what the app wants when it has no opinion — so this deliberately
+            // does NOT reject the command on a bad color.
+            "appTint" => Some(Incoming::AppTint {
+                color: v
+                    .get("color")
+                    .and_then(|x| x.as_str())
+                    .and_then(crate::style::parse_css_color),
+            }),
             _ => None,
         };
     }
@@ -2974,6 +3036,46 @@ fn main() {
             })
             .detach();
         }
+        // App-supplied fonts. gpui resolves `font_family` against system-installed
+        // faces, so a bundled typeface is invisible to it until its bytes are handed
+        // to the text system. This is the app's call, not the library's: RNGPUI_FONT_DIR
+        // names a directory and every .ttf/.otf in it is registered under whatever
+        // family name the file itself declares, so `fontFamily: "Geist"` then resolves
+        // without the user having installed anything.
+        if let Some(dir) = std::env::var_os("RNGPUI_FONT_DIR") {
+            let mut fonts = Vec::new();
+            match std::fs::read_dir(&dir) {
+                Ok(entries) => {
+                    // sorted so a directory of faces registers in a stable order and a
+                    // family's weights never depend on filesystem enumeration order.
+                    let mut paths: Vec<_> = entries
+                        .flatten()
+                        .map(|e| e.path())
+                        .filter(|p| {
+                            matches!(
+                                p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(),
+                                Some("ttf") | Some("otf")
+                            )
+                        })
+                        .collect();
+                    paths.sort();
+                    for path in paths {
+                        match std::fs::read(&path) {
+                            Ok(bytes) => fonts.push(std::borrow::Cow::Owned(bytes)),
+                            Err(err) => eprintln!("[rngpui] font read failed {}: {err}", path.display()),
+                        }
+                    }
+                }
+                Err(err) => eprintln!("[rngpui] RNGPUI_FONT_DIR unreadable {:?}: {err}", dir),
+            }
+            if !fonts.is_empty() {
+                let count = fonts.len();
+                match cx.text_system().add_fonts(fonts) {
+                    Ok(()) => startup_mark("fonts registered"),
+                    Err(err) => eprintln!("[rngpui] add_fonts failed for {count} file(s): {err}"),
+                }
+            }
+        }
         // sets up gpui-component's theme + the input key bindings (backspace,
         // arrows, select-all, copy/paste, word-motion, …) used by InputState.
         gpui_component::init(cx);
@@ -3006,25 +3108,37 @@ fn main() {
         })
         .detach();
 
-        // await the first tree HERE (after the tree-independent GPUI init above, which
-        // overlapped the JS eval). it bootstraps the window size + initial content.
-        startup_mark("awaiting first tree");
-        let initial = loop {
+        // Await the SIZE here, not the first tree.
+        //
+        // `createRoot` sends `windowSize` before React renders anything, so this
+        // unblocks as the bundle finishes evaluating — about one full render ahead
+        // of the first tree. Everything below (anchoring, ~36ms of GPUI/Metal window
+        // creation) therefore runs *while* React renders, instead of after it. The
+        // window opens empty and the pump fills it with the first tree, which is the
+        // same path every later commit takes.
+        //
+        // Blocking on the tree was the older shape and it bought nothing: the root's
+        // declared width/height IS this value, handed to the reconciler by the very
+        // same call, so the wait only delayed a number JS already knew.
+        startup_mark("awaiting window size");
+        // Anything that arrives before the size is HELD, never dropped. React commits
+        // its first tree during the same bundle evaluation that sends the size, so on
+        // a loaded machine that tree is already sitting in the channel when this loop
+        // runs. Discarding it left the window permanently empty for any app whose
+        // first commit is also its last.
+        let mut startup_backlog: Vec<Incoming> = Vec::new();
+        let (win_w, win_h) = loop {
             match tree_rx.recv() {
-                Ok(Incoming::Tree(t)) => break t,
+                Ok(Incoming::WindowSize { width, height }) => break (width, height),
                 Ok(Incoming::Quit) => {
                     cx.quit();
                     return;
                 }
-                Ok(_) => continue,
-                Err(_) => break fallback_root(),
+                Ok(other) => startup_backlog.push(other),
+                Err(_) => break (1180.0, 760.0),
             }
         };
-        startup_mark("first tree received");
-        // window opens at the root's declared width/height (RNGPUI_WINDOW_SIZE overrides);
-        // after that it fills.
-        let win_w = initial.style.width.and_then(Dim::as_px).unwrap_or(720.0);
-        let win_h = initial.style.height.and_then(Dim::as_px).unwrap_or(800.0);
+        startup_mark("window size received");
         let (win_w, win_h) = parse_point_env("RNGPUI_WINDOW_SIZE")
             .map(|p| (f32::from(p.x), f32::from(p.y)))
             .unwrap_or((win_w, win_h));
@@ -3035,7 +3149,7 @@ fn main() {
         } else {
             anchored_window_origin(win_w, win_h, cx).unwrap_or(window_origin)
         };
-        let app_root = fill_root(initial);
+        let app_root = fill_root(fallback_root());
         let tree_metadata = TreeMetadata::collect(&app_root);
         tree_metadata.retain_native_state();
         bridge::ready(win_w, win_h);
@@ -3310,8 +3424,13 @@ fn main() {
         // from starving native scroll presentation with obsolete intermediate trees.
         cx.spawn(async move |cx| {
             let mut pending_msg = None;
+            // whatever arrived while startup was waiting for the window size, in the
+            // order it arrived, ahead of anything the channel delivers from here.
+            let mut startup_backlog = startup_backlog.into_iter();
             loop {
                 let msg = if let Some(msg) = pending_msg.take() {
+                    msg
+                } else if let Some(msg) = startup_backlog.next() {
                     msg
                 } else {
                     let Ok(msg) = tree_rx.recv_async().await else {
@@ -4466,6 +4585,21 @@ fn main() {
                     Incoming::DockBadge { label } => {
                         dock::set_badge(&label);
                     }
+                    Incoming::AppTint { color } => {
+                        // needs the real NSWindow, so it takes the window-access route
+                        // rather than the pump branch below.
+                        #[cfg(target_os = "macos")]
+                        if window_handle
+                            .update(cx, |_root, window, _cx| {
+                                liquid_glass::set_app_tint(window, color);
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        let _ = color;
+                    }
                     Incoming::RequestAttention { critical } => {
                         dock::request_attention(critical);
                     }
@@ -4528,6 +4662,10 @@ fn main() {
                         let mut drive_native_layout_animation = false;
                         let mut drive_gpui_tweens = false;
                         let applied = pump.update(cx, |this, cx| match msg {
+                            // consumed by the startup wait before this pump exists;
+                            // the window owns its size from here on, and a second one
+                            // would fight the user's own resize.
+                            Incoming::WindowSize { .. } => {}
                             Incoming::Tree(t) => {
                                 let apply_t0 = std::time::Instant::now();
                                 let next_root = fill_root(t);
@@ -4579,6 +4717,7 @@ fn main() {
                                 this.root_lifecycle_dirty |= lifecycle_changed;
                                 this.tree_metadata = next_metadata;
                                 this.root = next_root;
+                                FIRST_TREE_APPLIED.store(true, Ordering::SeqCst);
                                 crate::anim_overlay::mark_content_mutation();
                                 this.root_dirty = true;
                                 this.write_debug_dump(cx);
@@ -4716,6 +4855,9 @@ fn main() {
                                     "frameCount": presentation.as_ref().map(|value| value.frame_count).unwrap_or(0),
                                     "paintCount": presentation.as_ref().map(|value| value.paint_count).unwrap_or(0),
                                 }));
+                            }
+                            Incoming::AppTint { .. } => {
+                                unreachable!("app tint is handled with window access")
                             }
                             Incoming::DebugTap { .. } => {
                                 unreachable!("debug tap is handled with window access")
@@ -4910,12 +5052,72 @@ fn main() {
                             let pump = pump.clone();
                             let active = gpui_tween_driver_active.clone();
                             cx.spawn(async move |cx| {
+                                let paint_patch_trace =
+                                    std::env::var_os("RNGPUI_PAINT_PATCH_TRACE").is_some();
+                                let paint_patch_verify =
+                                    std::env::var_os("RNGPUI_PAINT_PATCH_VERIFY").is_some();
+                                // the A/B escape hatch, mirroring RNGPUI_DISABLE_RETAINED_LAYOUT:
+                                // forces every animation tick back through the full draw, which
+                                // is how the before/after cost of this path gets measured.
+                                let paint_patch_disabled =
+                                    std::env::var_os("RNGPUI_DISABLE_PAINT_PATCH").is_some();
                                 'driver: loop {
                                     while crate::anim_overlay_tween::tweens_active() {
-                                        cx.background_executor()
-                                            .timer(Duration::from_millis(8))
-                                            .await;
+                                        // a tween in flight is a transition someone is
+                                        // watching land, so it gets every frame. a
+                                        // repeating `_gpuiLoop` on its own does not: it
+                                        // would otherwise hold the window at 125fps for
+                                        // as long as one spinner is on screen.
+                                        let interval =
+                                            if crate::anim_overlay_tween::tweens_in_flight() {
+                                                Duration::from_millis(8)
+                                            } else {
+                                                crate::anim_overlay_tween::LOOP_TICK
+                                            };
+                                        cx.background_executor().timer(interval).await;
                                         crate::anim_overlay_tween::tick_tweens();
+                                        // repeating animations ride the same driver: one
+                                        // timer for every animation the renderer owns,
+                                        // one overlay for their results.
+                                        crate::anim_overlay_tween::tick_loops();
+                                        // paint patch: when the only thing that moved is
+                                        // opacity on nodes the last draw recorded, rewrite
+                                        // those primitives and present. gpui is immediate
+                                        // mode, so the alternative — `refresh()` — rebuilds,
+                                        // re-solves and repaints EVERY node in the window,
+                                        // which is why a single spinner used to hold the
+                                        // whole window at a full redraw ~20 times a second
+                                        // for as long as it was on screen. The patch is
+                                        // O(animating nodes) instead of O(tree), and the
+                                        // compositor's damage pass then repairs only the
+                                        // pixels that changed. Anything else this tick — a
+                                        // colour, a transform, a node with no recording —
+                                        // returns false and falls through to the draw.
+                                        let batch = crate::anim_overlay::take_paint_patch_batch()
+                                            .filter(|_| !paint_patch_disabled);
+                                        let nodes = batch.as_ref().map_or(0, |moves| moves.len());
+                                        let patched = batch.is_some_and(|moves| {
+                                            window_handle
+                                                .update(cx, |_root, window, _cx| {
+                                                    window.patch_paint_opacities(
+                                                        &moves,
+                                                        crate::anim_overlay::mutation_epoch(),
+                                                        crate::anim_overlay::opacity_ids_epoch(),
+                                                    )
+                                                })
+                                                .unwrap_or(false)
+                                        });
+                                        if paint_patch_trace {
+                                            eprintln!(
+                                                "[paint-patch] patched={patched} nodes={nodes}"
+                                            );
+                                        }
+                                        // verify mode deliberately falls through to the full
+                                        // draw even on success: the draw is what compares
+                                        // itself against the patch it just replaced.
+                                        if patched && !paint_patch_verify {
+                                            continue;
+                                        }
                                         if pump.update(cx, |_this, cx| cx.notify()).is_err() {
                                             break 'driver;
                                         }

@@ -18,6 +18,7 @@ use core_graphics::{
     color_space::CGColorSpace,
     context::{CGContext, CGTextDrawingMode},
     display::CGPoint,
+    geometry::CGAffineTransform,
 };
 use core_text::{
     font::CTFont,
@@ -67,9 +68,23 @@ struct MacTextSystemState {
     font_ids_by_postscript_name: HashMap<String, FontId>,
     font_ids_by_font_key: HashMap<FontKey, SmallVec<[FontId; 4]>>,
     postscript_names_by_font_id: HashMap<FontId, String>,
+    /// Parallel to `fonts`: this FontId is a synthesized-oblique view of a face that
+    /// has no real italic. See `oblique_variant`.
+    synthetic_oblique: Vec<bool>,
+    /// upright FontId → its synthesized-oblique FontId, so one variant is allocated
+    /// per face rather than one per resolution.
+    oblique_variants: HashMap<FontId, FontId>,
+    /// the inverse: synthesized-oblique FontId → the real face it was cloned from.
+    oblique_bases: HashMap<FontId, FontId>,
     /// UTF-16 indices of ZWNJS
     zwnjs_scratch_space: Vec<usize>,
 }
+
+/// Shear applied when synthesizing an oblique face, as tan(angle). 12° matches what
+/// browsers use for CSS `font-style: italic` on a family with no italic face, which
+/// is the behavior being matched — the same React tree renders on web with the same
+/// Geist family, and Geist ships no italic.
+const SYNTHETIC_OBLIQUE_SKEW: f32 = 0.2126;
 
 impl MacTextSystem {
     pub(crate) fn new() -> Self {
@@ -81,6 +96,9 @@ impl MacTextSystem {
             font_ids_by_postscript_name: HashMap::default(),
             font_ids_by_font_key: HashMap::default(),
             postscript_names_by_font_id: HashMap::default(),
+            synthetic_oblique: Vec::new(),
+            oblique_variants: HashMap::default(),
+            oblique_bases: HashMap::default(),
             zwnjs_scratch_space: Vec::new(),
         }))
     }
@@ -146,7 +164,15 @@ impl PlatformTextSystem for MacTextSystem {
                 },
             )?;
 
-            let font_id = candidates[ix];
+            let mut font_id = candidates[ix];
+            // The family had no face for the requested slant, so `find_best_match`
+            // handed back an upright one. Synthesize the oblique rather than render
+            // the request upright and silently wrong.
+            if font.style != FontStyle::Normal
+                && lock.fonts[font_id.0].properties().style == FontkitStyle::Normal
+            {
+                font_id = lock.oblique_variant(font_id);
+            }
             lock.font_selections.insert(font.clone(), font_id);
             Ok(font_id)
         }
@@ -289,8 +315,41 @@ impl MacTextSystemState {
             self.postscript_names_by_font_id
                 .insert(font_id, postscript_name);
             self.fonts.push(font);
+            self.synthetic_oblique.push(false);
         }
         Ok(font_ids)
+    }
+
+    /// A FontId that renders `font_id`'s glyphs sheared, for a family that has no
+    /// real italic face. font-kit's `find_best_match` answers a request for italic
+    /// with the upright face when the family has none, and gpui then renders upright
+    /// text — a browser instead synthesizes an oblique. This allocates a distinct
+    /// FontId for the sheared view so the glyph raster cache (keyed by FontId) keeps
+    /// the two apart, and so shaping still runs against the upright face: synthetic
+    /// oblique does not change advances, only the rasterized outline.
+    fn oblique_variant(&mut self, font_id: FontId) -> FontId {
+        if let Some(existing) = self.oblique_variants.get(&font_id) {
+            return *existing;
+        }
+        let variant = FontId(self.fonts.len());
+        self.fonts.push(self.fonts[font_id.0].clone());
+        self.synthetic_oblique.push(true);
+        if let Some(name) = self.postscript_names_by_font_id.get(&font_id).cloned() {
+            // deliberately NOT registered in font_ids_by_postscript_name: that map is a
+            // name→id lookup and must keep resolving to the real upright face.
+            self.postscript_names_by_font_id.insert(variant, name);
+        }
+        self.oblique_variants.insert(font_id, variant);
+        self.oblique_bases.insert(variant, font_id);
+        variant
+    }
+
+    /// The real face behind a FontId, collapsing a synthesized-oblique variant onto
+    /// the face it was cloned from. Two ids that share a face also share a CTFont, so
+    /// anything reasoning about CoreText's view of the text (ligature breaks) has to
+    /// compare faces, not ids.
+    fn face_id(&self, font_id: FontId) -> FontId {
+        self.oblique_bases.get(&font_id).copied().unwrap_or(font_id)
     }
 
     fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
@@ -315,6 +374,7 @@ impl MacTextSystemState {
                 .push(font_kit::font::Font::from_core_graphics_font(
                     requested_font.copy_to_CGFont(),
                 ));
+            self.synthetic_oblique.push(false);
             font_id
         }
     }
@@ -329,7 +389,21 @@ impl MacTextSystemState {
 
     fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
         let font = &self.fonts[params.font_id.0];
-        let scale = Transform2F::from_scale(params.scale_factor);
+        let mut scale = Transform2F::from_scale(params.scale_factor);
+        if self.synthetic_oblique[params.font_id.0] {
+            // Must cover the same ink `rasterize_glyph` draws, or the sheared glyph
+            // falls outside the bitmap these bounds size and gets clipped.
+            //
+            // The skew is NEGATED here. font-kit's raster_bounds flips the glyph box
+            // into an origin-top-left, y-DOWN space before applying this transform, so
+            // ink above the baseline has negative y — and `x += skew*y` would lean it
+            // left, sizing the box on the wrong side. Drawing happens in CoreGraphics'
+            // y-UP space, where the sign is positive. Getting this wrong clips exactly
+            // the tallest, furthest-leaning ink: the dot of an `i` was cut off while the
+            // rest of the word looked fine.
+            scale =
+                scale * Transform2F::row_major(1.0, -SYNTHETIC_OBLIQUE_SKEW, 0.0, 1.0, 0.0, 0.0);
+        }
         Ok(font
             .raster_bounds(
                 params.glyph_id.0,
@@ -395,6 +469,18 @@ impl MacTextSystemState {
                 params.scale_factor as CGFloat,
                 params.scale_factor as CGFloat,
             );
+            if self.synthetic_oblique[params.font_id.0] {
+                // shear about the baseline, in the same y-up space raster_bounds used:
+                // x' = x + skew*y, so the glyph leans right above the baseline.
+                cx.concat_ctm(CGAffineTransform::new(
+                    1.0,
+                    0.0,
+                    SYNTHETIC_OBLIQUE_SKEW as CGFloat,
+                    1.0,
+                    0.0,
+                    0.0,
+                ));
+            }
 
             let subpixel_shift = params
                 .subpixel_variant
@@ -441,14 +527,33 @@ impl MacTextSystemState {
         let mut max_ascent = 0.0f32;
         let mut max_descent = 0.0f32;
 
+        // UTF-8 ranges that asked for a synthesized oblique. CoreText shapes these with
+        // the upright face — the variant is a clone of it and reports the same
+        // postscript name — so the shaped runs come back tagged with the upright FontId
+        // and the shear would never be applied. The ranges let the glyph loop below put
+        // the variant id back.
+        let mut oblique_ranges: Vec<(usize, usize, FontId)> = Vec::new();
+        {
+            let mut ix = 0usize;
+            for run in font_runs {
+                if self.synthetic_oblique[run.font_id.0] {
+                    oblique_ranges.push((ix, ix + run.len, run.font_id));
+                }
+                ix += run.len;
+            }
+        }
+
         {
             let mut ix_converter = StringIndexConverter::new(&text);
             let mut last_font_run = None;
             for run in font_runs {
                 let text = &text[ix_converter.utf8_ix..][..run.len];
                 // if the fonts are the same, we need to disconnect the text with a ZWNJ
-                // to prevent core text from forming ligatures between them
-                let needs_zwnj = last_font_run.replace(run.font_id) == Some(run.font_id);
+                // to prevent core text from forming ligatures between them. Compare the
+                // FACE, not the id: an upright run next to its own synthesized oblique
+                // carries the same CTFont and would otherwise ligate across the boundary.
+                let face = self.face_id(run.font_id);
+                let needs_zwnj = last_font_run.replace(face) == Some(face);
 
                 let utf16_start = string.char_len(); // insert at end of string
                 ix_converter.advance_to_utf8_ix(ix_converter.utf8_ix + run.len);
@@ -495,18 +600,9 @@ impl MacTextSystemState {
                     .downcast::<CTFont>()
                     .unwrap()
             };
-            let font_id = self.id_for_native_font(font);
+            let shaped_font_id = self.id_for_native_font(font);
+            let glyph_capacity: usize = run.glyph_count().try_into().unwrap_or(0);
 
-            let mut glyphs = match runs.last_mut() {
-                Some(run) if run.font_id == font_id => &mut run.glyphs,
-                _ => {
-                    runs.push(ShapedRun {
-                        font_id,
-                        glyphs: Vec::with_capacity(run.glyph_count().try_into().unwrap_or(0)),
-                    });
-                    &mut runs.last_mut().unwrap().glyphs
-                }
-            };
             for ((&glyph_id, position), &glyph_utf16_ix) in run
                 .glyphs()
                 .iter()
@@ -528,10 +624,27 @@ impl MacTextSystemState {
                     ix_converter = StringIndexConverter::new(text);
                 }
                 ix_converter.advance_to_utf16_ix(glyph_utf16_ix);
+                let utf8_ix = ix_converter.utf8_ix;
+                // put the synthesized-oblique id back on the glyphs whose source range
+                // requested it, so rasterization applies the shear.
+                let font_id = oblique_ranges
+                    .iter()
+                    .find(|(start, end, _)| utf8_ix >= *start && utf8_ix < *end)
+                    .map_or(shaped_font_id, |&(_, _, oblique)| oblique);
+                let glyphs = match runs.last_mut() {
+                    Some(run) if run.font_id == font_id => &mut run.glyphs,
+                    _ => {
+                        runs.push(ShapedRun {
+                            font_id,
+                            glyphs: Vec::with_capacity(glyph_capacity),
+                        });
+                        &mut runs.last_mut().unwrap().glyphs
+                    }
+                };
                 glyphs.push(ShapedGlyph {
                     id: GlyphId(glyph_id as u32),
                     position: point(position.x as f32, position.y as f32).map(px),
-                    index: ix_converter.utf8_ix,
+                    index: utf8_ix,
                     is_emoji: self.is_emoji(font_id),
                 });
             }

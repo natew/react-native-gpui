@@ -484,6 +484,7 @@ impl TextStyle {
             },
             color: self.color,
             background_color: self.background_color,
+            background_radius: None,
             underline: self.underline,
             strikethrough: self.strikethrough,
         }

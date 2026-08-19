@@ -13,7 +13,7 @@ import Reconciler, {
     type Container,
     type ReconcilerCommitDiagnostics,
 } from "./reconciler";
-import { setEventBatcher, startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type SerializedNode } from "./runtime";
+import { sendHostCommand, setEventBatcher, startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type SerializedNode } from "./runtime";
 import { toWireDelta, type BigFieldCache, type WireDeltaStats } from "./wire-delta";
 
 // coalesced event batches (resize/layout/scroll floods) dispatch inside one React update so
@@ -59,6 +59,17 @@ export function createRoot(options: RootOptions = {}): Root {
         height: options.height ?? win.height,
         children: [],
     };
+
+    // Tell the host the window size NOW, before React renders anything.
+    //
+    // The host cannot create its window until it knows how big to make it, and
+    // that size used to reach it only as the root node's declared width/height on
+    // the first committed tree. So window creation — GPUI/Metal init, ~36ms — sat
+    // strictly after the first render instead of overlapping it, for a value that
+    // was fully known the moment this function ran. Announcing it here lets the
+    // host open the window while React is still rendering, and the first tree then
+    // fills a window that already exists.
+    sendHostCommand({ $cmd: "windowSize", width: container.width, height: container.height });
 
     let bridge: Bridge | null = null;
     let lastTree: SerializedNode | null = null;

@@ -90,6 +90,57 @@ objc = "0.2"
 #    shadow bleed through the now-translucent background — the "shadow underneath"
 #    artifact. The shadow fragment shaders now cut out the element's own rounded rect
 #    via `quad_sdf` on the new `occluder_bounds` field.
+#
+# 5. Synthetic oblique for families with no italic face (src/platform/mac/text_system.rs).
+#    Upstream asks font-kit's `find_best_match` for an italic and, when the family has
+#    none, silently gets the upright face back and renders upright — so `fontStyle:
+#    "italic"` was a no-op for our bundled Geist, which ships no italic. A browser
+#    instead synthesizes an oblique, and web is the parity oracle here: the same React
+#    tree renders on web with the same Geist. Measured in headless Chrome, Geist +
+#    `font-style: italic` diverges 0.3263 from upright, and adding `font-synthesis:
+#    none` drops that to exactly 0.0000 — i.e. stock gpui behaved as `font-synthesis:
+#    none`. `MacTextSystemState::oblique_variant` allocates a distinct FontId per face
+#    that shares the face's CTFont, and the raster paths shear by tan(12°). Shaping
+#    still runs against the upright face, which is correct: synthetic oblique does not
+#    change advances. Because CoreText hands shaped runs back tagged by postscript name,
+#    and the variant shares one, `layout_line` re-tags glyphs from the requested byte
+#    ranges. Pinned by `ts/scripts/inline-run-style-conformance.mjs`.
+#
+# 6. Corner radius on a text run's background (`TextRun.background_radius` +
+#    `DecorationRun.background_radius`, painted in src/text_system/line.rs).
+#    Upstream paints a run background with `fill(bounds, color)`, a quad with no
+#    corner radii, so an inline code span could only ever be a hard-edged block
+#    while the design calls for a rounded plate. The three paint sites now carry
+#    the radius through. Note what this does NOT add: a run background is exactly
+#    the width of the run's glyph advances, so PADDING remains impossible — it
+#    would have to move the surrounding glyphs, which are already shaped. Per-run
+#    font size is likewise impossible, since `layout_line` takes one size for the
+#    whole line. Do not reopen either; emulating them with a positioned element
+#    behind the text desynchronizes on every reflow. A background that wraps is
+#    painted one quad per line fragment and each fragment is rounded.
+#
+# 7. Glyph coverage contrast + gamma correction on mac (src/platform/mac/shaders.metal
+#    `apply_contrast_and_gamma_correction`, plumbed from `TextGammaParams` in
+#    src/platform/mac/metal_renderer.rs). gpui already HAS this, but only on the blade
+#    backend (src/platform/blade/shaders.wgsl `fs_mono_sprite` calls it; the mac glyph
+#    fragment was a bare `color.a *= sample.a`). The mac mask is raw CoreGraphics
+#    coverage (kCGImageAlphaOnly, and the rasterizer never enables font smoothing) and
+#    the drawable is BGRA8Unorm rather than BGRA8Unorm_sRGB, so the blend unit operates
+#    on sRGB-ENCODED values as if they were linear. For #111 text on white that puts a
+#    0.8-coverage pixel at 65 where a gamma-correct blend puts it at ~126, which is why
+#    our glyphs concentrate ink into fewer, darker pixels than the browser reference
+#    (measured on one body line: reference 1621 inked / 131 solid, ours 1394 inked /
+#    503 solid, advances matching within 0.5%).
+#
+#    DEFAULT OFF, and off is bit-exact rather than branched: `RNGPUI_TEXT_GAMMA`
+#    defaults to 1.0, whose ratio row is all zeros, and `RNGPUI_TEXT_ENHANCED_CONTRAST`
+#    defaults to 0.0, which makes `enhance_contrast` return its input. The shader math
+#    reduces to `a + a * (1 - a) * 0 == a`, so no capture or conformance baseline moves
+#    until someone sets the vars. (Upstream blade defaults to 1.8 / 1.0; we deliberately
+#    do not, because adopting the look is a visual decision that is not ours to make.)
+#    Deliberately NOT taken: flipping the layer to BGRA8Unorm_sRGB. That is one line and
+#    it fixes the same math, but it changes every quad, shadow and opacity blend in the
+#    app and would invalidate the opacity and occlusion baselines.
 [patch.crates-io]
 gpui = { path = "vendor/gpui-0.2.2-patched" }
 # Patched gpui-component 0.5.1 (vendored alongside gpui, same precedent). Divergences
@@ -109,3 +160,20 @@ gpui = { path = "vendor/gpui-0.2.2-patched" }
 # The patch also applies to nothing else (gpui-component is only used for Input here).
 gpui-component = { path = "vendor/gpui-component-0.5.1-patched" }
 gpui-component-macros = { path = "vendor/gpui-component-macros-0.5.1-patched" }
+# Patched taffy 0.9.0 (the layout engine gpui solves with; gpui pins `=0.9.0`).
+# One divergence, in src/compute/flexbox.rs `determine_container_main_size`:
+#
+# 1. The max-content flex fraction is divided by `max(1, shrink * basis)` and then
+#    multiplied back by `max(1, shrink) * basis`. The multiply is meant to invert the
+#    divide — taffy skips the spec's line-max-fraction step, so an item's contribution
+#    should come back out as its own outer contribution — but the two floor different
+#    things. They agree only when `shrink * basis >= 1`, which the web default
+#    `flex-shrink: 1` always satisfies. React Native defaults to `flexShrink: 0`, so in
+#    an RN tree every item takes the broken path and the factor becomes the item's whole
+#    flex basis. It only shows when the contribution is BELOW the basis, i.e. a negative
+#    margin: `width: 15, marginLeft: -1, flexShrink: 0` contributes -15 to a content-sized
+#    parent instead of 14, so the parent lays out 29px narrower than its own children and
+#    clips them. Reproduced against stock taffy 0.9.0 AND 0.13.0; not an rngpui-only
+#    behavior, and worth reporting upstream.
+#    Guard: `ts/examples/negative-margin-conformance.tsx`.
+taffy = { path = "vendor/taffy-0.9.0-patched" }

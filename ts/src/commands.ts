@@ -38,6 +38,9 @@ export type AppCommandConfig = {
 };
 
 export type Command =
+    // sent once by createRoot, before the first render, so the host can open its
+    // window concurrently with that render instead of after it.
+    | { $cmd: "windowSize"; width: number; height: number }
     | { $cmd: "eval"; id: number; js: string }
     | { $cmd: "reload"; id: number }
     | { $cmd: "scrollTo"; id: number; x?: number; y?: number }
@@ -64,6 +67,7 @@ export type Command =
     | { $cmd: "dockBadge"; label: string }
     | { $cmd: "requestAttention"; critical?: boolean }
     | { $cmd: "openWindow" }
+    | { $cmd: "appTint"; color: string | null }
     | {
           $cmd: "nativeContextMenu";
           x: number;
@@ -157,6 +161,19 @@ export const Dock = {
 export const NativeWindow = {
     open() {
         sendCommand({ $cmd: "openWindow" });
+    },
+
+    // Tint the app background: the bottom-most layer of the window, BELOW the glass
+    // blur, the Metal chrome, the WebView underlay, and every drop shadow. That is
+    // what makes it the right way to give translucent chrome a tone — an opaque fill
+    // on a chrome element sits above the stage's shadow gutter and clips the shadow.
+    //
+    // Pass a translucent color to keep the desktop blur reading through (a frost), an
+    // opaque one for a solid shell, or null for raw glass. Themed apps should call
+    // this whenever the color scheme changes; the RNGPUI_APP_TINT env var seeds the
+    // same layer at launch but is read once and cannot follow a theme.
+    setTint(color: string | null) {
+        sendCommand({ $cmd: "appTint", color });
     },
 };
 

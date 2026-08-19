@@ -2715,8 +2715,18 @@ impl Element for ReactDivElement {
             l: 0.0,
             a: 0.0,
         });
+        // paint-patch recording: a node whose opacity is animating gets the span of scene
+        // operations it produces recorded, so the next tick of that animation can rewrite
+        // them and present without rebuilding the tree (rust/src/service.rs, the tween
+        // driver). Only animating nodes are bracketed: a recording clones the operations and
+        // a node's span covers its whole subtree, so bracketing every node would be
+        // quadratic. `element_opacity` is what the patch scales relative to, so a node whose
+        // opacity animates from an unset base records 1.0.
+        let patch_key = crate::anim_overlay::has_opacity_overlay(self.element.global_id)
+            .then_some(self.element.global_id);
         window.with_element_transform(element_transform, |window| {
             window.with_element_opacity(element_opacity, |window| {
+                let patch_start = patch_key.map(|_| window.begin_paint_patch());
                 if let Some(radius) = backdrop_blur_radius {
                     let corner_radii = style
                         .corner_radii
@@ -2789,6 +2799,9 @@ impl Element for ReactDivElement {
                     let strip_bounds =
                         gpui::Bounds::new(bounds.origin, gpui::size(bounds.size.width, h));
                     window.paint_fade(strip_bounds, 0.0);
+                }
+                if let (Some(key), Some(start)) = (patch_key, patch_start) {
+                    window.end_paint_patch(key, start, element_opacity.unwrap_or(1.0));
                 }
             });
         });

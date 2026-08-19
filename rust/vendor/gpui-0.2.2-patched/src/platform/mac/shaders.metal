@@ -652,6 +652,55 @@ fragment float4 underline_fragment(UnderlineFragmentInput input [[stage_in]],
   }
 }
 
+// Glyph coverage correction, ported from the blade backend (platform/blade/
+// shaders.wgsl `apply_contrast_and_gamma_correction`), which mac never had. The
+// mac glyph mask is raw CoreGraphics coverage and the drawable is BGRA8Unorm, so
+// blending happens on sRGB-encoded values as if they were linear: a pixel at 0.8
+// coverage lands roughly twice as dark as a gamma-correct blend would put it.
+// That is why our glyphs concentrate ink into fewer, darker pixels than a browser.
+//
+// `gamma = 1.0` makes every ratio zero and `enhanced_contrast = 0.0` makes
+// enhance_contrast return its input, so the DEFAULT is a bit-exact identity:
+// `a + a * (1 - a) * 0 == a`. Nothing changes until the env vars ask for it, and
+// no conformance baseline moves while it is off. See RNGPUI_TEXT_GAMMA in
+// metal_renderer.rs.
+struct TextGammaParams {
+  float4 gamma_ratios;
+  float enhanced_contrast;
+  float pad;
+};
+
+static inline float color_brightness(float3 color) {
+  // REC. 601 luminance coefficients for perceived brightness
+  return dot(color, float3(0.30, 0.59, 0.11));
+}
+
+static inline float light_on_dark_contrast(float enhanced_contrast, float3 color) {
+  float brightness = color_brightness(color);
+  float multiplier = saturate(4.0 * (0.75 - brightness));
+  return enhanced_contrast * multiplier;
+}
+
+static inline float enhance_contrast(float alpha, float k) {
+  return alpha * (k + 1.0) / (alpha * k + 1.0);
+}
+
+static inline float apply_alpha_correction(float a, float b, float4 g) {
+  float brightness_adjustment = g.x * b + g.y;
+  float correction = brightness_adjustment * a + (g.z * b + g.w);
+  return a + a * (1.0 - a) * correction;
+}
+
+static inline float apply_contrast_and_gamma_correction(float sample, float3 color,
+                                                        float enhanced_contrast_factor,
+                                                        float4 gamma_ratios) {
+  float enhanced_contrast = light_on_dark_contrast(enhanced_contrast_factor, color);
+  float brightness = color_brightness(color);
+
+  float contrasted = enhance_contrast(sample, enhanced_contrast);
+  return apply_alpha_correction(contrasted, brightness, gamma_ratios);
+}
+
 struct MonochromeSpriteVertexOutput {
   float4 position [[position]];
   float2 tile_position;
@@ -695,6 +744,7 @@ vertex MonochromeSpriteVertexOutput monochrome_sprite_vertex(
 fragment float4 monochrome_sprite_fragment(
     MonochromeSpriteFragmentInput input [[stage_in]],
     constant MonochromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
+    constant TextGammaParams *text_gamma [[buffer(SpriteInputIndex_TextGamma)]],
     texture2d<float> atlas_texture [[texture(SpriteInputIndex_AtlasTexture)]]) {
   if (any(input.clip_distance < float4(0.0))) {
     return float4(0.0);
@@ -706,7 +756,9 @@ fragment float4 monochrome_sprite_fragment(
   float4 sample =
       atlas_texture.sample(atlas_texture_sampler, input.tile_position);
   float4 color = input.color;
-  color.a *= sample.a;
+  // identity when the env vars are unset; see TextGammaParams above.
+  color.a *= apply_contrast_and_gamma_correction(
+      sample.a, color.rgb, text_gamma->enhanced_contrast, text_gamma->gamma_ratios);
   color.a *= content_mask_alpha(input.position.xy, sprite.content_mask.bounds,
                                 sprite.content_mask.corner_radii);
   return color;

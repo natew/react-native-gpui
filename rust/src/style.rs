@@ -1,5 +1,6 @@
 use gpui::{
-    AbsoluteLength, BoxShadow, CursorStyle, DefiniteLength, FontWeight, Hsla, Length, Rgba,
+    AbsoluteLength, BoxShadow, CursorStyle, DefiniteLength, FontStyle, FontWeight, Hsla, Length,
+    Rgba,
     linear_color_stop, linear_gradient, point, px,
 };
 use serde_json::Value;
@@ -132,6 +133,7 @@ pub struct ElementStyle {
     pub font_size: Option<f32>,
     pub font_weight: Option<String>,
     pub font_family: Option<String>,
+    pub font_style: Option<String>,
     pub line_height: Option<f32>,
     pub text_align: Option<String>,
     pub letter_spacing: Option<f32>,
@@ -269,6 +271,7 @@ impl ElementStyle {
         s!(overflow, "overflow");
         s!(font_weight, "fontWeight");
         s!(font_family, "fontFamily");
+        s!(font_style, "fontStyle");
         s!(text_align, "textAlign");
         s!(cursor, "cursor");
         s.transform = o.get("transform").and_then(parse_transform_ops);
@@ -321,63 +324,34 @@ impl ElementStyle {
         };
         style.flex_shrink = 0.0;
 
-        // Box model: RN/web-RN use border-box (a fixed width/height *includes*
-        // padding + border), but taffy is content-box. Subtract padding+border
-        // from fixed px sizes so a `maxWidth: 780` with padding wraps text at the
-        // same width as the web build (otherwise the content is wider → fewer
-        // wrapped lines → layout drift). Percent/auto are left to the engine.
-        let bw = |side: Option<f32>| side.or(self.border_width).unwrap_or(0.0);
-        let pad_h = self
-            .padding_left
-            .or(self.padding)
-            .and_then(Dim::as_px)
-            .unwrap_or(0.0)
-            + self
-                .padding_right
-                .or(self.padding)
-                .and_then(Dim::as_px)
-                .unwrap_or(0.0)
-            + bw(self.border_left_width)
-            + bw(self.border_right_width);
-        let pad_v = self
-            .padding_top
-            .or(self.padding)
-            .and_then(Dim::as_px)
-            .unwrap_or(0.0)
-            + self
-                .padding_bottom
-                .or(self.padding)
-                .and_then(Dim::as_px)
-                .unwrap_or(0.0)
-            + bw(self.border_top_width)
-            + bw(self.border_bottom_width);
-        let bb = |d: Dim, inset: f32| -> Length {
-            match d {
-                Dim::Px(p) => px((p - inset).max(0.0)).into(),
-                other => other.to_length(),
-            }
-        };
+        // Box model: a declared width/height includes padding and border, the same
+        // as RN and web. taffy 0.9 already sizes that way (BoxSizing::BorderBox is
+        // its default), so the size passes through untouched. This used to subtract
+        // padding+border here on the belief that taffy was content-box, which made
+        // every padded box lay out 2*padding narrower than it asked for: `width: 200`
+        // with `padding: 16` measured 168, and `maxWidth: 768` with `px: 16` measured
+        // 736 (examples/box-model-conformance.tsx covers both).
 
         // Dimensions (number → px, "NN%" → fraction, "auto" → auto)
         if let Some(w) = self.width {
-            style.size.width = bb(w, pad_h);
+            style.size.width = w.to_length();
         }
         if let Some(h) = self.height {
-            style.size.height = bb(h, pad_v);
+            style.size.height = h.to_length();
         }
 
         // Min/Max dimensions
         if let Some(mw) = self.min_width {
-            style.min_size.width = bb(mw, pad_h);
+            style.min_size.width = mw.to_length();
         }
         if let Some(mw) = self.max_width {
-            style.max_size.width = bb(mw, pad_h);
+            style.max_size.width = mw.to_length();
         }
         if let Some(mh) = self.min_height {
-            style.min_size.height = bb(mh, pad_v);
+            style.min_size.height = mh.to_length();
         }
         if let Some(mh) = self.max_height {
-            style.max_size.height = bb(mh, pad_v);
+            style.max_size.height = mh.to_length();
         }
 
         // aspectRatio (RN): taffy derives the unset dimension from the set one. The
@@ -596,9 +570,22 @@ impl ElementStyle {
     pub fn gpui_font_family(&self) -> Option<gpui::SharedString> {
         self.font_family.as_deref().map(map_font_family)
     }
+
+    /// Resolved GPUI font style, if `fontStyle` was set.
+    pub fn gpui_font_style(&self) -> Option<FontStyle> {
+        self.font_style.as_deref().map(parse_font_style)
+    }
 }
 
-fn map_font_family(f: &str) -> gpui::SharedString {
+pub fn parse_font_style(s: &str) -> FontStyle {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "italic" => FontStyle::Italic,
+        "oblique" => FontStyle::Oblique,
+        _ => FontStyle::Normal,
+    }
+}
+
+pub fn map_font_family(f: &str) -> gpui::SharedString {
     // take the first family in a CSS stack, strip quotes
     let first = f
         .split(',')

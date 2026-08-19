@@ -1352,12 +1352,45 @@ pub fn scroll_container_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<u
 /// `rngpui do scroll` to drive native WebView content in a kept debug session.
 pub fn webview_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<u64> {
     let position = point(px(x), px(y));
-    let hit = hit_test(root, position)?;
-    if hit.target.element_type == "webview" {
-        Some(hit.target.id)
-    } else {
-        None
+    let mut path = Vec::new();
+    let mut hits = Vec::new();
+    collect_hits(root, position, &mut path, &mut hits);
+    // `hits` is top-first in paint order: walk down until a WebView turns up, and
+    // stop at the first node that actually DRAWS over it.
+    //
+    // This deliberately does NOT go through `hit_test`. That function refuses to
+    // reach behind ANY overlay so the inspector can never select a hidden node,
+    // and an app that mounts a portal host has a full-window, entirely transparent
+    // container painted over everything — which made every WebView in such an app
+    // permanently unscrollable through `do scroll` (measured against agentbus,
+    // whose whole transcript is a WebView: hits[0] was the empty portal container,
+    // so `webview_at` answered None at every point on screen).
+    for hit in hits {
+        if hit.target.element_type == "webview" {
+            return Some(hit.target.id);
+        }
+        if paints_over(&hit) {
+            return None;
+        }
     }
+    None
+}
+
+/// Whether a node puts pixels on screen where it was hit, rather than being a
+/// purely structural box. Reads the facts the inspector already collects, so a
+/// container with no fill, no edge, and nothing to draw does not count as cover.
+fn paints_over(hit: &InspectorHit) -> bool {
+    if hit
+        .style
+        .iter()
+        .any(|fact| fact == "backgroundColor" || fact == "border")
+    {
+        return true;
+    }
+    matches!(
+        hit.target.element_type.as_str(),
+        "text" | "image" | "svg" | "textinput" | "textarea" | "ghostty-terminal"
+    )
 }
 
 /// The node a real left press at a point would resolve to, plus its events and bounds —
@@ -1678,7 +1711,7 @@ mod tests {
         InspectorHit, InspectorState, MenuAction, NodeSummary, Rect, build_menu, cached_snapshot,
         editor_args, hit_test, is_webview_inspector_message, menu_action_at, menu_snapshot,
         parse_source, refresh_layout_snapshot, refresh_snapshot_cache, snapshot, source_label,
-        spawn_editor, tap_target_at,
+        spawn_editor, tap_target_at, webview_at,
     };
     use crate::bridge;
     use crate::elements::{AccessibilityInfo, ReactElement};
@@ -1883,6 +1916,40 @@ mod tests {
         let hit = hit_test(&root, point(px(35.0), px(30.0))).expect("expected hit");
 
         assert_eq!(hit.target.id, 5003);
+        bridge::retain_layout(&HashSet::new());
+    }
+
+    // A portal host is a full-window transparent container painted over the whole
+    // app. `hit_test` stops at it by design, so routing `webview_at` through
+    // `hit_test` left every WebView in a portal-using app unscrollable.
+    #[test]
+    fn webview_at_sees_through_an_empty_overlay() {
+        let _guard = inspector_test_guard();
+        bridge::retain_layout(&HashSet::new());
+        let webview = node(5102, "webview", Vec::new());
+        let portal = node(5103, "view", Vec::new());
+        let root = node(5101, "view", vec![webview, portal]);
+        bridge::remember_layout(5101, 0.0, 0.0, 400.0, 300.0);
+        bridge::remember_layout(5102, 0.0, 0.0, 400.0, 300.0);
+        bridge::remember_layout(5103, 0.0, 0.0, 400.0, 300.0);
+
+        assert_eq!(webview_at(&root, 200.0, 150.0), Some(5102));
+        bridge::retain_layout(&HashSet::new());
+    }
+
+    #[test]
+    fn webview_at_stops_at_an_overlay_that_draws() {
+        let _guard = inspector_test_guard();
+        bridge::retain_layout(&HashSet::new());
+        let webview = node(5112, "webview", Vec::new());
+        let mut sheet = (*node(5113, "view", Vec::new())).clone();
+        sheet.style.background_color = Some(gpui::rgb(0x101010).into());
+        let root = node(5111, "view", vec![webview, Arc::new(sheet)]);
+        bridge::remember_layout(5111, 0.0, 0.0, 400.0, 300.0);
+        bridge::remember_layout(5112, 0.0, 0.0, 400.0, 300.0);
+        bridge::remember_layout(5113, 0.0, 0.0, 400.0, 300.0);
+
+        assert_eq!(webview_at(&root, 200.0, 150.0), None);
         bridge::retain_layout(&HashSet::new());
     }
 

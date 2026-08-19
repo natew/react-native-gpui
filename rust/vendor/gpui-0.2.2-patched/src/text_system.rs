@@ -381,6 +381,7 @@ impl WindowTextSystem {
                 && last_run.underline == run.underline
                 && last_run.strikethrough == run.strikethrough
                 && last_run.background_color == run.background_color
+                && last_run.background_radius == run.background_radius
             {
                 last_run.len += run.len as u32;
                 continue;
@@ -389,6 +390,7 @@ impl WindowTextSystem {
                 len: run.len as u32,
                 color: run.color,
                 background_color: run.background_color,
+                background_radius: run.background_radius,
                 underline: run.underline,
                 strikethrough: run.strikethrough,
             });
@@ -440,6 +442,7 @@ impl WindowTextSystem {
                     && last_run.underline == run.underline
                     && last_run.strikethrough == run.strikethrough
                     && last_run.background_color == run.background_color
+                    && last_run.background_radius == run.background_radius
                 {
                     last_run.len += run_len_within_line as u32;
                     false
@@ -448,6 +451,7 @@ impl WindowTextSystem {
                         len: run_len_within_line as u32,
                         color: run.color,
                         background_color: run.background_color,
+                        background_radius: run.background_radius,
                         underline: run.underline,
                         strikethrough: run.strikethrough,
                     });
@@ -739,6 +743,11 @@ pub struct TextRun {
     pub color: Hsla,
     /// The background color (if any)
     pub background_color: Option<Hsla>,
+    /// Corner radius for the background quad, e.g. an inline code span's plate.
+    /// The background is still a rectangle the width of the run's glyph advances,
+    /// so this rounds it but cannot pad it — padding would have to move the
+    /// surrounding glyphs, which are already shaped.
+    pub background_radius: Option<Pixels>,
     /// The underline style (if any)
     pub underline: Option<UnderlineStyle>,
     /// The strikethrough style (if any)

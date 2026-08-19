@@ -962,16 +962,51 @@ function serializeAccessibility(inst: Instance, node: SerializedNode): Serialize
     return Object.values(info).some((value) => value !== undefined) ? info : undefined;
 }
 
-type SerRun = { text: string; fontWeight?: string; color?: string; fontStyle?: string };
+// What a nested <Text> can carry once it is flattened into a shaped run. A run
+// lives inside a laid-out line, so it can express anything the shaper/painter
+// resolves per-run — family, weight, style, colour, and a rounded background quad
+// — but NOT padding or its own font size, because both would have to change the
+// line's advances. An inline code span therefore gets its plate (colour + radius)
+// and its mono face here, at the paragraph's font size, with padding dropped.
+type SerRun = {
+    text: string;
+    fontWeight?: string;
+    color?: string;
+    fontStyle?: string;
+    backgroundColor?: string;
+    borderRadius?: number;
+    fontFamily?: string;
+};
+
+const RUN_STYLE_KEYS = [
+    "fontWeight",
+    "color",
+    "fontStyle",
+    "fontFamily",
+    "backgroundColor",
+    "borderRadius",
+] as const;
 
 // Walk a <Text> tree into flowing styled runs, so a nested <Text bold> inside a
 // paragraph keeps its weight/color instead of being flattened to the parent's.
-function gatherRuns(inst: Instance, inherited: Omit<SerRun, "text">): SerRun[] {
+function gatherRuns(inst: Instance, inherited: Omit<SerRun, "text">, isRoot = false): SerRun[] {
     const own = (normalizePropsStyle(inst.props) ?? {}) as Record<string, unknown>;
     const cur: Omit<SerRun, "text"> = {
         fontWeight: (own.fontWeight as string) ?? inherited.fontWeight,
         color: (own.color as string) ?? inherited.color,
         fontStyle: (own.fontStyle as string) ?? inherited.fontStyle,
+        fontFamily: (own.fontFamily as string) ?? inherited.fontFamily,
+        // background is the one style here that does NOT inherit, and the root
+        // <Text>'s own background is already painted by its own box — reading it
+        // here would paint it a second time, once per run. So only a nested <Text>
+        // contributes one, and it does propagate to ITS children so an inline code
+        // span containing bold text keeps a single unbroken plate.
+        backgroundColor: isRoot
+            ? undefined
+            : ((own.backgroundColor as string) ?? inherited.backgroundColor),
+        borderRadius: isRoot
+            ? undefined
+            : ((own.borderRadius as number) ?? inherited.borderRadius),
     };
     const runs: SerRun[] = [];
     for (const c of inst.children) {
@@ -1067,18 +1102,28 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
     switch (inst.type) {
         case "Text": {
             node.type = "text";
-            const runs = gatherRuns(inst, {
+            const rootRun: Omit<SerRun, "text"> = {
                 fontWeight: style.fontWeight as string | undefined,
                 color: style.color as string | undefined,
                 fontStyle: style.fontStyle as string | undefined,
-            });
+                fontFamily: style.fontFamily as string | undefined,
+            };
+            const runs = gatherRuns(inst, rootRun, true);
             node.text = runs.map((r) => r.text).join("");
             if (typeof props.numberOfLines === "number" && props.numberOfLines > 0) {
                 node.numberOfLines = Math.floor(props.numberOfLines);
             }
             if (props.selectable === true) node.selectable = true;
-            // emit runs only when there's >1 segment (inline style changes)
-            if (runs.length > 1) node.runs = runs;
+            // Emit runs when the text is not uniformly the root's own style: either it
+            // is split into several segments, or a single nested <Text> restyled the
+            // whole thing. That second case used to be dropped by a `length > 1` gate,
+            // which silently discarded the style of a paragraph whose ONLY child was a
+            // nested <Text> — a markdown line that is entirely one `*emphasis*` or one
+            // `code` span rendered as plain body text.
+            const restyled =
+                runs.length > 1 ||
+                (runs.length === 1 && RUN_STYLE_KEYS.some((k) => runs[0][k] !== rootRun[k]));
+            if (restyled) node.runs = runs;
             break;
         }
         case "TextInput":

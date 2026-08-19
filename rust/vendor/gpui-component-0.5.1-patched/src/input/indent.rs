@@ -94,6 +94,7 @@ impl TextElement {
             SharedString::from(" ".repeat(column)),
             font_size,
             &[TextRun {
+                background_radius: None,
                 len: column,
                 font: style.font(),
                 color: Hsla::default(),

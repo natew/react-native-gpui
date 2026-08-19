@@ -63,6 +63,12 @@ pub struct TextRun {
     pub font_weight: Option<String>,
     pub color: Option<Hsla>,
     pub font_style: Option<String>,
+    /// Painted as a quad behind the run's glyphs (gpui's run background). A run is
+    /// part of a shaped line, so it can carry a colour and a corner radius but NOT
+    /// padding — see the note in elements/text.rs.
+    pub background_color: Option<Hsla>,
+    pub background_radius: Option<f32>,
+    pub font_family: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

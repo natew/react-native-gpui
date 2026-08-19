@@ -840,6 +840,16 @@ impl Background {
         self
     }
 
+    /// react-native-gpui paint-patch patch: rewrite every alpha this background carries. Unlike
+    /// `opacity`, which clamps its FACTOR to [0,1], the caller decides what the new alpha is —
+    /// needed by the paint-patch path, whose factor is a ratio between two animation values and
+    /// routinely exceeds 1.
+    pub(crate) fn set_alphas(&mut self, mut f: impl FnMut(f32) -> f32) {
+        self.solid.a = f(self.solid.a);
+        self.colors[0].color.a = f(self.colors[0].color.a);
+        self.colors[1].color.a = f(self.colors[1].color.a);
+    }
+
     /// Returns a new background color with the same hue, saturation, and lightness, but with a modified alpha value.
     pub fn opacity(&self, factor: f32) -> Self {
         let mut background = *self;

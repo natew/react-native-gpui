@@ -66,7 +66,7 @@ export function rngpuiHotUpdateAliasPlugin() {
       }))
       build.onLoad({ filter: /^rngpui-hot:react\/compiler-runtime$/, namespace: 'rngpui-hot' }, () => ({
         loader: 'js',
-        contents: `const mod = globalThis.__rngpuiHotModules.react; export const c = mod.__COMPILER_RUNTIME?.c || function(size){ return new Array(size); };`,
+        contents: moduleShim('react/compiler-runtime', ['c'], false),
       }))
       build.onLoad({ filter: /^rngpui-hot:react-native-gpui$/, namespace: 'rngpui-hot' }, () => ({
         loader: 'js',

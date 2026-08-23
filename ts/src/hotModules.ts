@@ -1,6 +1,7 @@
 import * as React from "react";
 import * as JSXRuntime from "react/jsx-runtime";
 import * as JSXDevRuntime from "react/jsx-dev-runtime";
+import * as ReactCompilerRuntime from "react/compiler-runtime";
 import * as Render from "./render";
 import * as Components from "./components";
 import * as Style from "./StyleSheet";
@@ -35,6 +36,7 @@ const hotModules = globalObject.__rngpuiHotModules ?? {};
 hotModules.react = React;
 hotModules["react/jsx-runtime"] = JSXRuntime;
 hotModules["react/jsx-dev-runtime"] = JSXDevRuntime;
+hotModules["react/compiler-runtime"] = ReactCompilerRuntime;
 hotModules["react-native-gpui"] = nativeModule;
 hotModules["react-native"] = nativeModule;
 globalObject.__rngpuiHotModules = hotModules;

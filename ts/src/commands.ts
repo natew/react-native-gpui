@@ -1,7 +1,7 @@
 // Host → native imperative commands. These don't go through the React commit/tree;
 // the embedded Hermes runtime hands them to the native service as host calls.
 // Components call `sendCommand`; the render layer wires the sink to the bridge.
-import type { SerializedTerminalFrame } from "./runtime";
+import type { RendererProvenance, SerializedTerminalFrame } from "./runtime";
 
 export type AppCommandBinding = {
     id: string;
@@ -76,6 +76,8 @@ export type Command =
           closeId?: string;
       }
     | { $cmd: "clipboardWrite"; text: string }
+    | { $cmd: "performanceHud"; enabled: boolean }
+    | { $cmd: "rendererProvenance"; requestId: number }
     | ({ $cmd: "appCommands" } & AppCommandConfig);
 
 let sink: ((cmd: Command) => void) | null = null;
@@ -83,6 +85,11 @@ let lastAppCommandConfig = "";
 const appCommandListeners = new Set<(id: string) => void>();
 const nativeMenuCallbacks = new Map<string, () => void>();
 let nextNativeMenuCallbackId = 1;
+let nextRendererProvenanceRequestId = 1;
+const rendererProvenanceRequests = new Map<
+    number,
+    { resolve: (value: RendererProvenance) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
+>();
 
 export function setCommandSink(fn: (cmd: Command) => void) {
     sink = fn;
@@ -182,6 +189,34 @@ export const NativeClipboard = {
         sendCommand({ $cmd: "clipboardWrite", text });
     },
 };
+
+export const PerformanceHUD = {
+    setEnabled(enabled: boolean) {
+        sendCommand({ $cmd: "performanceHud", enabled });
+    },
+};
+
+export const Renderer = {
+    getProvenance(): Promise<RendererProvenance> {
+        const requestId = nextRendererProvenanceRequestId++;
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+                rendererProvenanceRequests.delete(requestId);
+                reject(new Error("renderer provenance request timed out"));
+            }, 5_000);
+            rendererProvenanceRequests.set(requestId, { resolve, reject, timer });
+            sendCommand({ $cmd: "rendererProvenance", requestId });
+        });
+    },
+};
+
+export function resolveRendererProvenance(requestId: number, provenance: RendererProvenance) {
+    const pending = rendererProvenanceRequests.get(requestId);
+    if (!pending) return;
+    rendererProvenanceRequests.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.resolve(provenance);
+}
 
 export const NativeMenus = {
     showContextMenu({

@@ -51,6 +51,7 @@ export interface LaunchedHost {
     window: GpuiWindow;
     sessionDir: string;
     appName: string;
+    controlSocketPath: string;
     request<T = unknown>(cmd: object): Promise<T>;
     dump(): Promise<DumpNode>;
     capture(path: string): void;
@@ -189,6 +190,9 @@ type LaunchOptions = {
     size?: string;
     bundle?: string;
     keep?: boolean;
+    development?: boolean;
+    appearance?: string;
+    fixture?: boolean;
 };
 
 function serviceBinary() {
@@ -230,14 +234,14 @@ function findDylibs(dir: string, prefix: string): string[] {
     return out;
 }
 
-function bundleEntry(entry: string, workdir: string) {
+function bundleEntry(entry: string, workdir: string, development: boolean) {
     const entryPath = resolve(entry);
     if (!existsSync(entryPath)) throw new Error(`entry not found: ${entryPath}`);
     const outJs = join(workdir, "app.js");
     const result = spawnSync("bun", ["scripts/bundle-hermes.mjs", entryPath, outJs, "--bytecode"], {
         cwd: tsRoot,
         encoding: "utf8",
-        env: { ...process.env, NODE_ENV: process.env.NODE_ENV || "production" },
+        env: { ...process.env, NODE_ENV: development ? "development" : "production" },
     });
     if (result.status !== 0) {
         throw new Error(`bundle-hermes failed\n${result.stdout}\n${result.stderr}`);
@@ -276,7 +280,7 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
     const logPath = join(workdir, "service.log");
     const size = opts.size ?? "1280x860";
     const [w, h] = size.split("x").map((value) => parseInt(value, 10));
-    const bundlePath = opts.bundle ? resolve(opts.bundle) : bundleEntry(entry, workdir);
+    const bundlePath = opts.bundle ? resolve(opts.bundle) : bundleEntry(entry, workdir, opts.development === true);
     if (!existsSync(bundlePath)) throw new Error(`bundle not found: ${bundlePath}`);
 
     const child = spawn(serviceBinary(), [], {
@@ -300,6 +304,9 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
             RNGPUI_SERVICE_PID_FILE: pidPath,
             RNGPUI_CONTROL_SOCKET: socketPath,
             RNGPUI_APP_NAME: appName,
+            ...(opts.appearance ? { RNGPUI_FORCE_APPEARANCE: opts.appearance } : {}),
+            ...(opts.appearance ? { AGENTBUS_CAPTURE_APPEARANCE: opts.appearance } : {}),
+            ...(opts.fixture === true ? { AGENTBUS_FIXTURE_ONLY: "1" } : {}),
         },
         // stderr goes to a session log file, never a pipe back to this process: the
         // service outlives the cli (dev/--keep), and an eprintln! into a closed pipe
@@ -356,10 +363,15 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
             },
         })) as GpuiWindow;
     } catch (error) {
-        const seen = (listWindows() as GpuiWindow[])
-            .map((win) => `${win.owner}/"${win.title}"/pid${win.pid}/${win.width}x${win.height}`)
-            .join("  ");
-        fail(`window did not appear: ${(error as Error).message} [wanted pid ${servicePid}; saw: ${seen}]`);
+        const finalWindow = currentWindow(servicePid);
+        if (finalWindow) {
+            window = finalWindow;
+        } else {
+            const seen = (listWindows() as GpuiWindow[])
+                .map((win) => `${win.owner}/"${win.title}"/pid${win.pid}/${win.width}x${win.height}`)
+                .join("  ");
+            fail(`window did not appear: ${(error as Error).message} [wanted pid ${servicePid}; saw: ${seen}]`);
+        }
     }
 
     await waitForSocket(socketPath, () => child.exitCode != null);
@@ -370,16 +382,18 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
     // Instead: find the webview's bounds, then poll the live capture frame until
     // that region actually has painted content (variance above the background
     // floor), with a budget. A genuinely-empty webview just hits the budget.
-    await sleep(Number(process.env.RNGPUI_SHOT_SETTLE_MS) || 350);
-    try {
-        const probe = await requestSocket<{ ok: boolean; tree?: DumpNode }>(socketPath, { $cmd: "dump" });
-        const wv = probe.tree ? firstWebviewBounds(probe.tree) : null;
-        if (wv) {
-            requestCapture(capturePath, captureTriggerPath);
-            await waitForWebviewContent(capturePath, captureTriggerPath, wv, w);
+    if (!opts.development) {
+        await sleep(Number(process.env.RNGPUI_SHOT_SETTLE_MS) || 350);
+        try {
+            const probe = await requestSocket<{ ok: boolean; tree?: DumpNode }>(socketPath, { $cmd: "dump" });
+            const wv = probe.tree ? firstWebviewBounds(probe.tree) : null;
+            if (wv) {
+                requestCapture(capturePath, captureTriggerPath);
+                await waitForWebviewContent(capturePath, captureTriggerPath, wv, w);
+            }
+        } catch {
+            /* probe is best-effort; proceed to capture */
         }
-    } catch {
-        /* probe is best-effort; proceed to capture */
     }
 
     const meta: SessionMeta = {
@@ -450,6 +464,7 @@ function makeLaunchedHost({
         window,
         sessionDir,
         appName: meta.appName,
+        controlSocketPath: meta.socketPath,
         request<T = unknown>(cmd: object) {
             return requestSocket<T>(meta.socketPath, cmd);
         },

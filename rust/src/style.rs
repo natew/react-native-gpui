@@ -1,7 +1,6 @@
 use gpui::{
     AbsoluteLength, BoxShadow, CursorStyle, DefiniteLength, FontStyle, FontWeight, Hsla, Length,
-    Rgba,
-    linear_color_stop, linear_gradient, point, px,
+    Rgba, linear_color_stop, linear_gradient, point, px,
 };
 use serde_json::Value;
 

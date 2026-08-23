@@ -38,6 +38,7 @@ mod audio;
 #[cfg(target_os = "macos")]
 mod ax;
 mod bridge;
+mod build_identity;
 #[cfg(target_os = "macos")]
 mod capture_png;
 mod debug_control;
@@ -53,11 +54,15 @@ mod inspector;
 #[cfg(target_os = "macos")]
 mod liquid_glass;
 mod native_menu;
+mod perf_hud;
 mod selection;
 mod style;
 
 use elements::webview::WebViewContent;
-use elements::{AccessibilityInfo, ReactElement, create_element};
+use elements::{
+    AccessibilityInfo, DiffPayload, InputPayload, ReactElement, SpecializedElement, SystemPayload,
+    TerminalPayload, TextPayload, ViewEffects, create_element,
+};
 use elements::{
     NativeResizeEdge, NativeResizeSpec, SystemShadowSpec, TerminalFrame, TerminalFrameKind,
 };
@@ -268,8 +273,11 @@ fn parse_json_tree(
     // big-field ref: the JS side omitted an unchanged large text (e.g. a webview's 45KB
     // shell html on a node that only flipped its focus id), so reuse the prior commit's
     // value for this id — the same PRIOR_TREE_INDEX the node-level `ref` reads.
-    let text = if obj.get("textRef").and_then(|v| v.as_bool()) == Some(true) {
-        match prior.get(&global_id).and_then(|p| p.text.clone()) {
+    let mut text = if obj.get("textRef").and_then(|v| v.as_bool()) == Some(true) {
+        match prior
+            .get(&global_id)
+            .and_then(|p| p.source_text().map(String::from))
+        {
             Some(t) => Some(t),
             None => {
                 eprintln!("[rngpui] delta textRef miss for globalId {global_id} (no prior text)");
@@ -294,7 +302,10 @@ fn parse_json_tree(
         .unwrap_or(false);
     // `srcRef` is the delta big-field ref for `src` (image/webview uri); reuse prior.
     let src = if obj.get("srcRef").and_then(|v| v.as_bool()) == Some(true) {
-        match prior.get(&global_id).and_then(|p| p.src.clone()) {
+        match prior
+            .get(&global_id)
+            .and_then(|p| p.src().map(String::from))
+        {
             Some(s) => Some(s),
             None => {
                 eprintln!("[rngpui] delta srcRef miss for globalId {global_id} (no prior src)");
@@ -408,7 +419,7 @@ fn parse_json_tree(
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(String::from);
-    let terminal_frames = obj
+    let terminal_frames: Vec<TerminalFrame> = obj
         .get("terminalFrames")
         .and_then(|v| v.as_array())
         .map(|frames| frames.iter().filter_map(parse_terminal_frame).collect())
@@ -443,7 +454,7 @@ fn parse_json_tree(
         })
         .unwrap_or_default();
 
-    let runs = obj
+    let runs: Vec<crate::elements::TextRun> = obj
         .get("runs")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -490,58 +501,106 @@ fn parse_json_tree(
     // svg request_layout rebuilds its gpui child on every full-layout frame. convert
     // the markup to SharedString once per committed svg node so each rebuild clones
     // an arc-backed handle instead of the entire source string.
-    let cached_svg_path = if element_type == "svg" {
-        gpui::SharedString::new(text.as_deref().unwrap_or_default())
-    } else {
+    let cached_text = if element_type == "diff" {
         gpui::SharedString::new_static("")
+    } else {
+        text.as_deref().map_or_else(
+            || gpui::SharedString::new_static(""),
+            gpui::SharedString::new,
+        )
     };
-    let cached_text = text.as_deref().map_or_else(
-        || gpui::SharedString::new_static(""),
-        gpui::SharedString::new,
-    );
     // precompute the per-frame prepaint facts (event scan) once per commit — prepaint
     // runs them for every node on every draw.
     let interactive = events
         .iter()
         .any(|e: &String| crate::elements::POINTER_EVENTS.contains(&e.as_str()));
-    Some(Arc::new(ReactElement {
-        global_id,
-        element_type: element_type.to_string(),
-        text,
-        cached_text,
-        number_of_lines,
-        selectable,
-        runs,
-        src,
-        system_material,
-        system_glass_variant,
-        system_tint,
-        system_shadow,
-        system_edge_fade,
-        system_top_fade_start,
-        backdrop_blur_radius,
-        backdrop_tint,
-        value,
-        default_value,
+    let event_mask = elements::event_mask(&events);
+    let input_payload = || InputPayload {
+        value: value.clone(),
+        default_value: default_value.clone(),
         secure_text_entry,
         editable,
         auto_focus,
         placeholder_text_color,
         most_recent_event_count,
+    };
+    let specialized = match element_type {
+        "text" => Some(SpecializedElement::Text(TextPayload {
+            number_of_lines,
+            selectable,
+            runs: runs.into(),
+        })),
+        "image" => Some(SpecializedElement::Image { src }),
+        "svg" => Some(SpecializedElement::Svg {
+            path: gpui::SharedString::new(text.as_deref().unwrap_or_default()),
+        }),
+        "webview" => Some(SpecializedElement::WebView { src }),
+        "system" => Some(SpecializedElement::System(SystemPayload {
+            material: system_material,
+            glass_variant: system_glass_variant,
+            tint: system_tint,
+            shadow: system_shadow,
+            edge_fade: system_edge_fade,
+            top_fade_start: system_top_fade_start,
+        })),
+        "textinput" | "textarea" => Some(SpecializedElement::Input(input_payload())),
+        "nativebutton" | "nativeinput" => Some(SpecializedElement::NativeControl(input_payload())),
+        "ghostty-terminal" => Some(SpecializedElement::Terminal(TerminalPayload {
+            session_id: terminal_session_id,
+            frames: terminal_frames.into(),
+        })),
+        "diff" => {
+            let collapsed_paths = obj
+                .get("collapsedPaths")
+                .and_then(serde_json::Value::as_array)
+                .map(|paths| {
+                    paths
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(String::from)
+                        .collect::<HashSet<_>>()
+                })
+                .unwrap_or_default();
+            Some(SpecializedElement::Diff(DiffPayload::parse(
+                text.take().unwrap_or_default(),
+                obj.get("wordDiff")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                &collapsed_paths,
+                obj.get("diffScroll")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                obj.get("maxLines")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .unwrap_or(100_000),
+            )))
+        }
+        _ => None,
+    }
+    .map(Arc::new);
+    Some(Arc::new(ReactElement {
+        global_id,
+        element_type: element_type.to_string(),
+        text,
+        cached_text,
+        specialized,
+        view_effects: ViewEffects {
+            backdrop_blur_radius,
+            backdrop_tint,
+        },
         shows_vertical_scroll_indicator,
         shows_horizontal_scroll_indicator,
         events: events.into(),
+        event_mask,
         native_layout_key,
         native_resize,
         native_list_group,
-        terminal_session_id,
-        terminal_frames,
         accessibility,
         children,
         style,
         style_json,
         cached_gpui_style,
-        cached_svg_path,
         interactive,
         pseudo_events,
     }))
@@ -1224,6 +1283,7 @@ struct TreeMetadata {
     webviews: Vec<WebViewSpec>,
     system_ids: HashSet<u64>,
     native_control_ids: HashSet<u64>,
+    diff_ids: HashSet<u64>,
     scroll_ids: HashSet<u64>,
 }
 
@@ -1245,6 +1305,7 @@ impl TreeMetadata {
         bridge::emit_cached_layout_for_new_subscribers(&self.layout_ids);
         elements::system::retain_system_views(&self.system_ids);
         elements::native_control::retain_native_controls(&self.native_control_ids);
+        elements::retain_diff_state(&self.diff_ids);
         elements::retain_scroll_state(&self.scroll_ids);
         elements::native_scroll::retain_drivers(&self.scroll_ids);
 
@@ -1399,23 +1460,24 @@ fn collect_tree_metadata(el: &Arc<ReactElement>, inherited_hidden: bool, out: &m
     }
     if el.element_type == "textinput" || el.element_type == "textarea" {
         let multiline = el.element_type == "textarea";
+        let input = el.input_payload().expect("input node payload");
         out.input_ids.insert(el.global_id);
         out.inputs.push(InputSpec {
             id: el.global_id,
             placeholder: el.text.clone().unwrap_or_default(),
-            value: el.value.clone(),
-            default_value: el.default_value.clone(),
+            value: input.value.clone(),
+            default_value: input.default_value.clone(),
             multiline,
-            secure: el.secure_text_entry && !multiline,
-            auto_focus: el.auto_focus,
-            editable: el.editable,
-            most_recent_event_count: el.most_recent_event_count,
+            secure: input.secure_text_entry && !multiline,
+            auto_focus: input.auto_focus,
+            editable: input.editable,
+            most_recent_event_count: input.most_recent_event_count,
         });
     }
 
     let hidden = inherited_hidden || el.style.is_display_none();
     if el.element_type == "webview" {
-        if let Some(uri) = el.src.clone() {
+        if let Some(uri) = el.src().map(String::from) {
             out.webview_ids.insert(el.global_id);
             out.webviews.push(WebViewSpec {
                 id: el.global_id,
@@ -1438,6 +1500,9 @@ fn collect_tree_metadata(el: &Arc<ReactElement>, inherited_hidden: bool, out: &m
     }
     if el.element_type == "nativebutton" || el.element_type == "nativeinput" {
         out.native_control_ids.insert(el.global_id);
+    }
+    if el.element_type == "diff" {
+        out.diff_ids.insert(el.global_id);
     }
     if matches!(el.style.overflow.as_deref(), Some("scroll") | Some("auto")) {
         out.scroll_ids.insert(el.global_id);
@@ -2079,6 +2144,10 @@ impl Render for ServiceApp {
             }
         }
 
+        if let Some(hud) = perf_hud::element(self.tree_metadata.node_ids.len()) {
+            frame = frame.child(hud);
+        }
+
         FrameMarker::new(
             frame.into_any_element(),
             TRACE_PAINTED_INPUT.then(|| self.input_snapshot_for_paint(cx)),
@@ -2093,33 +2162,15 @@ fn fallback_root() -> Arc<ReactElement> {
         element_type: "div".to_string(),
         text: None,
         cached_text: gpui::SharedString::new_static(""),
-        number_of_lines: None,
-        selectable: false,
-        runs: Vec::new(),
-        src: None,
-        system_material: None,
-        system_glass_variant: None,
-        system_tint: None,
-        system_shadow: None,
-        system_edge_fade: None,
-        system_top_fade_start: None,
-        backdrop_blur_radius: None,
-        backdrop_tint: None,
-        value: None,
-        default_value: None,
-        secure_text_entry: false,
-        editable: true,
-        auto_focus: false,
-        placeholder_text_color: None,
-        most_recent_event_count: 0,
+        specialized: None,
+        view_effects: ViewEffects::default(),
         shows_vertical_scroll_indicator: true,
         shows_horizontal_scroll_indicator: true,
         events: Arc::from([]),
+        event_mask: 0,
         native_layout_key: None,
         native_resize: None,
         native_list_group: None,
-        terminal_session_id: None,
-        terminal_frames: Vec::new(),
         accessibility: AccessibilityInfo::default(),
         children: vec![],
         style: ElementStyle {
@@ -2130,7 +2181,6 @@ fn fallback_root() -> Arc<ReactElement> {
         },
         style_json: None,
         cached_gpui_style: None,
-        cached_svg_path: gpui::SharedString::new_static(""),
         interactive: false,
         pseudo_events: false,
     })
@@ -2214,6 +2264,9 @@ pub(crate) enum Incoming {
         id: u64,
     },
     Inspector {
+        enabled: bool,
+    },
+    PerformanceHud {
         enabled: bool,
     },
     ScrollTo {
@@ -2339,6 +2392,10 @@ pub(crate) enum Incoming {
         reply: flume::Sender<serde_json::Value>,
     },
     DebugFullLayout {
+        reply: flume::Sender<serde_json::Value>,
+    },
+    DebugPerformanceHud {
+        enabled: bool,
         reply: flume::Sender<serde_json::Value>,
     },
     DebugDragAt {
@@ -2538,6 +2595,17 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
                 Some(Incoming::WindowSize { width, height })
             }
             "reload" => id.map(|id| Incoming::Reload { id }),
+            "rendererProvenance" => {
+                bridge::renderer_provenance(
+                    v.get("requestId")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0),
+                );
+                None
+            }
+            "performanceHud" => Some(Incoming::PerformanceHud {
+                enabled: v.get("enabled").and_then(|value| value.as_bool())?,
+            }),
             "inspector" => Some(Incoming::Inspector {
                 enabled: v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true),
             }),
@@ -3928,6 +3996,17 @@ fn main() {
                             Err(_) => break,
                         }
                     }
+                    Incoming::DebugPerformanceHud { enabled, reply } => {
+                        perf_hud::set_enabled(enabled);
+                        let applied = window_handle.update(cx, |_root, window, cx| {
+                            window.refresh();
+                            cx.notify();
+                        });
+                        let _ = reply.send(serde_json::json!({ "ok": applied.is_ok() }));
+                        if applied.is_err() {
+                            break;
+                        }
+                    }
                     Incoming::PickPaths {
                         id,
                         files,
@@ -4287,6 +4366,16 @@ fn main() {
                                     .unwrap_or(false);
                                 serde_json::json!({
                                     "ok": ok,
+                                    "type": "scrollAt",
+                                    "targetId": id,
+                                })
+                            } else if let Some(id) = inspector::diff_at(&this.root, x, y) {
+                                let applied = elements::scroll_diff_by(id, dy);
+                                if applied {
+                                    cx.notify();
+                                }
+                                serde_json::json!({
+                                    "ok": applied,
                                     "type": "scrollAt",
                                     "targetId": id,
                                 })
@@ -4794,6 +4883,10 @@ fn main() {
                                     cx.notify();
                                 }
                             }
+                            Incoming::PerformanceHud { enabled } => {
+                                perf_hud::set_enabled(enabled);
+                                cx.notify();
+                            }
                             Incoming::ScrollTo { id, x, y } => {
                                 elements::scroll_to(id, x, y);
                                 crate::anim_overlay::arm_paint_only_frame();
@@ -4964,6 +5057,7 @@ fn main() {
                             | Incoming::DebugRealDragPath { .. }
                             | Incoming::DebugResize { .. }
                             | Incoming::DebugFullLayout { .. }
+                            | Incoming::DebugPerformanceHud { .. }
                             | Incoming::DebugScrollAt { .. }
                             | Incoming::DebugScrollDriverStats { .. }
                             | Incoming::DebugNativeDriverWheel { .. }

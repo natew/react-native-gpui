@@ -22,6 +22,22 @@ export async function runDo(host: Host, sub: string, args: string[], json: boole
     const driveable = host;
 
     switch (sub) {
+        case "hud": {
+            const enabled = args[0] === "on" ? true : args[0] === "off" ? false : null;
+            if (enabled == null) {
+                console.error("  usage: rngpui do hud <on|off>");
+                return 1;
+            }
+            const response = await driveable.request<ControlResponse>({ $cmd: "performanceHud", enabled });
+            if (!response.ok) {
+                console.error(`  performance HUD failed: ${response.error || "native command failed"}`);
+                return 1;
+            }
+            if (json) console.log(JSON.stringify({ performanceHud: enabled }));
+            else console.log(`  performance HUD: ${enabled ? "on" : "off"}`);
+            return 0;
+        }
+
         case "tap": {
             const selector = args[0];
             if (!selector) {
@@ -178,7 +194,7 @@ export async function runDo(host: Host, sub: string, args: string[], json: boole
 
         default:
             console.error(`  unknown do subcommand: ${sub}`);
-            console.error("  available: tap, type, key, scroll, drag");
+            console.error("  available: hud, tap, type, key, scroll, drag");
             return 1;
     }
 }

@@ -5,26 +5,26 @@
 //! routes them back to React handlers. The JSON shapes are unchanged from the old stdio bridge.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
+use rustc_hash::FxHashMap;
 use serde_json::json;
 
 // last layout we emitted per node id — the render loop runs every frame, so we only
 // emit `layout` when a node's measured rect actually changes.
-static LAST_LAYOUT: Lazy<Mutex<HashMap<u64, (i32, i32, i32, i32)>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static LAST_LAYOUT: Lazy<Mutex<FxHashMap<u64, (i32, i32, i32, i32)>>> =
+    Lazy::new(|| Mutex::new(FxHashMap::default()));
 // most recent painted rect per node id. imperative rn `measure()` can subscribe to
 // layout after the element has already painted; this cache lets us answer with the
 // last real native geometry instead of a stale zero placeholder.
-static LAST_FRAME: Lazy<Mutex<HashMap<u64, (f32, f32, f32, f32)>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static LAST_FRAME: Lazy<Mutex<FxHashMap<u64, (f32, f32, f32, f32)>>> =
+    Lazy::new(|| Mutex::new(FxHashMap::default()));
 thread_local! {
     // Layout reporting runs on the GPUI main thread. During one paint, collect all
     // node frames locally and merge them under LAST_FRAME's mutex once at the root.
     // Calls outside paint keep their immediate semantics for lifecycle code/tests.
-    static FRAME_LAYOUTS: RefCell<Option<HashMap<u64, (f32, f32, f32, f32)>>> = const { RefCell::new(None) };
+    static FRAME_LAYOUTS: RefCell<Option<FxHashMap<u64, (f32, f32, f32, f32)>>> = RefCell::new(None);
 }
 static LAYOUT_SUBSCRIBERS: Lazy<Mutex<std::collections::HashSet<u64>>> =
     Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
@@ -71,6 +71,34 @@ pub fn command(id: &str) {
 /// A gesture event with no payload (press / pressIn / pressOut / longPress / focus / blur).
 pub fn event(id: u64, name: &str) {
     emit_value(json!({ "type": "event", "id": id, "event": name }));
+}
+
+pub fn diff_event(
+    id: u64,
+    name: &str,
+    value: Option<&str>,
+    old_line: Option<u32>,
+    new_line: Option<u32>,
+) {
+    let mut event = json!({ "type": "event", "id": id, "event": name });
+    if let Some(value) = value {
+        event["value"] = json!(value);
+    }
+    if let Some(old_line) = old_line {
+        event["oldLine"] = json!(old_line);
+    }
+    if let Some(new_line) = new_line {
+        event["newLine"] = json!(new_line);
+    }
+    emit_value(event);
+}
+
+pub fn renderer_provenance(request_id: u64) {
+    emit_value(json!({
+        "type": "rendererProvenance",
+        "requestId": request_id,
+        "provenance": crate::build_identity::provenance(),
+    }));
 }
 
 pub fn submit(id: u64, value: &str) {
@@ -296,7 +324,7 @@ pub fn layout_if_changed(id: u64, x: f32, y: f32, width: f32, height: f32) {
 
 pub fn begin_layout_frame() {
     FRAME_LAYOUTS.with(|layouts| {
-        *layouts.borrow_mut() = Some(HashMap::new());
+        *layouts.borrow_mut() = Some(FxHashMap::default());
     });
 }
 

@@ -316,6 +316,17 @@ export const AccessibilityInfo = {
     setAccessibilityFocus(_reactTag: number): void {},
 };
 
+// Native-library compatibility surface. Desktop has no TurboModule registry,
+// but packages such as expo-clipboard import the API before deciding whether to use it.
+export const TurboModuleRegistry = {
+    get<T>(_name: string): T | null {
+        return null;
+    },
+    getEnforcing<T>(_name: string): T {
+        throw new Error(`TurboModule "${_name}" not available on desktop`);
+    },
+};
+
 function parseFilePickerPaths(value: unknown): string[] {
     const parsed = typeof value === "string" ? JSON.parse(value) as unknown : value;
     return Array.isArray(parsed) ? parsed.filter((path): path is string => typeof path === "string" && path.length > 0) : [];

@@ -17,17 +17,16 @@ import { runDo } from "./commands/do";
 import { runFlow } from "./commands/flow";
 import { runTrace } from "./commands/trace";
 import { runDiff, runShot, type ShotFlags } from "./commands/shot";
-import { runWatchReload } from "./watchReload";
 import { runHotReload } from "./hotReload";
+import { join, resolve } from "node:path";
 
 const HELP = `rngpui — react-native-gpui developer CLI
 
 usage:
   rngpui shot <--bundle app.hbc | --launch entry.tsx | --session dir> [--size WxH] [--appearance light|dark] [--select id ...] [--out png] [--fixture] [--keep]
   rngpui reshot --session <dir> [--select id ...] [--out png]      sub-second re-capture of a kept session
-  rngpui dev <--bundle app.hbc | --launch entry.tsx> [--size --appearance --fixture]   keep one offscreen instance alive; prints its session dir
-  rngpui hot-reload --socket <control.sock> --build <cmd> --bundle <bundle.js> --root <dir> [--pid <pid-file>]   Fast Refresh on edit; SIGUSR2 fallback
-  rngpui watch-reload --pid <pid-file> --root <dir> [--root <dir> ...]   send SIGUSR2 reload on source edits
+  rngpui dev --launch <entry.tsx> [--root <dir> ...] [--size WxH]   launch once and Fast Refresh on edit
+  rngpui dev --socket <control.sock> --build <cmd> --bundle <bundle.js> --root <dir>   Fast Refresh an owned external instance
   rngpui diff <before.png> <after.png> [--out highlight.png] [--threshold n]
   rngpui <get|do> <subcommand> [selector] [--launch <entry.tsx> | --bundle <app.hbc> | --session <dir> | --attach] [--json]
   rngpui trace <selector ...|--all> [--keys k1,k2] [--ms n] [--action "tap <sel>"] [target] [--json]
@@ -37,8 +36,8 @@ usage:
 the fast loop (offscreen, no screenshots, one command):
   shot                   launch → wait for a stable frame → write png + tree → print
                          the png path + bounds/color of every --select'd node. ONE call.
-  dev                    launch once and keep it alive; print the session dir. Pair with
-                         reshot for sub-second re-captures (no relaunch, no re-bundle).
+  dev                    launch one development instance and keep its PID and native state
+                         while Hermes React Refresh applies source edits.
   reshot                 re-capture a kept --session instantly (state/data changed → look again).
   diff                   compare two pngs: changed-pixel ratio + changed-region box (+ --out highlight).
 
@@ -72,6 +71,7 @@ get (introspect — read-only):
   get color <selector|x,y>       sampled dominant/average color in a node or at a point
   get point <x,y>                topmost node + pixel color at a window point
   get frames                     painted-frame counter + live fps + frame-gap stats
+  get provenance                 native renderer/service/GPUI/Hermes/bundle identity
 
 trace (animation forensics — no screenshots):
   trace <selector ...>           record every animated style write (off-thread
@@ -88,6 +88,7 @@ trace (animation forensics — no screenshots):
 do (drive):
   do tap <selector|x,y>          synthesize a press at the node center / point
   do type <text>                 type into the focused input
+  do hud <on|off>                toggle the native in-window performance HUD
   do key <key>                   send one key (enter, backspace, space, a, …)
   do scroll <selector|x,y> <dx,dy>  scroll the container at the point by a delta
   do drag <from> <to> [steps]    synthesize an owned offscreen press-drag
@@ -108,7 +109,7 @@ selectors:
 
 examples:
   rngpui shot --bundle native-shell/.gpui-hermes/app.hbc --size 1360x880 --fixture --appearance dark --select stage --select trees-rail
-  rngpui dev --bundle native-shell/.gpui-hermes/app.hbc --fixture        # → prints session dir
+  rngpui dev --launch app/index.tsx --fixture                           # Fast Refresh until Ctrl-C
   rngpui reshot --session /var/.../rngpui-cli-XXXX --select composer
   rngpui diff /tmp/before.png /tmp/rngpui-shot.png --out /tmp/diff.png
   rngpui get describe stage --launch examples/superconductor.tsx
@@ -151,7 +152,6 @@ function parseArgs(argv: string[]) {
         else if (a === "--action") actions.push(args[++i] ?? "");
         else if (a === "--all") flags.all = true;
         else if (a === "--out") flags.out = args[++i] ?? "";
-        else if (a === "--pid") flags.pid = args[++i] ?? "";
         else if (a === "--socket") flags.socket = args[++i] ?? "";
         else if (a === "--build") flags.build = args[++i] ?? "";
         else if (a === "--root") roots.push(args[++i] ?? "");
@@ -206,14 +206,33 @@ async function main(): Promise<number> {
         return runShot(sf);
     }
     if (group === "dev") {
-        // keep one offscreen instance alive; capture a first frame, then leave it for reshot.
-        const code = await runShot({ ...shotFlags(flags, select), keep: true });
-        return code;
-    }
-    if (group === "hot-reload") {
+        const entry = flags.launch ? resolve(String(flags.launch)) : undefined;
+        if (entry) {
+            const host = await launchHost(entry, {
+                size: flags.size ? String(flags.size) : undefined,
+                development: true,
+                appearance: flags.appearance ? String(flags.appearance) : undefined,
+                fixture: flags.fixture === true,
+            });
+            console.log(`[rngpui-dev] pid=${host.servicePid} session=${host.sessionDir}`);
+            try {
+                return await runHotReload({
+                    socketPath: host.controlSocketPath,
+                    roots: roots.filter(Boolean).length ? roots.filter(Boolean) : [process.cwd()],
+                    entryPath: entry,
+                    bundlePath: join(host.sessionDir, "hot.js"),
+                    ignores: ignores.filter(Boolean),
+                    extensions: extensions.filter(Boolean),
+                    debounceMs: flags.debounceMs ? Number(flags.debounceMs) : undefined,
+                    label: flags.label ? String(flags.label) : "rngpui-dev",
+                    once: flags.once === true,
+                });
+            } finally {
+                host.close();
+            }
+        }
         return runHotReload({
             socketPath: flags.socket ? String(flags.socket) : undefined,
-            pidPath: flags.pid ? String(flags.pid) : undefined,
             roots: roots.filter(Boolean),
             buildCommand: flags.build ? String(flags.build) : undefined,
             bundlePath: flags.bundle ? String(flags.bundle) : undefined,
@@ -222,16 +241,6 @@ async function main(): Promise<number> {
             debounceMs: flags.debounceMs ? Number(flags.debounceMs) : undefined,
             label: flags.label ? String(flags.label) : undefined,
             once: flags.once === true,
-        });
-    }
-    if (group === "watch-reload") {
-        return runWatchReload({
-            pidPath: flags.pid ? String(flags.pid) : undefined,
-            roots: roots.filter(Boolean),
-            ignores: ignores.filter(Boolean),
-            extensions: extensions.filter(Boolean),
-            debounceMs: flags.debounceMs ? Number(flags.debounceMs) : undefined,
-            label: flags.label ? String(flags.label) : undefined,
         });
     }
     if (group === "diff") {

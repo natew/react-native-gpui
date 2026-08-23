@@ -33,10 +33,13 @@ fn dump_node(el: &Arc<ReactElement>) -> Value {
     if let Some(text) = el.text.as_ref() {
         obj.insert("text".into(), json!(text));
     }
-    if let Some(value) = el.value.as_ref() {
+    if let Some(value) = el
+        .input_payload()
+        .and_then(|payload| payload.value.as_ref())
+    {
         obj.insert("value".into(), json!(value));
     }
-    if let Some(src) = el.src.as_ref() {
+    if let Some(src) = el.src() {
         obj.insert("src".into(), json!(src));
     }
     // authored JSX source location ("<abs-path>:<line>:<col>") from the inspector
@@ -53,7 +56,7 @@ fn dump_node(el: &Arc<ReactElement>) -> Value {
     if let Some(key) = el.native_layout_key.as_ref() {
         obj.insert("nativeLayoutKey".into(), json!(key));
     }
-    if el.terminal_session_id.is_some() {
+    if el.terminal_session_id().is_some() {
         let (session_id, frame_count) = crate::elements::effective_presentation(el);
         obj.insert("terminalSessionId".into(), json!(session_id));
         obj.insert("terminalFrameCount".into(), json!(frame_count));

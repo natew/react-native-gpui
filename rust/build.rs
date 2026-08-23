@@ -4,6 +4,7 @@
 // HERMES_ROOT overrides the Hermes checkout (default: ~/github/hermes). The runtime dylib
 // is found at $HERMES_ROOT/build/lib and resolved at runtime via an embedded rpath.
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::SystemTime;
 
 fn newest_mtime(dir: &Path) -> Option<SystemTime> {
@@ -14,7 +15,9 @@ fn newest_mtime(dir: &Path) -> Option<SystemTime> {
             continue;
         };
         for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else { continue };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
             if kind.is_dir() {
                 stack.push(entry.path());
             } else if kind.is_file() {
@@ -34,6 +37,48 @@ fn main() {
         format!("{home}/github/hermes")
     });
     let hermes = PathBuf::from(hermes);
+    let source_sha = std::env::var("RNGPUI_SOURCE_SHA").ok().or_else(|| {
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|sha| sha.trim().to_string())
+    });
+    let source_sha = source_sha.unwrap_or_else(|| "unknown".to_string());
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
+    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
+    println!("cargo:rustc-env=RNGPUI_SOURCE_SHA={source_sha}");
+    println!(
+        "cargo:rustc-env=RNGPUI_BUILD_ID={source_sha}:{}:{profile}:{target}",
+        env!("CARGO_PKG_VERSION")
+    );
+    println!(
+        "cargo:rustc-env=RNGPUI_HERMES_VERSION={}",
+        std::env::var("HERMES_VERSION").unwrap_or_else(|_| {
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&hermes)
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .map(|sha| sha.trim().to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        })
+    );
+    println!("cargo:rerun-if-env-changed=RNGPUI_SOURCE_SHA");
+    println!("cargo:rerun-if-env-changed=HERMES_VERSION");
+    if let Some(git_head) = Command::new("git")
+        .args(["rev-parse", "--git-path", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+    {
+        println!("cargo:rerun-if-changed={}", git_head.trim());
+    }
     let api = hermes.join("API");
     let jsi = api.join("jsi");
     let include = hermes.join("include");

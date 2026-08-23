@@ -14,26 +14,27 @@ import * as Portal from "./portal";
 import * as Runtime from "./runtime";
 import * as PlatformDriver from "./platform-driver";
 
-const nativeModule = {
-    ...Render,
-    ...Components,
-    ...Style,
-    ...Surfaces,
-    ...DimensionsModule,
-    ...Apis,
-    ...AnimatedModule,
-    ...Commands,
-    ...KeyboardNavigation,
-    ...Portal,
-    ...Runtime,
-    ...PlatformDriver,
-};
+const nativeModule = Object.assign(
+    {},
+    Render,
+    Components,
+    Style,
+    Surfaces,
+    DimensionsModule,
+    Apis,
+    AnimatedModule,
+    Commands,
+    KeyboardNavigation,
+    Portal,
+    Runtime,
+    PlatformDriver,
+);
 
-(globalThis as typeof globalThis & { __rngpuiHotModules?: Record<string, unknown> }).__rngpuiHotModules = {
-    ...((globalThis as typeof globalThis & { __rngpuiHotModules?: Record<string, unknown> }).__rngpuiHotModules ?? {}),
-    react: React,
-    "react/jsx-runtime": JSXRuntime,
-    "react/jsx-dev-runtime": JSXDevRuntime,
-    "react-native-gpui": nativeModule,
-    "react-native": nativeModule,
-};
+const globalObject = globalThis as typeof globalThis & { __rngpuiHotModules?: Record<string, unknown> };
+const hotModules = globalObject.__rngpuiHotModules ?? {};
+hotModules.react = React;
+hotModules["react/jsx-runtime"] = JSXRuntime;
+hotModules["react/jsx-dev-runtime"] = JSXDevRuntime;
+hotModules["react-native-gpui"] = nativeModule;
+hotModules["react-native"] = nativeModule;
+globalObject.__rngpuiHotModules = hotModules;

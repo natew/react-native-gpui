@@ -7,7 +7,7 @@
 // Bun is used only as the dev bundler here; the output runs under Hermes.
 import { homedir } from "node:os";
 import { readFileSync, writeFileSync } from 'node:fs'
-import { dirname, resolve, sep, join } from 'node:path'
+import { resolve, sep, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { reanimatedBunPlugin } from './reanimated-bun-plugin.mjs'
 import { rngpuiHotUpdateAliasPlugin } from './hot-update-alias-plugin.mjs'
@@ -22,7 +22,8 @@ const entry = args[0] ? resolve(args[0]) : resolve(root, 'examples/hermes-smoke.
 const outJs = args[1] ? resolve(args[1]) : '/tmp/hermes-bundle.js'
 const mode = process.env.NODE_ENV || 'development'
 const hotUpdate = process.env.RNGPUI_HOT_UPDATE === '1'
-const refreshPlugin = mode === 'development' ? reactRefreshPlugin({ roots: [dirname(entry)] }) : null
+const refreshBootstrap = resolve(root, 'src/refresh.ts')
+const refreshTransform = mode === 'development' ? createRefreshTransform() : null
 
 const result = await Bun.build({
   entrypoints: [entry],
@@ -42,8 +43,7 @@ const result = await Bun.build({
   // worklet babel transform (content-gated) + native-seam redirect to ts/src/reanimated.
   plugins: [
     ...(hotUpdate ? [rngpuiHotUpdateAliasPlugin()] : []),
-    ...(refreshPlugin ? [refreshPlugin] : []),
-    reanimatedBunPlugin({ rngTsRoot: root }),
+    reanimatedBunPlugin({ rngTsRoot: root, transformSource: refreshTransform }),
     // last because bun onResolve hooks do not chain; the aliases above own
     // their package names before this handles react-native export conditions.
     nativePackageExportsPlugin({ root, name: 'rngpui native package exports' }),
@@ -106,23 +106,13 @@ if (!hotUpdate && !entry.endsWith('/reanimated/ui-entry.ts')) {
   }
 }
 
-function reactRefreshPlugin({ roots }) {
-  const normalizedRoots = roots.map((dir) => resolve(dir) + sep)
+function createRefreshTransform() {
   const transform = createReactRefreshSwcTransform()
-  return {
-    name: 'rngpui-react-refresh',
-    setup(build) {
-      build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (args) => {
-        if (args.path.includes(`${sep}node_modules${sep}`)) return undefined
-        if (!normalizedRoots.some((dir) => args.path.startsWith(dir))) return undefined
-        const isTs = /\.[cm]?tsx?$/.test(args.path)
-        const isJsx = /x$/.test(args.path)
-        const source = readFileSync(args.path, 'utf8')
-        return {
-          contents: await transform(source, { filename: args.path, isTs, isJsx }),
-          loader: 'js',
-        }
-      })
-    },
+  return async (source, { filename, isTs, isJsx }) => {
+    if (filename === refreshBootstrap || filename.includes(`${sep}node_modules${sep}`)) return source
+    const code = await transform(source, { filename, isTs, isJsx })
+    if (filename !== entry) return code
+    if (!hotUpdate) return `import ${JSON.stringify(refreshBootstrap)};\n${code}`
+    return `if (globalThis.__rngpuiRefreshReady !== true) throw new Error("RNGPUI Fast Refresh runtime is not installed");\n${code}`
   }
 }

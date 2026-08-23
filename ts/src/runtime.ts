@@ -40,6 +40,11 @@ export type SerializedNode = {
     autoFocus?: boolean;
     mostRecentEventCount?: number;
     src?: string;
+    /** `<Diff>` options. The patch itself uses `text` so large-field interning applies. */
+    wordDiff?: boolean;
+    collapsedPaths?: string[];
+    diffScroll?: boolean;
+    maxLines?: number;
     /** delta wire only: this (changed) node's large `text`/`src` is byte-identical to
      * what the host already holds for this globalId, so it was omitted — the host reuses
      * its prior value (parse_json_tree, same PRIOR_TREE_INDEX the node-level `ref` uses).
@@ -128,6 +133,7 @@ export type BridgeEvent =
     | { type: "resize"; width: number; height: number }
     | { type: "command"; id: string }
     | { type: "appearance"; colorScheme: "light" | "dark" }
+    | { type: "rendererProvenance"; requestId: number; provenance: RendererProvenance }
     | {
           type: "event";
           id: number;
@@ -157,6 +163,8 @@ export type BridgeEvent =
           /** GhosttyTerminal `terminalViewport` measure: grid cols/rows */
           cols?: number;
           rows?: number;
+          oldLine?: number;
+          newLine?: number;
           /** `pseudo` lane: absolute native hover/press state of the node's hitbox */
           hovered?: boolean;
           pressed?: boolean;
@@ -179,7 +187,19 @@ export type BridgeUpdateDiagnostics = {
 export interface BridgeOptions {
     /** Enables the native Option-key element inspector in the host. */
     inspector?: boolean;
+    /** Enables the native in-window frame/commit performance HUD. */
+    performanceHud?: boolean;
 }
+
+export type RendererProvenance = {
+    renderer: string;
+    rendererVersion: string;
+    gpuiRevision: string;
+    serviceVersion: string;
+    hermesVersion: string;
+    bundleUrl: string | null;
+    development: boolean;
+};
 
 const COMMIT_TRACE = typeof process !== "undefined" && !!process.env?.RNGPUI_COMMIT_TRACE;
 
@@ -255,6 +275,9 @@ export function startBridge(initial: SerializedNode, options: BridgeOptions = {}
     const initialUpdate = send(initial);
     if (options.inspector) {
         send({ $cmd: "inspector", enabled: true });
+    }
+    if (options.performanceHud) {
+        send({ $cmd: "performanceHud", enabled: true });
     }
 
     return {

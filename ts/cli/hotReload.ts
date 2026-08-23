@@ -1,12 +1,12 @@
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync, watch, type FSWatcher } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync, statSync, watch, type FSWatcher } from "node:fs";
 import { createConnection } from "node:net";
-import { relative, resolve } from "node:path";
+import { extname, join, relative, resolve, sep } from "node:path";
 
 export type HotReloadOptions = {
     socketPath?: string;
-    pidPath?: string;
     roots: string[];
+    entryPath?: string;
     buildCommand?: string;
     bundlePath?: string;
     ignores?: string[];
@@ -19,19 +19,20 @@ export type HotReloadOptions = {
 const DEFAULT_IGNORES = ["node_modules", ".git", ".gpui-hermes", ".gpui-out", "dist"];
 const DEFAULT_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".css"];
 const SOCKET_READY_TIMEOUT_MS = 5_000;
+const BUNDLE_SCRIPT = join(import.meta.dirname, "..", "scripts", "bundle-hermes.mjs");
 
 export async function runHotReload(options: HotReloadOptions): Promise<number> {
     const socketPath = options.socketPath || process.env.RNGPUI_CONTROL_SOCKET;
     if (!socketPath) {
-        console.error("  hot-reload needs --socket <control.sock> or RNGPUI_CONTROL_SOCKET");
+        console.error("  dev needs --socket <control.sock> or RNGPUI_CONTROL_SOCKET");
         return 1;
     }
-    if (!options.buildCommand) {
-        console.error("  hot-reload needs --build <shell-command>");
+    if (!options.buildCommand && !options.entryPath) {
+        console.error("  dev needs --launch <entry.tsx> or --build <shell-command>");
         return 1;
     }
     if (!options.bundlePath) {
-        console.error("  hot-reload needs --bundle <bundle.js>");
+        console.error("  dev needs --bundle <bundle.js>");
         return 1;
     }
 
@@ -39,24 +40,26 @@ export async function runHotReload(options: HotReloadOptions): Promise<number> {
     const run = () => buildAndPush({ ...options, socketPath, label });
     if (options.once) return (await run()) ? 0 : 1;
 
-    const roots = options.roots.map((root) => resolve(root)).filter((root) => existsSync(root) && statSync(root).isDirectory());
+    const roots = [
+        ...new Set(options.roots.map((root) => resolve(root)).filter((root) => existsSync(root) && statSync(root).isDirectory())),
+    ];
     if (roots.length === 0) {
-        console.error("  hot-reload needs at least one existing --root <dir>");
+        console.error("  dev needs at least one existing --root <dir>");
         return 1;
     }
 
-    const ignores = [...DEFAULT_IGNORES, ...(options.ignores ?? [])].filter(Boolean);
-    const extensions = normalizeExtensions(options.extensions?.length ? options.extensions : DEFAULT_EXTENSIONS);
-    const debounceMs = options.debounceMs ?? 220;
-    const watchers = new Map<string, FSWatcher>();
+    const ignores = new Set([...DEFAULT_IGNORES, ...(options.ignores ?? [])].filter(Boolean));
+    const extensions = new Set(normalizeExtensions(options.extensions?.length ? options.extensions : DEFAULT_EXTENSIONS));
+    const debounceMs = options.debounceMs ?? 80;
+    const watchers: FSWatcher[] = [];
     let timer: ReturnType<typeof setTimeout> | null = null;
     let building = false;
     let pending = false;
     let lastTrigger = "";
 
-    const ignored = (path: string) => ignores.some((part) => path.includes(part));
+    const ignored = (path: string) => path.split(sep).some((part) => ignores.has(part));
     const schedule = (path: string) => {
-        if (ignored(path) || !matchesExtension(path, extensions)) return;
+        if (ignored(path) || !extensions.has(extname(path))) return;
         lastTrigger = relative(process.cwd(), path);
         pending = true;
         if (timer) clearTimeout(timer);
@@ -72,51 +75,42 @@ export async function runHotReload(options: HotReloadOptions): Promise<number> {
             await run();
         } catch (error) {
             console.error(`[${label}] hot update error: ${error instanceof Error ? error.message : String(error)}`);
-            signalFallbackReload(options.pidPath, label);
         } finally {
             building = false;
             if (pending) void runPending();
         }
     };
-    const watchDirectory = (dir: string) => {
-        if (watchers.has(dir) || ignored(dir)) return;
-        const watcher = watch(dir, (_event, file) => {
-            const changed = file ? resolve(dir, String(file)) : dir;
-            if (isDirectory(changed)) watchTree(changed);
-            schedule(changed);
+    for (const root of roots) {
+        const watcher = watch(root, { recursive: true }, (_event, file) => {
+            if (file) schedule(resolve(root, String(file)));
         });
         watcher.on("error", (error) => {
-            console.error(`[${label}] watch error ${dir}: ${error instanceof Error ? error.message : String(error)}`);
+            console.error(`[${label}] watch error ${root}: ${error instanceof Error ? error.message : String(error)}`);
         });
-        watchers.set(dir, watcher);
-    };
-    const watchTree = (root: string) => {
-        if (ignored(root)) return;
-        watchDirectory(root);
-        for (const entry of readdirSafe(root)) {
-            const path = resolve(root, entry.name);
-            if (entry.isDirectory()) watchTree(path);
-        }
-    };
+        watchers.push(watcher);
+    }
 
-    for (const root of roots) watchTree(root);
-    console.log(`[${label}] hot reload armed: ${roots.map((root) => relative(process.cwd(), root) || root).join(", ")}`);
+    console.log(`[${label}] Fast Refresh armed: ${roots.map((root) => relative(process.cwd(), root) || root).join(", ")}`);
     console.log(`[${label}] control socket: ${socketPath}`);
-    process.on("SIGINT", () => closeWatchers(watchers));
-    process.on("SIGTERM", () => closeWatchers(watchers));
-    await new Promise(() => {});
+    await new Promise<void>((resolveDone) => {
+        const close = () => {
+            closeWatchers(watchers);
+            resolveDone();
+        };
+        process.once("SIGINT", close);
+        process.once("SIGTERM", close);
+    });
     return 0;
 }
 
 async function buildAndPush(options: HotReloadOptions & { socketPath: string; label: string }) {
     const started = Date.now();
-    const build = spawnSync("/bin/sh", ["-lc", options.buildCommand!], {
-        cwd: process.cwd(),
-        stdio: "inherit",
-        env: { ...process.env, NODE_ENV: process.env.NODE_ENV || "development", RNGPUI_HOT_UPDATE: "1" },
-    });
-    if (build.status !== 0) {
-        console.error(`[${options.label}] build failed with status ${build.status}; keeping current app`);
+    const env = { ...process.env, NODE_ENV: "development", RNGPUI_HOT_UPDATE: "1" };
+    const status = options.entryPath
+        ? await runProcess(process.execPath, [BUNDLE_SCRIPT, resolve(options.entryPath), resolve(options.bundlePath!)], env)
+        : await runProcess("/bin/sh", ["-lc", options.buildCommand!], env);
+    if (status !== 0) {
+        console.error(`[${options.label}] build failed with status ${status}; current app remains active`);
         return false;
     }
     const bundlePath = resolve(options.bundlePath!);
@@ -134,7 +128,6 @@ async function buildAndPush(options: HotReloadOptions & { socketPath: string; la
         );
     } catch (error) {
         console.error(`[${options.label}] hot update request failed: ${error instanceof Error ? error.message : String(error)}`);
-        signalFallbackReload(options.pidPath, options.label);
         return false;
     }
     if (response.ok) {
@@ -142,16 +135,15 @@ async function buildAndPush(options: HotReloadOptions & { socketPath: string; la
         return true;
     }
     console.error(`[${options.label}] hot update failed: ${response.error || "unknown error"}`);
-    signalFallbackReload(options.pidPath, options.label);
     return false;
 }
 
-function signalFallbackReload(pidPath: string | undefined, label: string) {
-    if (!pidPath) return;
-    const pid = readPid(pidPath);
-    if (!pid) return;
-    process.kill(pid, "SIGUSR2");
-    console.log(`[${label}] fallback live reload (SIGUSR2 -> ${pid})`);
+function runProcess(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<number> {
+    return new Promise((resolveStatus, reject) => {
+        const child = spawn(command, args, { cwd: process.cwd(), stdio: "inherit", env });
+        child.once("error", reject);
+        child.once("exit", (code, signal) => resolveStatus(code ?? (signal ? 1 : 0)));
+    });
 }
 
 function requestSocket<T>(socketPath: string, body: object): Promise<T> {
@@ -212,39 +204,7 @@ function normalizeExtensions(values: string[]): string[] {
         .map((value) => (value.startsWith(".") ? value : `.${value}`));
 }
 
-function matchesExtension(path: string, extensions: string[]) {
-    return extensions.some((extension) => path.endsWith(extension));
-}
-
-function readPid(path: string) {
-    try {
-        const pid = Number(readFileSync(path, "utf8").trim());
-        if (!Number.isInteger(pid) || pid <= 0) return 0;
-        process.kill(pid, 0);
-        return pid;
-    } catch {
-        return 0;
-    }
-}
-
-function isDirectory(path: string) {
-    try {
-        return statSync(path).isDirectory();
-    } catch {
-        return false;
-    }
-}
-
-function readdirSafe(path: string) {
-    try {
-        return readdirSync(path, { withFileTypes: true });
-    } catch {
-        return [];
-    }
-}
-
-function closeWatchers(watchers: Map<string, FSWatcher>) {
-    for (const watcher of watchers.values()) watcher.close();
-    watchers.clear();
-    process.exit(0);
+function closeWatchers(watchers: FSWatcher[]) {
+    for (const watcher of watchers) watcher.close();
+    watchers.length = 0;
 }

@@ -8,9 +8,12 @@ const REACT_EXPORTS = [
 ]
 
 const RNGPUI_EXPORTS = [
-  'createRoot', 'render', 'AppRegistry', 'View', 'Text', 'TextInput', 'Image', 'Svg', 'WebView',
+  'createRoot', 'render', 'AppRegistry', 'unstable_batchedUpdates',
+  'View', 'Text', 'TextInput', 'Image', 'Svg', 'WebView',
   'SystemView', 'GhosttyTerminal', 'ScrollView', 'Pressable', 'TouchableOpacity',
-  'TouchableHighlight', 'TouchableWithoutFeedback', 'ListGroup', 'Button', 'SafeAreaView',
+  'RefreshControl', 'Diff',
+  'TouchableHighlight', 'TouchableWithoutFeedback', 'ListGroup', 'Button', 'NativeButton',
+  'NativeTextInput', 'SafeAreaView',
   'KeyboardAvoidingView', 'Switch', 'FlatList', 'SectionList', 'ActivityIndicator', 'StatusBar',
   'Modal', 'requireNativeComponent', 'codegenNativeComponent', 'codegenNativeCommands',
   'StyleSheet', 'normalizeStyle', 'LiquidGlassBackground', 'LiquidGlassView', 'EffectSurface',
@@ -20,13 +23,16 @@ const RNGPUI_EXPORTS = [
   'AppState', 'Linking', 'InteractionManager', 'LayoutAnimation', 'UIManager', 'NativeModules',
   'findNodeHandle', 'processColor', 'resolveColorValue', 'PanResponder', 'Vibration',
   'DeviceEventEmitter', 'NativeEventEmitter', 'AccessibilityInfo', 'FilePicker', 'VoiceRecorder',
-  'Animated', 'AnimatedValue', 'Easing', 'AppCommands', 'Dock', 'NativeLayout',
+  'Animated', 'AnimatedValue', 'Easing', 'AppCommands', 'Dock', 'NativeClipboard', 'NativeLayout',
+  'NativeMenus', 'NativeWindow', 'PerformanceHUD', 'Renderer', 'setupTamaguiNativeMenus',
   'KeyboardNavigationProvider', 'useKeyboardNavigation', 'useKeyboardNavigationController',
   'useKeyboardNavigationState', 'useKeyboardNavigationTarget', 'useKeyboardNavigationKeyPress',
   'useKeyboardNavigationWindowKeyboard', 'mergeRefs', 'enabledKeyboardNavigationTargets',
-  'firstKeyboardNavigationTarget', 'nextKeyboardNavigationTarget', 'nextSequentialKeyboardNavigationTarget',
+  'firstKeyboardNavigationTarget', 'hasKeyboardNavigationModifier', 'nextKeyboardNavigationTarget',
+  'nextSequentialKeyboardNavigationTarget',
   'Portal', 'PortalHost', 'PortalProvider', 'NativePortal', 'NativePortalHost', 'usePortal',
   'setupTamaguiNativePortal', 'startBridge', 'platformDriver', 'registerPseudoListener',
+  'TurboModuleRegistry',
 ]
 
 export function rngpuiHotUpdateAliasPlugin() {
@@ -39,6 +45,12 @@ export function rngpuiHotUpdateAliasPlugin() {
       build.onResolve({ filter: /^react\/compiler-runtime$/ }, () => ({ path: 'rngpui-hot:react/compiler-runtime', namespace: 'rngpui-hot' }))
       build.onResolve({ filter: /^react-native-gpui$/ }, () => ({ path: 'rngpui-hot:react-native-gpui', namespace: 'rngpui-hot' }))
       build.onResolve({ filter: /^react-native$/ }, () => ({ path: 'rngpui-hot:react-native', namespace: 'rngpui-hot' }))
+      // Repository examples import the source entry directly. A hot bundle must
+      // still reuse the renderer already installed by the initial bundle.
+      build.onResolve({ filter: /^\.\.\/src\/index(?:\.ts)?$/ }, () => ({
+        path: 'rngpui-hot:react-native-gpui',
+        namespace: 'rngpui-hot',
+      }))
 
       build.onLoad({ filter: /^rngpui-hot:react$/, namespace: 'rngpui-hot' }, () => ({
         loader: 'js',

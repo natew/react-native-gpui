@@ -1,4 +1,3 @@
-import "./refresh";
 import { createContext } from "react";
 import ReactReconciler from "react-reconciler";
 import { DefaultEventPriority, NoEventPriority } from "react-reconciler/constants";
@@ -196,6 +195,10 @@ type LayoutSnapshot = Pick<
     | "src"
     | "nativeLayoutKey"
     | "nativeResize"
+    | "wordDiff"
+    | "collapsedPaths"
+    | "diffScroll"
+    | "maxLines"
 >;
 
 function layoutSnapshot(node: SerializedNode): LayoutSnapshot {
@@ -210,14 +213,44 @@ function layoutSnapshot(node: SerializedNode): LayoutSnapshot {
         src: node.src,
         nativeLayoutKey: node.nativeLayoutKey,
         nativeResize: node.nativeResize,
+        wordDiff: node.wordDiff,
+        collapsedPaths: node.collapsedPaths,
+        diffScroll: node.diffScroll,
+        maxLines: node.maxLines,
     };
 }
 
+function sameLayoutSnapshot(node: SerializedNode, snapshot: LayoutSnapshot): boolean {
+    return (
+        node.type === snapshot.type &&
+        sameSerializedValue(node.style, snapshot.style) &&
+        node.text === snapshot.text &&
+        sameSerializedValue(node.runs, snapshot.runs) &&
+        node.numberOfLines === snapshot.numberOfLines &&
+        node.placeholder === snapshot.placeholder &&
+        node.value === snapshot.value &&
+        node.src === snapshot.src &&
+        node.nativeLayoutKey === snapshot.nativeLayoutKey &&
+        sameSerializedValue(node.nativeResize, snapshot.nativeResize) &&
+        node.wordDiff === snapshot.wordDiff &&
+        sameSerializedValue(node.collapsedPaths, snapshot.collapsedPaths) &&
+        node.diffScroll === snapshot.diffScroll &&
+        node.maxLines === snapshot.maxLines
+    );
+}
+
 function sameHostPropsExceptStyle(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
-    const aKeys = Object.keys(a).filter((key) => key !== "style");
-    const bKeys = Object.keys(b).filter((key) => key !== "style");
-    if (aKeys.length !== bKeys.length) return false;
-    for (const key of aKeys) {
+    let aCount = 0;
+    let bCount = 0;
+    for (const key in a) {
+        if (key !== "style" && Object.prototype.hasOwnProperty.call(a, key)) aCount++;
+    }
+    for (const key in b) {
+        if (key !== "style" && Object.prototype.hasOwnProperty.call(b, key)) bCount++;
+    }
+    if (aCount !== bCount) return false;
+    for (const key in a) {
+        if (key === "style" || !Object.prototype.hasOwnProperty.call(a, key)) continue;
         if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
         const aValue = a[key];
         const bValue = b[key];
@@ -288,8 +321,13 @@ const PROP_TO_EVENT: Record<string, string> = {
     onLoad: "load",
     onInsertText: "terminalText",
     onMeasureViewport: "terminalViewport",
+    onToggleFile: "toggleFile",
+    onShowMore: "showMore",
+    onLineClick: "lineClick",
 };
-const handlers = new Map<number, Record<string, Function>>();
+const EVENT_PROP_PAIRS = Object.entries(PROP_TO_EVENT);
+type HandlerEntry = { callbacks: Record<string, Function>; eventNames: string[] };
+const handlers = new Map<number, HandlerEntry>();
 const inputEventCounts = new Map<number, number>();
 
 function chainHandler(first: Function | undefined, next: Function) {
@@ -324,17 +362,25 @@ export function setPseudoEvents(id: number, on: boolean): void {
 
 function registerHandlers(id: number, props: Record<string, unknown>) {
     const map: Record<string, Function> = {};
-    for (const [prop, event] of Object.entries(PROP_TO_EVENT)) {
+    const eventNames: string[] = [];
+    for (const [prop, event] of EVENT_PROP_PAIRS) {
         const next = props[prop];
         if (typeof next === "function") {
+            if (!map[event]) eventNames.push(event);
             map[event] = chainHandler(map[event], next);
         }
     }
     // hoverStyle/pressStyle are consumed by the styling layer (Tamagui) through the platform
     // driver, not wired as JS mouse handlers here. Only the user's own onHoverIn/onPressIn/etc.
     // (mapped above via PROP_TO_EVENT) produce listeners.
-    if (Object.keys(map).length) handlers.set(id, map);
-    else handlers.delete(id);
+    if (eventNames.length) {
+        const prior = handlers.get(id)?.eventNames;
+        const stableNames =
+            prior && prior.length === eventNames.length && prior.every((name, index) => name === eventNames[index])
+                ? prior
+                : eventNames;
+        handlers.set(id, { callbacks: map, eventNames: stableNames });
+    } else handlers.delete(id);
 }
 
 /** Called by the render layer when the bridge reports a native event. */
@@ -366,6 +412,8 @@ export function dispatchEvent(
         layout?: unknown;
         cols?: number;
         rows?: number;
+        oldLine?: number;
+        newLine?: number;
     },
 ) {
     if (event === "changeText" && typeof payload.eventCount === "number") {
@@ -384,7 +432,7 @@ export function dispatchEvent(
             flushPendingMeasures(id);
         }
     }
-    const fn = handlers.get(id)?.[event];
+    const fn = handlers.get(id)?.callbacks[event];
     if (!fn) return;
     let result: unknown;
     if (event === "changeText") result = fn(payload.value ?? "");
@@ -766,6 +814,8 @@ function createEvent(
         scrollContentWidth?: number;
         scrollContentHeight?: number;
         layout?: unknown;
+        oldLine?: number;
+        newLine?: number;
     },
 ) {
     let defaultPrevented = false;
@@ -793,6 +843,8 @@ function createEvent(
             buttons: payload.buttons ?? 0,
             pressDrag: !!payload.pressDrag,
             layout: payload.layout,
+            oldLine: payload.oldLine,
+            newLine: payload.newLine,
             locationX: payload.locationX ?? 0,
             locationY: payload.locationY ?? 0,
             pageX: payload.pageX ?? 0,
@@ -1109,7 +1161,9 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
                 fontFamily: style.fontFamily as string | undefined,
             };
             const runs = gatherRuns(inst, rootRun, true);
-            node.text = runs.map((r) => r.text).join("");
+            let text = "";
+            for (const run of runs) text += run.text;
+            node.text = text;
             if (typeof props.numberOfLines === "number" && props.numberOfLines > 0) {
                 node.numberOfLines = Math.floor(props.numberOfLines);
             }
@@ -1197,6 +1251,20 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
             if (frames.length) node.terminalFrames = frames;
             break;
         }
+        case "Diff": {
+            node.type = "diff";
+            node.text = typeof props.patch === "string" ? props.patch : "";
+            if (props.wordDiff === true) node.wordDiff = true;
+            if (props.scroll === true) node.diffScroll = true;
+            if (typeof props.maxLines === "number" && props.maxLines >= 0) {
+                node.maxLines = Math.floor(props.maxLines);
+            }
+            if (Array.isArray(props.collapsedPaths)) {
+                const paths = props.collapsedPaths.filter((path): path is string => typeof path === "string");
+                if (paths.length) node.collapsedPaths = paths;
+            }
+            break;
+        }
         case "ScrollView":
             node.type = "div";
             if (props.showsVerticalScrollIndicator === false) {
@@ -1228,10 +1296,12 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
     const nativeResize = normalizeNativeResize(props.nativeResize);
     if (nativeResize) node.nativeResize = nativeResize;
     if (listGroup) node.nativeListGroup = listGroup;
-    const evts = handlers.get(inst.id);
-    const eventNames = evts ? Object.keys(evts) : [];
-    if (measuredIds.has(inst.id) && !eventNames.includes("layout")) eventNames.push("layout");
-    if (eventNames.length) node.events = eventNames;
+    const registeredEventNames = handlers.get(inst.id)?.eventNames;
+    if (measuredIds.has(inst.id) && !registeredEventNames?.includes("layout")) {
+        node.events = registeredEventNames ? [...registeredEventNames, "layout"] : ["layout"];
+    } else if (registeredEventNames) {
+        node.events = registeredEventNames;
+    }
     const accessibility = serializeAccessibility(inst, node);
     if (accessibility) node.accessibility = accessibility;
     // authored JSX source location stamped by the babel source-location plugin
@@ -1259,14 +1329,13 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
     // their last value, which is still valid until a structural change dirties them).
     inst.hasPortal = isPortalType(inst.type) || inst.children.some((c) => !isTextLike(c) && c.hasPortal);
     if (inst.layoutDirty || inst.layoutSnapshot === undefined) {
-        const nextLayoutSnapshot = layoutSnapshot(node);
         if (
             inst.layoutSnapshot !== undefined &&
-            !sameSerializedValue(nextLayoutSnapshot, inst.layoutSnapshot)
+            !sameLayoutSnapshot(node, inst.layoutSnapshot)
         ) {
             invalidateLayout(inst);
         }
-        inst.layoutSnapshot = nextLayoutSnapshot;
+        inst.layoutSnapshot = layoutSnapshot(node);
         inst.layoutDirty = false;
     }
     inst.dirty = false;

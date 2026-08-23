@@ -628,6 +628,27 @@ export const NativeButton: FC<NativeButtonProps> = ({ title, ...rest }) =>
 export const NativeTextInput: FC<TextInputProps> = (props) =>
     createElement("NativeTextInput" as any, props);
 
+export type DiffEvent = {
+    nativeEvent: { value?: string; oldLine?: number; newLine?: number };
+};
+
+export interface DiffProps extends AccessibilityProps {
+    /** unified git patch text. */
+    patch: string;
+    wordDiff?: boolean;
+    collapsedPaths?: string[];
+    /** use the native virtualized scroller. Requires a bounded height. */
+    scroll?: boolean;
+    maxLines?: number;
+    onToggleFile?: (event: DiffEvent) => void;
+    onShowMore?: (event: DiffEvent) => void;
+    onLineClick?: (event: DiffEvent) => void;
+    style?: StyleProp<TextStyle>;
+}
+
+/** native virtualized unified-diff leaf. */
+export const Diff = "Diff" as unknown as FC<DiffProps>;
+
 // ── layout passthroughs (no insets / keyboard on desktop) ───────────
 export const SafeAreaView: FC<ViewProps> = (props) => createElement(View, props);
 export interface KeyboardAvoidingViewProps extends ViewProps {

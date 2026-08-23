@@ -25,7 +25,7 @@ impl ReactSvgElement {
     }
 
     fn build_child(&self) -> AnyElement {
-        let name = self.element.cached_svg_path.clone();
+        let name = self.element.svg_path();
         let size = self
             .element
             .style

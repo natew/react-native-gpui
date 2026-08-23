@@ -122,17 +122,17 @@ pub fn effective_presentation(element: &ReactElement) -> (String, usize) {
         session_id,
         frames
             .as_ref()
-            .map_or(element.terminal_frames.len(), |frames| frames.len()),
+            .map_or(element.terminal_frames().len(), |frames| frames.len()),
     )
 }
 
 fn resolve_presentation(element: &ReactElement) -> (String, Option<Arc<Vec<TerminalFrame>>>) {
     let authored_session_id = element
-        .terminal_session_id
-        .clone()
+        .terminal_session_id()
+        .map(String::from)
         .unwrap_or_else(|| "__terminal__".to_string());
     let authored_last_seq = element
-        .terminal_frames
+        .terminal_frames()
         .last()
         .map(|frame| frame.seq)
         .unwrap_or(0);
@@ -628,7 +628,7 @@ fn terminal_rows(
     let frames = presented_frames
         .as_ref()
         .map(|frames| frames.as_slice())
-        .unwrap_or(element.terminal_frames.as_slice());
+        .unwrap_or(element.terminal_frames());
     let mut result = (Vec::new(), 0.0, false, 0usize);
     let tick = TERMINAL_CLOCK.with(|clock| {
         let mut clock = clock.borrow_mut();

@@ -1,8 +1,16 @@
 import type { SerializedNode } from "./runtime";
 
-const sourceFileIds = new Map<string, number>();
-const announcedSourceFileIds = new Set<number>();
-let nextSourceId = 1;
+export type WireSourceCache = {
+    fileIds: Map<string, number>;
+    announcedIds: Set<number>;
+    nextId: number;
+};
+
+export function createWireSourceCache(): WireSourceCache {
+    return { fileIds: new Map(), announcedIds: new Set(), nextId: 1 };
+}
+
+const defaultSourceCache = createWireSourceCache();
 
 // Delta wire. The reconciler memoizes serialization — an unchanged subtree re-emits the
 // SAME SerializedNode object, and any change dirties the node AND its ancestors
@@ -47,9 +55,10 @@ export function toWireDelta(
     sent: WeakSet<SerializedNode>,
     big: BigFieldCache,
     stats?: WireDeltaStats,
+    sourceCache: WireSourceCache = defaultSourceCache,
 ): SerializedNode {
     const sources: Record<string, string> = {};
-    const wire = toWireDeltaInner(node, sent, big, sources, stats);
+    const wire = toWireDeltaInner(node, sent, big, sources, sourceCache, stats);
     return Object.keys(sources).length > 0 ? { ...wire, sources } : wire;
 }
 
@@ -58,6 +67,7 @@ function toWireDeltaInner(
     sent: WeakSet<SerializedNode>,
     big: BigFieldCache,
     sources: Record<string, string>,
+    sourceCache: WireSourceCache,
     stats?: WireDeltaStats,
 ): SerializedNode {
     if (sent.has(node)) {
@@ -69,20 +79,20 @@ function toWireDeltaInner(
     const source = node.source;
     const kids = node.children;
     let wire = kids?.length
-        ? { ...node, children: kids.map((kid) => toWireDeltaInner(kid, sent, big, sources, stats)) }
+        ? { ...node, children: kids.map((kid) => toWireDeltaInner(kid, sent, big, sources, sourceCache, stats)) }
         : node;
     wire = internBigFields(node, wire, big);
     if (source) {
         const match = /^(.*):(\d+):(\d+)$/.exec(source);
         if (!match) throw new Error(`invalid rngsSource location: ${source}`);
         const [, file, line, column] = match;
-        let sourceFileId = sourceFileIds.get(file);
+        let sourceFileId = sourceCache.fileIds.get(file);
         if (sourceFileId === undefined) {
-            sourceFileId = nextSourceId++;
-            sourceFileIds.set(file, sourceFileId);
+            sourceFileId = sourceCache.nextId++;
+            sourceCache.fileIds.set(file, sourceFileId);
         }
-        if (!announcedSourceFileIds.has(sourceFileId)) {
-            announcedSourceFileIds.add(sourceFileId);
+        if (!sourceCache.announcedIds.has(sourceFileId)) {
+            sourceCache.announcedIds.add(sourceFileId);
             sources[String(sourceFileId)] = file;
         }
         const { source: _source, ...withoutSource } = wire;

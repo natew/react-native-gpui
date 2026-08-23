@@ -203,6 +203,25 @@ pub fn stop() -> Value {
 
 /// Always-available paint cadence snapshot.
 pub fn frame_stats() -> Value {
+    let snapshot = frame_stats_snapshot();
+    json!({
+        "ok": true,
+        "framesPainted": snapshot.frames_painted,
+        "fpsLast1s": snapshot.fps_last_1s,
+        "lastFrameAgoMs": snapshot.last_frame_ago_ms,
+        "avgFrameGapMs": snapshot.avg_frame_gap_ms,
+    })
+}
+
+#[derive(Clone, Copy)]
+pub struct FrameStatsSnapshot {
+    pub frames_painted: u64,
+    pub fps_last_1s: usize,
+    pub last_frame_ago_ms: Option<f64>,
+    pub avg_frame_gap_ms: Option<f64>,
+}
+
+pub fn frame_stats_snapshot() -> FrameStatsSnapshot {
     let frames = FRAMES_PAINTED.load(Ordering::Relaxed);
     let times = PAINT_TIMES.lock().unwrap();
     let now = Instant::now();
@@ -215,17 +234,20 @@ pub fn frame_stats() -> Value {
         .map(|(_, at)| now.duration_since(*at).as_secs_f64() * 1000.0);
     let mut avg_gap_ms = None;
     if times.len() >= 2 {
-        let recent: Vec<&(u64, Instant)> = times.iter().rev().take(120).collect();
-        if recent.len() >= 2 {
-            let span = recent[0].1.duration_since(recent[recent.len() - 1].1);
-            avg_gap_ms = Some(span.as_secs_f64() * 1000.0 / (recent.len() - 1) as f64);
-        }
+        let sample_count = times.len().min(120);
+        let newest = times.back().expect("paint ring has at least two frames").1;
+        let oldest = times
+            .iter()
+            .nth_back(sample_count - 1)
+            .expect("sample is within paint ring")
+            .1;
+        let span = newest.duration_since(oldest);
+        avg_gap_ms = Some(span.as_secs_f64() * 1000.0 / (sample_count - 1) as f64);
     }
-    json!({
-        "ok": true,
-        "framesPainted": frames,
-        "fpsLast1s": last_1s,
-        "lastFrameAgoMs": last_frame_ago_ms,
-        "avgFrameGapMs": avg_gap_ms,
-    })
+    FrameStatsSnapshot {
+        frames_painted: frames,
+        fps_last_1s: last_1s,
+        last_frame_ago_ms,
+        avg_frame_gap_ms: avg_gap_ms,
+    }
 }

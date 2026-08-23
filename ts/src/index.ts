@@ -39,6 +39,7 @@ export {
     Button,
     NativeButton,
     NativeTextInput,
+    Diff,
     SafeAreaView,
     KeyboardAvoidingView,
     Switch,
@@ -75,6 +76,8 @@ export type {
     ListGroupProps,
     ButtonProps,
     NativeButtonProps,
+    DiffProps,
+    DiffEvent,
     SwitchProps,
     FlatListProps,
     SectionListProps,
@@ -147,6 +150,7 @@ export {
     DeviceEventEmitter,
     NativeEventEmitter,
     AccessibilityInfo,
+    TurboModuleRegistry,
     FilePicker,
     VoiceRecorder,
     type ColorSchemeName,
@@ -162,6 +166,8 @@ export {
     NativeLayout,
     NativeMenus,
     NativeWindow,
+    PerformanceHUD,
+    Renderer,
     type AppCommandBinding,
     type AppCommandConfig,
     type AppCommandMenu,
@@ -215,19 +221,8 @@ export {
 } from "./portal";
 
 // low-level bridge (escape hatch)
-export { startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type SerializedNode } from "./runtime";
+export { startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type RendererProvenance, type SerializedNode } from "./runtime";
 
 // renderer platform driver — tamagui's @tamagui/core setupPlatformDriver(platformDriver)
 // consumes this for renderer-owned pseudo (hover/press) states. See platform-driver.ts.
 export { platformDriver, registerPseudoListener, type PseudoState, type PseudoListener } from "./platform-driver";
-
-// no-op stubs for native modules that some libraries expect from
-// react-native (TurboModule etc.). On desktop these have no real
-// counterpart — they exist to satisfy import resolution so e.g.
-// expo-clipboard can bundle even when its native code is never called.
-export const TurboModuleRegistry = {
-    get: <T>(_name: string): T | null => null,
-    getEnforcing: <T>(_name: string): T => {
-        throw new Error(`TurboModule "${_name}" not available on desktop`)
-    },
-}

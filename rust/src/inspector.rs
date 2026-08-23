@@ -1244,10 +1244,12 @@ fn collect_snapshots(
             target: summary(element),
             events: element.events.to_vec(),
             value: snippet(
-                element
-                    .value
-                    .as_deref()
-                    .or(element.default_value.as_deref()),
+                element.input_payload().and_then(|payload| {
+                    payload
+                        .value
+                        .as_deref()
+                        .or(payload.default_value.as_deref())
+                }),
                 120,
             ),
             style: style_facts(element),
@@ -1376,6 +1378,24 @@ pub fn webview_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<u64> {
     None
 }
 
+/// The topmost renderer-owned Diff scroller at a point. This gives the debug
+/// socket the same retained scroll state that a native wheel event updates.
+pub fn diff_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<u64> {
+    let position = point(px(x), px(y));
+    let mut path = Vec::new();
+    let mut hits = Vec::new();
+    collect_hits(root, position, &mut path, &mut hits);
+    for hit in hits {
+        if hit.target.element_type == "diff" {
+            return Some(hit.target.id);
+        }
+        if paints_over(&hit) {
+            return None;
+        }
+    }
+    None
+}
+
 /// Whether a node puts pixels on screen where it was hit, rather than being a
 /// purely structural box. Reads the facts the inspector already collects, so a
 /// container with no fill, no edge, and nothing to draw does not count as cover.
@@ -1488,10 +1508,12 @@ fn collect_hits(
             events: element.events.to_vec(),
             native_list_group: element.native_list_group.clone(),
             value: snippet(
-                element
-                    .value
-                    .as_deref()
-                    .or(element.default_value.as_deref()),
+                element.input_payload().and_then(|payload| {
+                    payload
+                        .value
+                        .as_deref()
+                        .or(payload.default_value.as_deref())
+                }),
                 120,
             ),
             style: style_facts(element),
@@ -1729,39 +1751,20 @@ mod tests {
             element_type: element_type.to_string(),
             text: None,
             cached_text: gpui::SharedString::new_static(""),
-            number_of_lines: None,
-            selectable: false,
-            runs: Vec::new(),
-            src: None,
-            system_material: None,
-            system_glass_variant: None,
-            system_tint: None,
-            system_shadow: None,
-            system_edge_fade: None,
-            system_top_fade_start: None,
-            backdrop_blur_radius: None,
-            backdrop_tint: None,
-            value: None,
-            default_value: None,
-            secure_text_entry: false,
-            editable: true,
-            auto_focus: false,
-            placeholder_text_color: None,
-            most_recent_event_count: 0,
+            specialized: None,
+            view_effects: crate::elements::ViewEffects::default(),
             shows_vertical_scroll_indicator: true,
             shows_horizontal_scroll_indicator: true,
             events: Arc::from([]),
+            event_mask: 0,
             native_layout_key: None,
             native_resize: None,
             native_list_group: None,
-            terminal_session_id: None,
-            terminal_frames: Vec::new(),
             accessibility: AccessibilityInfo::default(),
             children,
             style: ElementStyle::default(),
             style_json: None,
             cached_gpui_style: None,
-            cached_svg_path: gpui::SharedString::new_static(""),
             interactive: false,
             pseudo_events: false,
         })

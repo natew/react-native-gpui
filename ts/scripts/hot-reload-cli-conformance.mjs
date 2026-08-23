@@ -26,7 +26,7 @@ try {
         [
             "run",
             "cli/bin.ts",
-            "hot-reload",
+            "dev",
             "--once",
             "--socket",
             socketPath,

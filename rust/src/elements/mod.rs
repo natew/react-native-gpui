@@ -1,3 +1,4 @@
+mod diff;
 mod div;
 mod image;
 pub mod input;
@@ -9,6 +10,7 @@ mod terminal;
 mod text;
 pub mod webview;
 
+pub use diff::{DiffPayload, ReactDiffElement, retain_diff_state, scroll_diff_by};
 #[cfg(not(target_os = "macos"))]
 pub use div::scroll_by;
 pub use div::{
@@ -131,6 +133,59 @@ pub struct SystemShadowSpec {
     pub opacity: f32,
 }
 
+#[derive(Clone, PartialEq)]
+pub struct TextPayload {
+    pub number_of_lines: Option<usize>,
+    pub selectable: bool,
+    pub runs: Arc<[TextRun]>,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct InputPayload {
+    pub value: Option<String>,
+    pub default_value: Option<String>,
+    pub secure_text_entry: bool,
+    pub editable: bool,
+    pub auto_focus: bool,
+    pub placeholder_text_color: Option<Hsla>,
+    pub most_recent_event_count: u64,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct SystemPayload {
+    pub material: Option<String>,
+    pub glass_variant: Option<String>,
+    pub tint: Option<Hsla>,
+    pub shadow: Option<SystemShadowSpec>,
+    pub edge_fade: Option<f32>,
+    pub top_fade_start: Option<f32>,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct TerminalPayload {
+    pub session_id: Option<String>,
+    pub frames: Arc<[TerminalFrame]>,
+}
+
+#[derive(Clone, PartialEq)]
+pub enum SpecializedElement {
+    Text(TextPayload),
+    Image { src: Option<String> },
+    Svg { path: gpui::SharedString },
+    WebView { src: Option<String> },
+    System(SystemPayload),
+    Input(InputPayload),
+    NativeControl(InputPayload),
+    Terminal(TerminalPayload),
+    Diff(DiffPayload),
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+pub struct ViewEffects {
+    pub backdrop_blur_radius: Option<f32>,
+    pub backdrop_tint: Option<Hsla>,
+}
+
 /// The core element struct that represents a node in the element tree.
 #[derive(Clone)]
 pub struct ReactElement {
@@ -140,64 +195,26 @@ pub struct ReactElement {
     /// arc-backed copy used by the immediate-mode text rebuild. metadata keeps the
     /// committed String while each draw clones this handle instead of its bytes.
     pub cached_text: gpui::SharedString,
-    /// RN Text `numberOfLines`; clamps text and ellipsizes overflow.
-    pub number_of_lines: Option<usize>,
-    /// RN Text `selectable`; opts this text into the native drag selection + Cmd+C.
-    pub selectable: bool,
-    /// inline styled runs, when a `<Text>` has nested `<Text>` children.
-    pub runs: Vec<TextRun>,
-    /// image / webview source uri (for `<Image>` / `<WebView>`).
-    pub src: Option<String>,
-    /// NSVisualEffectView material name for `<SystemView>` (the AppKit semantic set:
-    /// "titlebar" | "selection" | "menu" | … | "underPageBackground"). None → no blur.
-    pub system_material: Option<String>,
-    /// NSGlassEffectView liquid-glass variant name for `<SystemView>` (macOS 26+):
-    /// "regular" | "clear" | … | "cartouchePopover". None → use `system_material`.
-    pub system_glass_variant: Option<String>,
-    /// optional tint color overlaid on a `<SystemView>` so foreground text stays legible.
-    pub system_tint: Option<Hsla>,
-    /// optional native outer drop shadow for `<SystemView>`, drawn below the surface.
-    pub system_shadow: Option<SystemShadowSpec>,
-    /// optional horizontal alpha fade applied to the native `<SystemView>` surface.
-    pub system_edge_fade: Option<f32>,
-    /// optional vertical alpha fade start applied to the native `<SystemView>` surface.
-    pub system_top_fade_start: Option<f32>,
-    /// in-app liquid-glass backdrop blur radius (logical-px Gaussian sigma) for a plain
-    /// `<View>`. Blurs the gpui content drawn behind this node before its own background
-    /// paints — unlike `<SystemView>`, which can only blur the desktop behind the window.
-    pub backdrop_blur_radius: Option<f32>,
-    /// tint color composited over the blurred backdrop (defaults to the node's own
-    /// background-color when only `backdropBlur` is set).
-    pub backdrop_tint: Option<Hsla>,
-    /// controlled text input value from react props.
-    pub value: Option<String>,
-    /// uncontrolled text input value used only when creating its native state.
-    pub default_value: Option<String>,
-    /// whether text input values render as password/secret text.
-    pub secure_text_entry: bool,
-    /// whether text input nodes accept editing. RN TextInput defaults to editable.
-    pub editable: bool,
-    /// whether a newly-mounted text input should take focus once.
-    pub auto_focus: bool,
-    /// resolved RN placeholderTextColor for gpui-drawn inputs.
-    pub placeholder_text_color: Option<Hsla>,
-    /// latest native edit acknowledged by the serialized controlled value.
-    pub most_recent_event_count: u64,
+    /// type-specific retained data. An ordinary view carries one empty pointer-sized
+    /// option instead of storage for input, terminal, native-surface, image, and diff data.
+    pub specialized: Option<Arc<SpecializedElement>>,
+    /// optional view-only compositor effects. Allocated inline because these two values
+    /// are small and can combine with every host kind.
+    pub view_effects: ViewEffects,
     /// RN ScrollView overlay-scroller visibility; input/physics remain native.
     pub shows_vertical_scroll_indicator: bool,
     pub shows_horizontal_scroll_indicator: bool,
     /// event names this node listens to: "press", "changeText", "layout", …
     pub events: Arc<[String]>,
+    /// bitset for every native event name. Hot paint and input paths answer common
+    /// listener checks without scanning the event string slice.
+    pub event_mask: u64,
     /// native-only key for runtime layout overrides, bypassing React commits.
     pub native_layout_key: Option<String>,
     /// native-only resize gesture applied to a keyed layout target.
     pub native_resize: Option<NativeResizeSpec>,
     /// native-only group that scopes drag selection across press-action descendants.
     pub native_list_group: Option<String>,
-    /// native terminal session key; changing it resets the Ghostty parser.
-    pub terminal_session_id: Option<String>,
-    /// ordered daemon terminal frames consumed by the native Ghostty parser.
-    pub terminal_frames: Vec<TerminalFrame>,
     pub accessibility: AccessibilityInfo,
     pub children: Vec<Arc<ReactElement>>,
     pub style: ElementStyle,
@@ -208,10 +225,6 @@ pub struct ReactElement {
     /// always carry a style).
     pub style_json: Option<serde_json::Value>,
     pub cached_gpui_style: Option<gpui::Style>,
-    /// shared svg markup allocated once when the committed node is parsed. svg layout
-    /// rebuilds its gpui child on each full-layout frame, so it clones this handle
-    /// instead of copying and re-allocating the complete markup string each time.
-    pub cached_svg_path: gpui::SharedString,
     /// precomputed at parse: this node listens for any pointer/press event (the
     /// `POINTER_EVENTS` scan) — prepaint reads this once per frame per node, so the
     /// 28-name string scan must not run there.
@@ -261,7 +274,78 @@ pub const POINTER_EVENTS: &[&str] = &[
 impl ReactElement {
     /// True if this node listens for the given event name.
     pub fn listens(&self, name: &str) -> bool {
+        if let Some(bit) = event_bit(name) {
+            return self.event_mask & (1 << bit) != 0;
+        }
         self.events.iter().any(|e| e == name)
+    }
+
+    pub fn text_payload(&self) -> Option<&TextPayload> {
+        match self.specialized.as_deref() {
+            Some(SpecializedElement::Text(payload)) => Some(payload),
+            _ => None,
+        }
+    }
+
+    pub fn input_payload(&self) -> Option<&InputPayload> {
+        match self.specialized.as_deref() {
+            Some(SpecializedElement::Input(payload))
+            | Some(SpecializedElement::NativeControl(payload)) => Some(payload),
+            _ => None,
+        }
+    }
+
+    pub fn src(&self) -> Option<&str> {
+        match self.specialized.as_deref() {
+            Some(SpecializedElement::Image { src }) | Some(SpecializedElement::WebView { src }) => {
+                src.as_deref()
+            }
+            _ => None,
+        }
+    }
+
+    pub fn system_payload(&self) -> Option<&SystemPayload> {
+        match self.specialized.as_deref() {
+            Some(SpecializedElement::System(payload)) => Some(payload),
+            _ => None,
+        }
+    }
+
+    pub fn terminal_payload(&self) -> Option<&TerminalPayload> {
+        match self.specialized.as_deref() {
+            Some(SpecializedElement::Terminal(payload)) => Some(payload),
+            _ => None,
+        }
+    }
+
+    pub fn terminal_session_id(&self) -> Option<&str> {
+        self.terminal_payload()
+            .and_then(|payload| payload.session_id.as_deref())
+    }
+
+    pub fn terminal_frames(&self) -> &[TerminalFrame] {
+        self.terminal_payload()
+            .map_or(&[], |payload| payload.frames.as_ref())
+    }
+
+    pub fn diff_payload(&self) -> Option<&DiffPayload> {
+        match self.specialized.as_deref() {
+            Some(SpecializedElement::Diff(payload)) => Some(payload),
+            _ => None,
+        }
+    }
+
+    pub fn source_text(&self) -> Option<&str> {
+        self.diff_payload()
+            .map(DiffPayload::source)
+            .or(self.text.as_deref())
+    }
+
+    pub fn svg_path(&self) -> gpui::SharedString {
+        match self.specialized.as_deref() {
+            Some(SpecializedElement::Svg { path }) => path.clone(),
+            _ => gpui::SharedString::new_static(""),
+        }
     }
 
     pub fn build_gpui_style(&self, default_bg: Option<u32>) -> gpui::Style {
@@ -286,6 +370,57 @@ impl ReactElement {
         }
         self.style.build_gpui_style(default_bg)
     }
+}
+
+fn event_bit(name: &str) -> Option<u32> {
+    Some(match name {
+        "click" => 0,
+        "contextMenu" => 1,
+        "keyPress" => 2,
+        "layout" => 3,
+        "longPress" => 4,
+        "mouseDown" => 5,
+        "mouseEnter" => 6,
+        "mouseLeave" => 7,
+        "mouseMove" => 8,
+        "mouseOut" => 9,
+        "mouseOver" => 10,
+        "mouseUp" => 11,
+        "pointerDown" => 12,
+        "pointerEnter" => 13,
+        "pointerLeave" => 14,
+        "pointerMove" => 15,
+        "pointerUp" => 16,
+        "press" => 17,
+        "pressIn" => 18,
+        "pressOut" => 19,
+        "responderEnd" => 20,
+        "responderGrant" => 21,
+        "responderMove" => 22,
+        "responderRelease" => 23,
+        "responderStart" => 24,
+        "responderTerminate" => 25,
+        "responderTerminationRequest" => 26,
+        "scroll" => 27,
+        "startShouldSetResponder" => 28,
+        "startShouldSetResponderCapture" => 29,
+        "terminalText" => 30,
+        "terminalViewport" => 31,
+        "touchCancel" => 32,
+        "touchEnd" => 33,
+        "touchMove" => 34,
+        "touchStart" => 35,
+        "toggleFile" => 36,
+        "showMore" => 37,
+        "lineClick" => 38,
+        _ => return None,
+    })
+}
+
+pub fn event_mask(events: &[String]) -> u64 {
+    events.iter().fold(0, |mask, event| {
+        event_bit(event).map_or(mask, |bit| mask | (1 << bit))
+    })
 }
 
 static TEXT_CHANGED_IDS: once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashSet<u64>>> =
@@ -348,14 +483,7 @@ pub fn is_structure_preserving_tree_update(
         || previous.element_type != next.element_type
         // a text child node appearing/disappearing changes the node graph
         || has_text(previous) != has_text(next)
-        || previous.runs != next.runs
-        || previous.src.is_some() != next.src.is_some()
-        || previous.number_of_lines != next.number_of_lines
-        || previous.selectable != next.selectable
-        || previous.value != next.value
-        || previous.default_value != next.default_value
-        || previous.system_material != next.system_material
-        || previous.system_glass_variant != next.system_glass_variant
+        || previous.specialized != next.specialized
         || previous.native_layout_key != next.native_layout_key
         || previous.native_resize != next.native_resize
         || previous.native_list_group != next.native_list_group
@@ -385,29 +513,16 @@ pub fn is_paint_only_tree_update(previous: &Arc<ReactElement>, next: &Arc<ReactE
     if Arc::ptr_eq(previous, next) {
         return true;
     }
-    let fixed_box_input = matches!(previous.element_type.as_str(), "textinput" | "textarea");
+    let diff_text_is_fixed_geometry = matches!(
+        (previous.specialized.as_deref(), next.specialized.as_deref()),
+        (Some(SpecializedElement::Diff(previous)), Some(SpecializedElement::Diff(next)))
+            if previous.row_count() == next.row_count()
+    );
     if previous.global_id != next.global_id
         || previous.element_type != next.element_type
-        || previous.text != next.text
-        || previous.number_of_lines != next.number_of_lines
-        || previous.selectable != next.selectable
-        || previous.runs != next.runs
-        || previous.src != next.src
-        || previous.system_material != next.system_material
-        || previous.system_glass_variant != next.system_glass_variant
-        || previous.system_tint != next.system_tint
-        || previous.system_shadow != next.system_shadow
-        || previous.system_edge_fade != next.system_edge_fade
-        || previous.system_top_fade_start != next.system_top_fade_start
-        || previous.backdrop_blur_radius != next.backdrop_blur_radius
-        || previous.backdrop_tint != next.backdrop_tint
-        || (!fixed_box_input && previous.value != next.value)
-        || previous.default_value != next.default_value
-        || previous.secure_text_entry != next.secure_text_entry
-        || previous.editable != next.editable
-        || previous.auto_focus != next.auto_focus
-        || previous.placeholder_text_color != next.placeholder_text_color
-        || (!fixed_box_input && previous.most_recent_event_count != next.most_recent_event_count)
+        || (previous.text != next.text && !diff_text_is_fixed_geometry)
+        || !specialized_change_is_paint_only(previous, next)
+        || previous.view_effects != next.view_effects
         || previous.shows_vertical_scroll_indicator != next.shows_vertical_scroll_indicator
         || previous.shows_horizontal_scroll_indicator != next.shows_horizontal_scroll_indicator
         || previous.events != next.events
@@ -427,6 +542,26 @@ pub fn is_paint_only_tree_update(previous: &Arc<ReactElement>, next: &Arc<ReactE
         .iter()
         .zip(&next.children)
         .all(|(previous, next)| is_paint_only_tree_update(previous, next))
+}
+
+fn specialized_change_is_paint_only(previous: &ReactElement, next: &ReactElement) -> bool {
+    match (previous.specialized.as_deref(), next.specialized.as_deref()) {
+        (Some(SpecializedElement::Terminal(_)), Some(SpecializedElement::Terminal(_))) => true,
+        (Some(SpecializedElement::Diff(previous)), Some(SpecializedElement::Diff(next))) => {
+            previous.row_count() == next.row_count() && previous.diff_scroll == next.diff_scroll
+        }
+        (
+            Some(SpecializedElement::Input(previous_input)),
+            Some(SpecializedElement::Input(next_input)),
+        ) if matches!(previous.element_type.as_str(), "textinput" | "textarea") => {
+            previous_input.default_value == next_input.default_value
+                && previous_input.secure_text_entry == next_input.secure_text_entry
+                && previous_input.editable == next_input.editable
+                && previous_input.auto_focus == next_input.auto_focus
+                && previous_input.placeholder_text_color == next_input.placeholder_text_color
+        }
+        _ => previous.specialized == next.specialized,
+    }
 }
 
 fn style_change_is_paint_only(
@@ -499,6 +634,7 @@ pub fn create_element(element: Arc<ReactElement>, window_id: u64) -> AnyElement 
         "nativebutton" | "nativeinput" => {
             ReactNativeControlElement::new(element).into_any_element()
         }
+        "diff" => ReactDiffElement::new(element).into_any_element(),
         _ => ReactDivElement::new(element, window_id).into_element(),
     }
 }

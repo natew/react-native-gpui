@@ -4,7 +4,6 @@
  * Native events (press / changeText / layout / resize) flow back the other way.
  */
 import { createElement, type ReactElement, type ComponentType } from "react";
-import { isHotUpdateEvaluating } from "./refresh";
 import Reconciler, {
     setCommitSink,
     serializeContainer,
@@ -14,12 +13,12 @@ import Reconciler, {
     type ReconcilerCommitDiagnostics,
 } from "./reconciler";
 import { sendHostCommand, setEventBatcher, startBridge, type Bridge, type BridgeEvent, type BridgeOptions, type SerializedNode } from "./runtime";
-import { toWireDelta, type BigFieldCache, type WireDeltaStats } from "./wire-delta";
+import { createWireSourceCache, toWireDelta, type BigFieldCache, type WireDeltaStats } from "./wire-delta";
 
 // coalesced event batches (resize/layout/scroll floods) dispatch inside one React update so
 // a window resize produces one re-render per batch instead of one per event.
 setEventBatcher((run) => (Reconciler as { batchedUpdates(fn: (a: unknown) => void, a?: unknown): void }).batchedUpdates(run));
-import { AppCommands, NativeMenus, setCommandSink } from "./commands";
+import { AppCommands, NativeMenus, resolveRendererProvenance, setCommandSink } from "./commands";
 import { Dimensions } from "./Dimensions";
 import { applyNativeColorScheme, setAppearanceUpdateSink } from "./colors";
 import { dispatchPseudo } from "./platform-driver";
@@ -31,6 +30,8 @@ const COMMIT_TRACE = typeof process !== "undefined" && !!process.env?.RNGPUI_COM
 export type DevtoolsOptions = {
     /** hold Option to inspect native GPUI nodes; Option-click copies a node snapshot. */
     inspector?: boolean;
+    /** show native frame, commit, and bridge timing in the app window. */
+    performanceHud?: boolean;
 };
 
 export interface RootOptions {
@@ -78,8 +79,10 @@ export function createRoot(options: RootOptions = {}): Root {
     // per-globalId large text/src the host currently holds; toWireDelta omits an unchanged
     // big field on a changed node and marks textRef/srcRef. see its doc.
     const sentBigFields: BigFieldCache = new Map();
+    const sentSources = createWireSourceCache();
     const bridgeOptions: BridgeOptions = {
         inspector: options.devtools === true || (typeof options.devtools === "object" && options.devtools.inspector === true),
+        performanceHud: typeof options.devtools === "object" && options.devtools.performanceHud === true,
     };
 
     // Diff bridge: skip the apply when the committed tree is unchanged. The
@@ -102,8 +105,17 @@ export function createRoot(options: RootOptions = {}): Root {
         const as = a.style ?? EMPTY_STYLE;
         const bs = b.style ?? EMPTY_STYLE;
         const ak = Object.keys(as);
-        if (ak.length !== Object.keys(bs).length) return false;
-        for (const k of ak) if ((as as Record<string, unknown>)[k] !== (bs as Record<string, unknown>)[k]) return false;
+        let bLength = 0;
+        for (const key in bs) if (Object.prototype.hasOwnProperty.call(bs, key)) bLength++;
+        if (ak.length !== bLength) return false;
+        for (const k of ak) {
+            if (
+                !Object.prototype.hasOwnProperty.call(bs, k) ||
+                (as as Record<string, unknown>)[k] !== (bs as Record<string, unknown>)[k]
+            ) {
+                return false;
+            }
+        }
         return true;
     };
     const pushTree = (tree: SerializedNode, diagnostics?: ReconcilerCommitDiagnostics) => {
@@ -114,7 +126,7 @@ export function createRoot(options: RootOptions = {}): Root {
         if (!bridge) {
             const wireStats: WireDeltaStats | undefined = COMMIT_TRACE ? { refs: 0, full: 0 } : undefined;
             const deltaStartedAt = COMMIT_TRACE ? performance.now() : 0;
-            const wire = toWireDelta(tree, sentNodes, sentBigFields, wireStats);
+            const wire = toWireDelta(tree, sentNodes, sentBigFields, wireStats, sentSources);
             const deltaMs = COMMIT_TRACE ? performance.now() - deltaStartedAt : 0;
             bridge = startBridge(wire, bridgeOptions);
             bridge.onEvent(handleEvent);
@@ -136,7 +148,7 @@ export function createRoot(options: RootOptions = {}): Root {
         }
         const wireStats: WireDeltaStats | undefined = COMMIT_TRACE ? { refs: 0, full: 0 } : undefined;
         const deltaStartedAt = COMMIT_TRACE ? performance.now() : 0;
-        const wire = toWireDelta(tree, sentNodes, sentBigFields, wireStats);
+        const wire = toWireDelta(tree, sentNodes, sentBigFields, wireStats, sentSources);
         const deltaMs = COMMIT_TRACE ? performance.now() - deltaStartedAt : 0;
         if (typeof process !== "undefined" && process.env?.RNGPUI_WIRE_TRACE) {
             // diagnostic: how much of the wire crossed as refs vs full nodes —
@@ -186,6 +198,10 @@ export function createRoot(options: RootOptions = {}): Root {
             applyNativeColorScheme(e.colorScheme);
             return;
         }
+        if (e.type === "rendererProvenance") {
+            resolveRendererProvenance(e.requestId, e.provenance);
+            return;
+        }
         // renderer→JS pseudo lane: a native hover/press flip routes to the platform
         // driver's listeners (tamagui), NOT the React event path — so a hover never
         // triggers a React commit. Handled before dispatchEvent so it never falls through.
@@ -195,32 +211,7 @@ export function createRoot(options: RootOptions = {}): Root {
         }
         // a native UI event → route to the React handler; its setState (if any)
         // schedules a re-render, which commits a fresh tree back to the bridge.
-        dispatchEvent(e.id, e.event, {
-            value: e.value,
-            key: e.key,
-            shiftKey: e.shiftKey,
-            ctrlKey: e.ctrlKey,
-            altKey: e.altKey,
-            metaKey: e.metaKey,
-            isComposing: e.isComposing,
-            eventCount: e.eventCount,
-            button: e.button,
-            buttons: e.buttons,
-            pressDrag: e.pressDrag,
-            pageX: e.pageX,
-            pageY: e.pageY,
-            locationX: e.locationX,
-            locationY: e.locationY,
-            scrollX: e.scrollX,
-            scrollY: e.scrollY,
-            scrollWidth: e.scrollWidth,
-            scrollHeight: e.scrollHeight,
-            scrollContentWidth: e.scrollContentWidth,
-            scrollContentHeight: e.scrollContentHeight,
-            layout: e.layout,
-            cols: e.cols,
-            rows: e.rows,
-        });
+        dispatchEvent(e.id, e.event, e);
     };
 
     // The reconciler calls this after every commit with the serialized tree.
@@ -268,10 +259,19 @@ export function createRoot(options: RootOptions = {}): Root {
     };
 }
 
-/** Convenience: render an element into a fresh root and return it. */
+let directRoot: Root | null = null;
+
+/** Convenience entry point for the process's single native window. */
 export function render(element: ReactElement, options?: RootOptions): Root {
+    if (directRoot) {
+        const hotUpdateDepth = (globalThis as typeof globalThis & { __rngpuiHotUpdateDepth?: number })
+            .__rngpuiHotUpdateDepth ?? 0;
+        if (hotUpdateDepth === 0) directRoot.render(element);
+        return directRoot;
+    }
     const root = createRoot(options);
     root.render(element);
+    directRoot = root;
     return root;
 }
 
@@ -312,14 +312,11 @@ export const AppRegistry = {
             active.width = width;
             active.height = height;
             active.devtools = devtools;
-            const renderActive = () => {
-                const latestProvider = registry.get(appKey);
-                if (!latestProvider) return;
-                const Component = latestProvider();
+            const hotUpdateDepth = (globalThis as typeof globalThis & { __rngpuiHotUpdateDepth?: number })
+                .__rngpuiHotUpdateDepth ?? 0;
+            if (hotUpdateDepth === 0) {
+                const Component = provider();
                 active.root.render(createElement(Component, active.initialProps));
-            };
-            if (!isHotUpdateEvaluating()) {
-                renderActive();
             }
             return active.root;
         }

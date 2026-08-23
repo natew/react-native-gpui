@@ -69,7 +69,9 @@ fn kind_of(element: &ReactElement) -> NativeKind {
         NativeKind::Button
     } else {
         NativeKind::Input {
-            secure: element.secure_text_entry,
+            secure: element
+                .input_payload()
+                .is_some_and(|payload| payload.secure_text_entry),
         }
     }
 }
@@ -312,7 +314,8 @@ fn ensure_view(id: u64, kind: NativeKind, parent_view: id, gpui_view: id) -> id 
 
 #[cfg(target_os = "macos")]
 unsafe fn apply_props(id: u64, view: id, kind: NativeKind, element: &ReactElement) {
-    let enabled = element.editable;
+    let payload = element.input_payload();
+    let enabled = payload.is_none_or(|payload| payload.editable);
     let first_apply = LAST_ENABLED.with(|m| !m.borrow().contains_key(&id));
     let enabled_changed = LAST_ENABLED.with(|m| m.borrow().get(&id).copied() != Some(enabled));
     if enabled_changed {
@@ -341,13 +344,15 @@ unsafe fn apply_props(id: u64, view: id, kind: NativeKind, element: &ReactElemen
             }
             // defaultValue seeds a new control once; later renders only reconcile an
             // actual controlled value prop, so unrelated commits preserve native edits.
-            let value = element.value.clone().or_else(|| {
-                if first_apply {
-                    element.default_value.clone()
-                } else {
-                    None
-                }
-            });
+            let value = payload
+                .and_then(|payload| payload.value.clone())
+                .or_else(|| {
+                    if first_apply {
+                        payload.and_then(|payload| payload.default_value.clone())
+                    } else {
+                        None
+                    }
+                });
             if let Some(value) = value {
                 let is_echo = LAST_EMITTED.with(|m| m.borrow().get(&id) == Some(&value));
                 let live = unsafe { read_ns_string(msg_send![view, stringValue]) };

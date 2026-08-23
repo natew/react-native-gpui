@@ -8,6 +8,7 @@ import { isDriveableHost, type AttachedHost, type DumpNode, type LaunchedHost } 
 import { isVisible, nodeAtPoint, parsePoint, resolve, walk } from "../selectors";
 import { averageColor, dominantColor, pixelAt } from "../../scripts/pixel.mjs";
 import { readPng } from "../../scripts/png.mjs";
+import type { RendererProvenance } from "../../src/runtime";
 
 type Host = LaunchedHost | AttachedHost;
 
@@ -181,6 +182,29 @@ function formatStateStyle(style: Record<string, unknown>): string {
 }
 
 export async function runGet(host: Host, sub: string, args: string[], json: boolean): Promise<number> {
+    if (sub === "provenance") {
+        if (!isDriveableHost(host)) {
+            console.error("  get provenance needs a driveable target (control socket)");
+            return 1;
+        }
+        const result = await host.request<{ ok: boolean; error?: string } & Partial<RendererProvenance>>({
+            $cmd: "rendererProvenance",
+        });
+        if (!result.ok) {
+            console.error(`  renderer provenance failed: ${result.error || "native command failed"}`);
+            return 1;
+        }
+        out(
+            json,
+            () => {
+                console.log(`  renderer: ${result.renderer} ${result.rendererVersion}`);
+                console.log(`  service: ${result.serviceVersion}  GPUI: ${result.gpuiRevision}  Hermes: ${result.hermesVersion}`);
+                console.log(`  bundle: ${result.bundleUrl ?? "(embedded)"}  development=${result.development === true}`);
+            },
+            result,
+        );
+        return 0;
+    }
     if (sub === "frames") {
         if (!isDriveableHost(host)) {
             console.error("  get frames needs a driveable target (control socket)");
@@ -429,7 +453,7 @@ export async function runGet(host: Host, sub: string, args: string[], json: bool
 
         default:
             console.error(`  unknown get subcommand: ${sub}`);
-            console.error("  available: screen, tree, stats, webviews, describe, layout, style, color, point");
+            console.error("  available: provenance, frames, screen, tree, stats, webviews, describe, layout, style, color, point");
             return 1;
     }
 }

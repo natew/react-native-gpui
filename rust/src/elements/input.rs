@@ -53,7 +53,8 @@ impl ReactInputElement {
     fn build_child(&self) -> AnyElement {
         match entity(self.element.global_id) {
             Some(state) => {
-                let editable = self.element.editable;
+                let input_payload = self.element.input_payload();
+                let editable = input_payload.is_none_or(|payload| payload.editable);
                 let listens_key_press = self.element.listens("keyPress");
                 let element_id = self.element.global_id;
                 let input_state = state.clone();
@@ -78,7 +79,9 @@ impl ReactInputElement {
                 if let Some(color) = style.color {
                     input = input.input_text_color(color);
                 }
-                if let Some(color) = self.element.placeholder_text_color {
+                if let Some(color) =
+                    input_payload.and_then(|payload| payload.placeholder_text_color)
+                {
                     input = input.placeholder_text_color(color);
                 }
                 if let Some(size) = style.font_size {

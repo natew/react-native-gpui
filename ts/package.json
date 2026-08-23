@@ -1,6 +1,6 @@
 {
     "name": "react-native-gpui",
-    "version": "0.1.37",
+    "version": "0.1.38",
     "description": "Write React Native components, render them natively with GPUI (Zed's GPU UI framework).",
     "type": "module",
     "main": "dist/index.js",
@@ -24,12 +24,12 @@
         "THIRD-PARTY-LICENSES"
     ],
     "scripts": {
-        "build": "npm run build:rust && npm run build:native && npm run build:ts",
+        "build": "npm run prebuild:reanimated && npm run build:rust && npm run build:native && npm run build:ts",
         "build:rust": "cd ../rust && PATH=/opt/homebrew/opt/zig@0.15/bin:$PATH cargo build --release --bin rngpui-service",
         "build:native": "node scripts/build-native.mjs",
         "build:clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
         "build:types": "tsc --emitDeclarationOnly",
-        "build:bundle": "bun build src/index.ts --outfile dist/index.js --target node --format esm --production --define:__DEV__=false --external react --external react/jsx-runtime --external react/jsx-dev-runtime --external react-refresh/runtime && bun scripts/build-ui-runtime.mjs --force",
+        "build:bundle": "bun build src/index.ts --outfile dist/index.js --target node --format esm --production --define:__DEV__=false --external react --external react/jsx-runtime --external react/jsx-dev-runtime && bun scripts/build-ui-runtime.mjs --force",
         "build:ts": "npm run build:clean && npm run build:types && npm run build:bundle",
         "typecheck": "tsc --noEmit",
         "test": "bun run scripts/test-suite.mjs",
@@ -76,7 +76,6 @@
         "conformance:presentation-pacing": "bun run scripts/presentation-pacing-conformance.mjs --require-120hz",
         "conformance:rounded-overflow": "bun run scripts/rounded-overflow-conformance.mjs",
         "conformance:text-lines": "bun run scripts/text-lines-conformance.mjs",
-        "conformance:watch-reload": "node scripts/watch-reload-conformance.mjs",
         "pixel-diff": "bun run scripts/pixel-diff.mjs",
         "pixel-sample": "bun run scripts/pixel-sample.mjs",
         "png-grid": "bun run scripts/png-grid.mjs",

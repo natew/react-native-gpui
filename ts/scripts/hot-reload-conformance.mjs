@@ -42,7 +42,16 @@ try {
         if (signal !== "SIGTERM") output += `\nservice exited code=${code} signal=${signal}\n`;
     });
 
-    await waitForDump("first:1", () => output);
+    await waitForDump("first:1:", () => output);
+    let dump = await dumpTree();
+    const input = requireNode(dump, "hot-input");
+    const scroll = requireNode(dump, "hot-scroll");
+    await requestSocket(socketPath, { $cmd: "tap", ...center(input) });
+    await requestSocket(socketPath, { $cmd: "type", text: "draft" });
+    await waitForDump("first:1:draft", () => output);
+    await requestSocket(socketPath, { $cmd: "scrollAt", ...center(scroll), dx: 0, dy: 180 });
+    const inputBefore = await requestSocket(socketPath, { $cmd: "inputState" });
+    const scrollBefore = await waitForScroll(center(scroll));
     const pidBefore = Number(readFileSync(pidPath, "utf8").trim());
     writeEntry("second", false, "react-native-gpui");
     const hotCode = bundleHotUpdate();
@@ -51,10 +60,27 @@ try {
         url: outJs,
         code: hotCode,
     });
-    await waitForDump("second:1", () => output);
+    await waitForDump("second:1:draft", () => output);
     const pidAfter = Number(readFileSync(pidPath, "utf8").trim());
-    if (pidAfter !== pidBefore) throw new Error(`hot reload changed pid: ${pidBefore} -> ${pidAfter}`);
-    console.log("HOT_RELOAD_CONFORMANCE_PASS state=preserved pid-stable=yes");
+    if (pidAfter !== pidBefore) throw new Error(`Fast Refresh changed pid: ${pidBefore} -> ${pidAfter}`);
+    const inputAfter = await requestSocket(socketPath, { $cmd: "inputState" });
+    dump = await dumpTree();
+    const scrollAfterNode = requireNode(dump, "hot-scroll");
+    const scrollAfter = await requestSocket(socketPath, { $cmd: "scrollDriverStats", ...center(scrollAfterNode) });
+    if (!inputBefore.ok || !inputAfter.ok) throw new Error(`input state unavailable: ${JSON.stringify({ inputBefore, inputAfter })}`);
+    if (inputAfter.focusedId !== inputBefore.focusedId || inputAfter.value !== "draft") {
+        throw new Error(`focused input state was not preserved: ${JSON.stringify({ inputBefore, inputAfter })}`);
+    }
+    if (
+        !scrollAfter.ok ||
+        scrollAfter.targetId !== scrollBefore.targetId ||
+        Math.abs(scrollAfter.offsetY - scrollBefore.offsetY) > 1
+    ) {
+        throw new Error(`scroll state was not preserved: ${JSON.stringify({ scrollBefore, scrollAfter })}`);
+    }
+    console.log(
+        `HOT_RELOAD_CONFORMANCE_PASS hook-state=preserved focus=preserved scroll=${scrollAfter.offsetY.toFixed(1)} pid-stable=yes`,
+    );
 } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     const dump = existsSync(dumpPath) ? readFileSync(dumpPath, "utf8") : "(no dump)";
@@ -74,19 +100,30 @@ function writeEntry(label, increment, appRegistryImport = resolve(tsRoot, "src/i
         entry,
         `
 import * as React from "react";
-import { AppRegistry } from ${JSON.stringify(appRegistryImport)};
+import {
+  AppRegistry, RefreshControl, ScrollView, Text, TextInput, TurboModuleRegistry, View,
+  NativeClipboard, NativeMenus, NativeWindow, hasKeyboardNavigationModifier,
+  setupTamaguiNativeMenus, unstable_batchedUpdates,
+} from ${JSON.stringify(appRegistryImport)};
 
 function Counter() {
+  void [RefreshControl, TurboModuleRegistry, NativeClipboard, NativeMenus, NativeWindow,
+    hasKeyboardNavigationModifier, setupTamaguiNativeMenus, unstable_batchedUpdates];
   const [count, setCount] = React.useState(0);
+  const [draft, setDraft] = React.useState("");
   React.useEffect(() => {
     ${increment ? "setTimeout(() => setCount(1), 50);" : ""}
   }, []);
-  return React.createElement("View", { style: { width: 420, height: 240, backgroundColor: "#111", alignItems: "center", justifyContent: "center" } },
-    React.createElement("Text", { style: { color: "#fff", fontSize: 18 } }, ${JSON.stringify(label)} + ":" + count)
+  return React.createElement(View, { style: { width: 420, height: 300, backgroundColor: "#111", padding: 20, gap: 12 } },
+    React.createElement(Text, { testID: "hot-status", style: { color: "#fff", fontSize: 18 } }, ${JSON.stringify(label)} + ":" + count + ":" + draft),
+    React.createElement(TextInput, { testID: "hot-input", value: draft, onChangeText: setDraft, style: { width: 360, height: 36, color: "#fff", backgroundColor: "#222" } }),
+    React.createElement(ScrollView, { testID: "hot-scroll", style: { width: 360, height: 150, backgroundColor: "#181818" } },
+      Array.from({ length: 30 }, (_, index) => React.createElement(Text, { key: index, style: { color: "#ddd", height: 24 } }, "row " + index))
+    )
   );
 }
 AppRegistry.registerComponent("HotRefreshConformance", () => Counter);
-AppRegistry.runApplication("HotRefreshConformance", { width: 420, height: 240 });
+AppRegistry.runApplication("HotRefreshConformance", { width: 420, height: 300 });
 `,
     );
 }
@@ -122,6 +159,46 @@ async function waitForDump(text, output) {
     }
     const dump = existsSync(dumpPath) ? readFileSync(dumpPath, "utf8") : "(no dump)";
     throw new Error(`timed out waiting for ${text}; dump:\n${dump}\noutput:\n${output()}`);
+}
+
+async function dumpTree() {
+    const response = await requestSocket(socketPath, { $cmd: "dump" });
+    if (!response.ok || !response.tree) throw new Error(`dump failed: ${JSON.stringify(response)}`);
+    return response.tree;
+}
+
+function requireNode(node, testID) {
+    if (node.accessibility?.testID === testID) return node;
+    for (const child of node.children ?? []) {
+        const found = requireNodeOptional(child, testID);
+        if (found) return found;
+    }
+    throw new Error(`missing node testID=${testID}`);
+}
+
+function requireNodeOptional(node, testID) {
+    if (node.accessibility?.testID === testID) return node;
+    for (const child of node.children ?? []) {
+        const found = requireNodeOptional(child, testID);
+        if (found) return found;
+    }
+    return null;
+}
+
+function center(node) {
+    if (!node.bounds) throw new Error(`node ${node.globalId} has no bounds`);
+    return { x: node.bounds.x + node.bounds.width / 2, y: node.bounds.y + node.bounds.height / 2 };
+}
+
+async function waitForScroll(point) {
+    const deadline = Date.now() + 5_000;
+    let latest = null;
+    while (Date.now() < deadline) {
+        latest = await requestSocket(socketPath, { $cmd: "scrollDriverStats", ...point });
+        if (latest.ok && latest.offsetY > 0) return latest;
+        await sleep(50);
+    }
+    throw new Error(`scroll offset did not advance: ${JSON.stringify(latest)}`);
 }
 
 function requestSocket(path, body) {

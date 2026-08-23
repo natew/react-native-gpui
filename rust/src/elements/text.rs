@@ -78,11 +78,14 @@ impl ReactTextElement {
             // scripts/text-baseline-conformance.mjs.
             el = el.line_height(px(lh));
         }
-        el = apply_line_limit(el, self.element.number_of_lines);
+        let text_payload = self.element.text_payload();
+        el = apply_line_limit(el, text_payload.and_then(|payload| payload.number_of_lines));
 
         // No inline runs → plain text. (Selectable nodes always take the StyledText
         // path below so paint has a TextLayout handle for position↔index mapping.)
-        if self.element.runs.is_empty() && !self.element.selectable {
+        let runs = text_payload.map_or(&[][..], |payload| payload.runs.as_ref());
+        let selectable = text_payload.is_some_and(|payload| payload.selectable);
+        if runs.is_empty() && !selectable {
             return el.child(text).into_any_element();
         }
 
@@ -124,14 +127,14 @@ impl ReactTextElement {
             base.line_height = px(lh).into();
         }
 
-        let flat: String = if self.element.runs.is_empty() {
+        let flat: String = if runs.is_empty() {
             self.element.text.clone().unwrap_or_default()
         } else {
-            self.element.runs.iter().map(|r| r.text.as_str()).collect()
+            runs.iter().map(|r| r.text.as_str()).collect()
         };
         let base_font = base.font();
         let mut text_runs: Vec<gpui::TextRun> = Vec::new();
-        for r in &self.element.runs {
+        for r in runs {
             let len = r.text.len();
             if len == 0 {
                 continue;
@@ -171,7 +174,7 @@ impl ReactTextElement {
             });
         }
         let styled = StyledText::new(flat).with_runs(text_runs);
-        self.text_layout = self.element.selectable.then(|| styled.layout().clone());
+        self.text_layout = selectable.then(|| styled.layout().clone());
         el.child(styled).into_any_element()
     }
 }
@@ -315,8 +318,12 @@ impl Element for ReactTextElement {
         if let Some(child) = self.child.as_mut() {
             child.prepaint(window, cx);
         }
-        (self.element.selectable && self.text_layout.is_some())
-            .then(|| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal))
+        (self
+            .element
+            .text_payload()
+            .is_some_and(|payload| payload.selectable)
+            && self.text_layout.is_some())
+        .then(|| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal))
     }
 
     fn paint(
@@ -361,10 +368,15 @@ fn paint_native_selection(
     hitbox: &gpui::Hitbox,
     window: &mut Window,
 ) {
-    use gpui::{MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent};
+    paint_selection_segment(global_id, layout, window);
+    wire_native_selection(hitbox, window);
+}
 
-    window.set_cursor_style(gpui::CursorStyle::IBeam, hitbox);
-
+pub(crate) fn paint_selection_segment(
+    global_id: u64,
+    layout: &gpui::TextLayout,
+    window: &mut Window,
+) {
     if let Some(sel) = crate::selection::selection_bounds() {
         let text = layout.text();
         let line_height = layout.line_height();
@@ -419,10 +431,13 @@ fn paint_native_selection(
             .map(|p| (f32::from(p.y), f32::from(p.x)))
             .unwrap_or((f32::MAX, f32::MAX));
         crate::selection::set_segment(global_id, order, selected);
-    } else {
-        crate::selection::set_segment(global_id, (0.0, 0.0), String::new());
     }
+}
 
+pub(crate) fn wire_native_selection(hitbox: &gpui::Hitbox, window: &mut Window) {
+    use gpui::{MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent};
+
+    window.set_cursor_style(gpui::CursorStyle::IBeam, hitbox);
     // drag wiring. capture-phase mousedown clears any finished selection (any click
     // dismisses, like AppKit); the hovered node's bubble-phase mousedown anchors a
     // new drag. move/up listeners are global so the drag survives leaving the node.

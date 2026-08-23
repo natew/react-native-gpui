@@ -162,6 +162,13 @@ fn handle_trace_request(value: &Value) -> Option<Value> {
     let cmd = value.get("$cmd").and_then(Value::as_str)?;
     match cmd {
         "frameStats" => Some(crate::anim_trace::frame_stats()),
+        "rendererProvenance" => {
+            let mut provenance = crate::build_identity::provenance();
+            if let Value::Object(map) = &mut provenance {
+                map.insert("ok".into(), json!(true));
+            }
+            Some(provenance)
+        }
         "traceStart" => {
             let ids = value.get("ids").and_then(Value::as_array).map(|ids| {
                 ids.iter()
@@ -286,6 +293,13 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
             reply,
         }),
         "fullLayout" => Ok(Incoming::DebugFullLayout { reply }),
+        "performanceHud" => Ok(Incoming::DebugPerformanceHud {
+            enabled: value
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or("performanceHud needs enabled")?,
+            reply,
+        }),
         "dragAt" => Ok(Incoming::DebugDragAt {
             phase: value
                 .get("phase")

@@ -53,6 +53,7 @@ export function reanimatedBunPlugin(opts = {}) {
   // it (the gui app does), pass aliasReactNative:false.
   const reactNativeIndex = opts.reactNativeIndex || resolve(rngTsRoot, 'src/index.ts')
   const aliasReactNative = opts.aliasReactNative !== false
+  const transformSource = opts.transformSource
 
   // babel worklets transform — applied to APP + Tamagui-driver source (NOT the prebuilt
   // reanimated chunk, which already ran it, and NOT reanimated node_modules). This is
@@ -112,7 +113,7 @@ export function reanimatedBunPlugin(opts = {}) {
       })
 
       // worklet transform on APP + Tamagui-driver source (see the comment above).
-      build.onLoad({ filter: /\.(tsx?|jsx?|mjs)$/ }, async (args) => {
+      build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (args) => {
         // skip: the prebuilt chunks (already transformed), the seam/worklets stub, and
         // anything inside reanimated/worklets node_modules (the prebuild owns those).
         if (
@@ -124,22 +125,43 @@ export function reanimatedBunPlugin(opts = {}) {
           return undefined
         }
         const source = await Bun.file(args.path).text()
-        if (!WORKLET_KEYWORDS.test(source)) return undefined
-        loadBabel()
+        let code = source
+        let transformed = false
         const isTsx = args.path.endsWith('.tsx')
         const isTs = /\.(tsx?|mts|cts)$/.test(args.path)
-        const result = await babel.transformAsync(source, {
-          filename: args.path,
-          babelrc: false,
-          configFile: false,
-          sourceMaps: false,
-          presets: isTs
-            ? [[presetTs, { isTSX: isTsx, allExtensions: isTsx, allowDeclareFields: true }]]
-            : [],
-          plugins: [[jsxSyntax], [workletsPluginPath, { processNestedWorklets: true }]],
-        })
-        if (!result?.code) return undefined
-        return { contents: result.code, loader: isTsx || args.path.endsWith('.jsx') ? 'jsx' : 'js' }
+        if (WORKLET_KEYWORDS.test(source)) {
+          loadBabel()
+          const result = await babel.transformAsync(source, {
+            filename: args.path,
+            babelrc: false,
+            configFile: false,
+            sourceMaps: false,
+            presets: isTs
+              ? [[presetTs, { isTSX: isTsx, allExtensions: isTsx, allowDeclareFields: true }]]
+              : [],
+            plugins: [[jsxSyntax], [workletsPluginPath, { processNestedWorklets: true }]],
+          })
+          if (result?.code) {
+            code = result.code
+            transformed = true
+          }
+        }
+        if (transformSource) {
+          const result = await transformSource(code, {
+            filename: args.path,
+            isTs: transformed ? false : isTs,
+            isJsx: isTsx || args.path.endsWith('.jsx'),
+          })
+          if (result !== code) {
+            code = result
+            transformed = true
+          }
+        }
+        if (!transformed) return undefined
+        return {
+          contents: code,
+          loader: isTsx || args.path.endsWith('.jsx') ? 'jsx' : 'js',
+        }
       })
     },
   }

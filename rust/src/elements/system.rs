@@ -317,7 +317,7 @@ fn system_corner_clip(style: &ElementStyle) -> SystemCornerClip {
 // transparent shadow (opacity 0) resolves to None (no decoration).
 #[cfg(target_os = "macos")]
 fn system_shadow_style(element: &ReactElement, clip: SystemCornerClip) -> Option<SystemShadow> {
-    let spec = element.system_shadow?;
+    let spec = element.system_payload()?.shadow?;
     if spec.opacity <= 0.0 {
         return None;
     }
@@ -338,22 +338,25 @@ fn system_shadow_style(element: &ReactElement, clip: SystemCornerClip) -> Option
 #[cfg(target_os = "macos")]
 fn system_view_style(element: &ReactElement) -> SystemViewStyle {
     let corner_clip = system_corner_clip(&element.style);
+    let payload = element.system_payload();
     SystemViewStyle {
         surface: resolve_surface(
-            element.system_material.as_deref(),
-            element.system_glass_variant.as_deref(),
+            payload.and_then(|payload| payload.material.as_deref()),
+            payload.and_then(|payload| payload.glass_variant.as_deref()),
         ),
         corner_clip,
-        tint: element.system_tint.map(|c| {
+        tint: payload.and_then(|payload| payload.tint).map(|c| {
             let (r, g, b, a) = hsla_to_srgb(c);
             (r as f32, g as f32, b as f32, a as f32)
         }),
         shadow: system_shadow_style(element, corner_clip),
-        edge_fade: element
-            .system_edge_fade
+        edge_fade: payload
+            .and_then(|payload| payload.edge_fade)
             .map(|v| v.clamp(0.0, 0.5))
             .filter(|v| *v > 0.0),
-        top_fade_start: element.system_top_fade_start.map(|v| v.clamp(0.0, 1.0)),
+        top_fade_start: payload
+            .and_then(|payload| payload.top_fade_start)
+            .map(|v| v.clamp(0.0, 1.0)),
     }
 }
 
@@ -1337,39 +1340,29 @@ mod tests {
             element_type: "system".to_string(),
             text: None,
             cached_text: gpui::SharedString::new_static(""),
-            number_of_lines: None,
-            selectable: false,
-            runs: Vec::new(),
-            src: None,
-            system_material: None,
-            system_glass_variant: None,
-            system_tint: None,
-            system_shadow: shadow,
-            system_edge_fade: None,
-            system_top_fade_start: None,
-            backdrop_blur_radius: None,
-            backdrop_tint: None,
-            value: None,
-            default_value: None,
-            secure_text_entry: false,
-            editable: true,
-            auto_focus: false,
-            placeholder_text_color: None,
-            most_recent_event_count: 0,
+            specialized: Some(Arc::new(crate::elements::SpecializedElement::System(
+                crate::elements::SystemPayload {
+                    material: None,
+                    glass_variant: None,
+                    tint: None,
+                    shadow,
+                    edge_fade: None,
+                    top_fade_start: None,
+                },
+            ))),
+            view_effects: crate::elements::ViewEffects::default(),
             shows_vertical_scroll_indicator: true,
             shows_horizontal_scroll_indicator: true,
             events: Arc::from([]),
+            event_mask: 0,
             native_layout_key: None,
             native_resize: None,
             native_list_group: None,
-            terminal_session_id: None,
-            terminal_frames: Vec::new(),
             accessibility: crate::elements::AccessibilityInfo::default(),
             children: Vec::new(),
             style: ElementStyle::default(),
             style_json: None,
             cached_gpui_style: None,
-            cached_svg_path: gpui::SharedString::new_static(""),
             interactive: false,
             pseudo_events: false,
         }

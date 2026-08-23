@@ -1,6 +1,9 @@
 declare module "react-refresh/runtime" {
-    export function injectIntoGlobalHook(globalObject: typeof globalThis): void;
-    export function register(type: unknown, id: string): void;
-    export function createSignatureFunctionForTransform(): (type: unknown, key?: string, forceReset?: boolean, getCustomHooks?: () => unknown[]) => unknown;
-    export function performReactRefresh(): unknown;
+    const runtime: {
+        injectIntoGlobalHook(globalObject: typeof globalThis): void;
+        register(type: unknown, id: string): void;
+        createSignatureFunctionForTransform(): (type: unknown, key?: string, forceReset?: boolean, getCustomHooks?: () => unknown[]) => unknown;
+        performReactRefresh(): unknown;
+    };
+    export default runtime;
 }

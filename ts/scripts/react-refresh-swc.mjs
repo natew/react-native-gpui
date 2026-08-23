@@ -5,7 +5,7 @@ export function createReactRefreshSwcTransform() {
   const swc = require('@swc/core')
 
   return async function transformReactRefresh(source, { filename, isTs, isJsx }) {
-    const result = swc.transformSync(source, {
+    const result = await swc.transform(source, {
       filename,
       sourceMaps: false,
       jsc: {
@@ -17,7 +17,11 @@ export function createReactRefreshSwcTransform() {
           react: {
             runtime: 'automatic',
             development: true,
-            refresh: true,
+            refresh: {
+              refreshReg: '$RNGPUIRefreshReg$',
+              refreshSig: '$RefreshSig$',
+              emitFullSignatures: false,
+            },
           },
         },
       },
@@ -25,6 +29,7 @@ export function createReactRefreshSwcTransform() {
         type: 'es6',
       },
     })
-    return result.code
+    const moduleId = JSON.stringify(filename)
+    return `const $RNGPUIRefreshReg$ = (type, id) => globalThis.$RefreshReg$(type, ${moduleId} + " " + id);\n${result.code}`
   }
 }

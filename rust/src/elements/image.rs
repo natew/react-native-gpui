@@ -29,8 +29,8 @@ impl ReactImageElement {
     fn build_child(&self) -> AnyElement {
         let src = self
             .element
-            .src
-            .clone()
+            .src()
+            .map(String::from)
             .or_else(|| self.element.text.clone())
             .unwrap_or_default();
         let style = &self.element.style;

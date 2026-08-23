@@ -11,6 +11,7 @@ const child = spawn("node", ["scripts/run-hermes-example.mjs", "examples/display
 let stdout = "";
 let stderr = "";
 let exited = false;
+let stopping = false;
 
 child.stdout?.on("data", (chunk) => {
     stdout += chunk.toString();
@@ -21,7 +22,7 @@ child.stderr?.on("data", (chunk) => {
 
 child.on("exit", (code, signal) => {
     exited = true;
-    if (signal === "SIGTERM") return;
+    if (stopping || signal === "SIGTERM") return;
     fail(`renderer exited early code=${code ?? "null"} signal=${signal ?? "null"}`);
 });
 
@@ -32,6 +33,7 @@ setTimeout(() => {
         child.kill("SIGTERM");
         fail("hidden text triggered a GPUI measurement panic");
     }
+    stopping = true;
     child.kill("SIGTERM");
     console.log("DISPLAY_NONE_CONFORMANCE_PASS");
 }, Number(process.env.RNGPUI_DISPLAY_NONE_HOLD_MS ?? 650));

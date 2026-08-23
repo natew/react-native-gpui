@@ -366,7 +366,9 @@ fn collect_descriptors(
         label: ax_label(element),
         hint: element.accessibility.hint.clone(),
         value: ax_value(element),
-        secure: element.secure_text_entry
+        secure: element
+            .input_payload()
+            .is_some_and(|payload| payload.secure_text_entry)
             && (element.element_type == "textinput" || element.element_type == "textarea"),
         identifier: element
             .accessibility
@@ -375,7 +377,9 @@ fn collect_descriptors(
             .unwrap_or_else(|| format!("rngpui-{}", element.global_id)),
         disabled: element.accessibility.disabled
             || ((element.element_type == "textinput" || element.element_type == "textarea")
-                && !element.editable),
+                && !element
+                    .input_payload()
+                    .is_none_or(|payload| payload.editable)),
         selected: element.accessibility.selected,
         checked: element.accessibility.checked.clone(),
         expanded: element.accessibility.expanded,
@@ -467,13 +471,14 @@ fn ax_label(element: &ReactElement) -> Option<String> {
 }
 
 fn ax_value(element: &ReactElement) -> Option<String> {
+    let input = element.input_payload();
     let value = element
         .accessibility
         .value
         .clone()
-        .or_else(|| element.value.clone())
-        .or_else(|| element.default_value.clone())?;
-    if element.secure_text_entry
+        .or_else(|| input.and_then(|payload| payload.value.clone()))
+        .or_else(|| input.and_then(|payload| payload.default_value.clone()))?;
+    if input.is_some_and(|payload| payload.secure_text_entry)
         && (element.element_type == "textinput" || element.element_type == "textarea")
     {
         Some("*".repeat(value.chars().count()))
@@ -892,7 +897,7 @@ mod tests {
     use super::{
         ax_is_element, ax_label, ax_role, events_have_press_action, set_focused_text_node, state,
     };
-    use crate::elements::{AccessibilityInfo, ReactElement};
+    use crate::elements::{AccessibilityInfo, ReactElement, ViewEffects};
     use crate::style::ElementStyle;
 
     fn events(names: &[&str]) -> Vec<String> {
@@ -909,39 +914,20 @@ mod tests {
             element_type: element_type.to_string(),
             text: text.map(String::from),
             cached_text: gpui::SharedString::new(text.unwrap_or_default()),
-            number_of_lines: None,
-            selectable: false,
-            runs: Vec::new(),
-            src: None,
-            system_material: None,
-            system_glass_variant: None,
-            system_tint: None,
-            system_shadow: None,
-            system_edge_fade: None,
-            system_top_fade_start: None,
-            backdrop_blur_radius: None,
-            backdrop_tint: None,
-            value: None,
-            default_value: None,
-            secure_text_entry: false,
-            editable: true,
-            auto_focus: false,
-            placeholder_text_color: None,
-            most_recent_event_count: 0,
+            specialized: None,
+            view_effects: ViewEffects::default(),
             shows_vertical_scroll_indicator: true,
             shows_horizontal_scroll_indicator: true,
             events: Arc::from([]),
+            event_mask: 0,
             native_layout_key: None,
             native_resize: None,
             native_list_group: None,
-            terminal_session_id: None,
-            terminal_frames: Vec::new(),
             accessibility,
             children: Vec::new(),
             style: ElementStyle::default(),
             style_json: None,
             cached_gpui_style: None,
-            cached_svg_path: gpui::SharedString::new_static(""),
             interactive: false,
             pseudo_events: false,
         }

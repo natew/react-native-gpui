@@ -2708,8 +2708,8 @@ impl Element for ReactDivElement {
         // in-app liquid-glass backdrop blur: frost the gpui content already drawn behind
         // this view before its own background quad paints over it. `backdropTint` is the
         // glass material color composited over the blurred content; absent → blur only.
-        let backdrop_blur_radius = self.element.backdrop_blur_radius;
-        let backdrop_tint = self.element.backdrop_tint.unwrap_or(Hsla {
+        let backdrop_blur_radius = self.element.view_effects.backdrop_blur_radius;
+        let backdrop_tint = self.element.view_effects.backdrop_tint.unwrap_or(Hsla {
             h: 0.0,
             s: 0.0,
             l: 0.0,

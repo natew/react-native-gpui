@@ -6,12 +6,12 @@
 // the actual composited pixel across time.
 //
 // Fixture examples/opacity-ramp.tsx pulses a STATIONARY red box opacity 0.15↔1. We launch
-// it composited+invisible (rngpui dev → RNGPUI_CAPTURE_ONSCREEN), read the live frame.png
+// it composited+invisible through a kept CLI session, then read the live frame.png
 // at intervals, and assert the box-center pixel interpolates: red over white at low opacity
 // is pale (green channel high), at full opacity is saturated (green low). A dead opacity →
 // constant pixel → FAIL.
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readPng } from './png.mjs'
@@ -30,13 +30,15 @@ const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 
 // launch a kept, composited, invisible instance; parse its session dir.
 const dev = spawnSync(
   'bun',
-  ['run', 'cli/bin.ts', 'dev', '--launch', fixture, '--size', `${W}x${H}`, '--appearance', 'light'],
-  { cwd: tsRoot, encoding: 'utf8', env: process.env },
+  ['run', 'cli/bin.ts', 'get', 'frames', '--launch', fixture, '--keep', '--size', `${W}x${H}`],
+  { cwd: tsRoot, encoding: 'utf8', env: { ...process.env, RNGPUI_FORCE_APPEARANCE: 'light' } },
 )
 const out = `${dev.stdout || ''}${dev.stderr || ''}`
-const sessionDir = out.match(/session:\s*(\S+)/)?.[1]
+const sessionDir = out.match(/session(?:=|:\s*|\s+)(\S+)/)?.[1]
 if (dev.status !== 0 || !sessionDir) fail(`dev launch failed:\n${out.slice(0, 1200)}`)
-const framePath = join(sessionDir, 'frame.png')
+const session = JSON.parse(readFileSync(join(sessionDir, 'session.json'), 'utf8'))
+const framePath = session.capturePath
+const captureTriggerPath = session.captureTriggerPath
 
 function closeSession() {
   spawnSync('bun', ['run', 'cli/bin.ts', 'close', '--session', sessionDir], { cwd: tsRoot, encoding: 'utf8' })
@@ -59,6 +61,8 @@ try {
   // opacity levels regardless of where the loop is when we attach.
   for (let k = 0; k < 10; k++) {
     sleep(280)
+    writeFileSync(captureTriggerPath, 'capture\n')
+    sleep(80)
     const s = sampleCenter()
     if (s) greens.push({ g: s.g, hex: `#${[s.r, s.g, s.b].map((v) => v.toString(16).padStart(2, '0')).join('')}` })
   }

@@ -1,6 +1,6 @@
 [package]
 name = "react-native-gpui"
-version = "0.1.37"
+version = "0.1.38"
 edition = "2024"
 
 # the renderer service: hosts Hermes on a JS thread, renders committed React trees
@@ -21,6 +21,7 @@ gpui-component = "0.5"
 wry = { version = "0.53.3", package = "lb-wry", features = ["transparent"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 once_cell = "1.20"
 rustc-hash = "2"
 anyhow = "1.0"
@@ -50,14 +51,20 @@ core-foundation = "0.10"
 core-graphics = "0.24"
 objc = "0.2"
 
-# Patched gpui 0.2.2. The patch applies to gpui-component too (it depends on the same
-# gpui), so the whole graph shares one gpui. Divergences from crates.io gpui-0.2.2:
+[package.metadata.rngpui.gpui]
+upstream-revision = "d9ad6aff67e47de43abb270d22de75dd950f1b48"
+compatibility-base = "69e2130295c2649963eb639fc70b4f2ee8ea1624"
+update-mode = "0.2.2-api-compatible-backports"
+
+# GPUI audit target d9ad6aff, carried as API-compatible backports on its published 0.2.2 shape.
+# Current upstream split the platform, scheduler, collections, and shared-string code
+# into workspace crates and changed the scene and layout internals patched below. Copying
+# only its GPUI directory is no longer a standalone crate. This vendor is the single GPUI
+# instance for both RNGPUI and gpui-component 0.5.1. RNGPUI-only divergences are:
 #
-# 1. `DispatchEventResult` is `pub` (upstream `pub(crate)`) so the `realtap` debug
-#    command can call `Window::dispatch_event` — the real OS-click event path (hitbox
-#    hit-test + listeners) — to test on-screen clickability. Rust 2024's
-#    `unnameable_types` otherwise forbids an external crate from producing the private
-#    return type, even to discard it.
+# 1. `DispatchEventResult` and `Window::dispatch_event` have the public visibility they
+#    now have at d9ad6aff. They remain backported here because `realtap` calls the real
+#    OS event path and the compatibility base exposed neither symbol.
 #
 # 2. Retained-layout fast path (src/taffy.rs, src/window.rs). gpui is strictly immediate-
 #    mode: it rebuilds AND re-solves the whole taffy flexbox tree every draw, so an idle

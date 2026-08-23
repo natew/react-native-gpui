@@ -767,7 +767,11 @@ impl X11Client {
                     // window "x" button clicked by user
                     if window.should_close() {
                         // Rest of the close logic is handled in drop_window()
+                        // d9ad6aff: close callbacks can re-enter the X11 client. release
+                        // its RefCell lease first so that path cannot double-borrow state.
+                        drop(state);
                         window.close();
+                        state = self.0.borrow_mut();
                     }
                 } else if atom == state.atoms._NET_WM_SYNC_REQUEST {
                     window.state.borrow_mut().last_sync_counter =

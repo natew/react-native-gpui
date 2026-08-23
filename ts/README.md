@@ -109,27 +109,55 @@ from React props while the renderer owns only the generic native primitive.
 
 ## Dev loop
 
-`rngpui hot-reload` watches source roots, runs a caller-provided build command,
-and pushes the resulting JS bundle into the running Hermes runtime through the
-app control socket. React Fast Refresh state is preserved when compatible. If
-the control socket is still coming up, the CLI waits briefly instead of
-immediately downgrading. If hot eval still fails and `--pid` is supplied, the
-CLI falls back to SIGUSR2 live reload.
+`rngpui dev --launch` launches one development renderer, watches every local
+module in its dependency graph, and applies edits through React Fast Refresh.
+Compatible component state, the native window, focus, scroll position, and
+renderer-owned state stay in place. A transform or evaluation error is printed
+without killing the running app, so the next valid edit can recover it.
 
 ```sh
-rngpui hot-reload \
+rngpui dev --launch app/index.tsx --root app --root packages/ui
+```
+
+An owned external instance can use the same Fast Refresh path by providing its
+control socket, build command, output bundle, and watched roots:
+
+```sh
+rngpui dev \
   --socket /tmp/my-app.control.sock \
-  --pid /tmp/my-app.pid \
   --bundle native-shell/.gpui-hermes/hot-update.js \
-  --build "RNGPUI_HOT_UPDATE=1 NODE_ENV=development bun native-shell/scripts/bundle-app-hermes.mjs native-shell/app.tsx native-shell/.gpui-hermes/hot-update.js" \
+  --build "NODE_ENV=development bun native-shell/scripts/bundle-app-hermes.mjs native-shell/app.tsx native-shell/.gpui-hermes/hot-update.js" \
   --root app --root interface --root native-shell
 ```
 
-For a live-reload-only fallback watcher:
+There is one development reload contract. RNGPUI does not fall back to process
+signals or remount the application when a Fast Refresh update fails.
 
-```sh
-rngpui watch-reload --pid /tmp/my-app.pid --root app --root interface
+## Native diff
+
+`Diff` parses and virtualizes a unified patch in the renderer. Large patches do
+not create one React node per line.
+
+```tsx
+<Diff
+  patch={unifiedPatch}
+  wordDiff
+  scroll
+  maxLines={20_000}
+  collapsedPaths={["generated/output.ts"]}
+  onToggleFile={({ nativeEvent }) => toggle(nativeEvent.value)}
+  onShowMore={() => setExpanded(true)}
+  onLineClick={({ nativeEvent }) => {
+    openLine(nativeEvent.value, nativeEvent.oldLine, nativeEvent.newLine)
+  }}
+  style={{ height: 520, fontFamily: "Menlo", fontSize: 12 }}
+/>
 ```
+
+Use `PerformanceHUD.setEnabled(true)` or `rngpui do hud on` for the native
+frame/layout/paint overlay. `Renderer.getProvenance()` and
+`rngpui get provenance` report the exact renderer, service, GPUI, Hermes, and
+bundle identity.
 
 ## Native inspector
 

@@ -70,8 +70,16 @@ fn main() {
     );
     println!("cargo:rerun-if-env-changed=RNGPUI_SOURCE_SHA");
     println!("cargo:rerun-if-env-changed=HERMES_VERSION");
+    let head_ref = Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|reference| reference.trim().to_string())
+        .unwrap_or_else(|| "HEAD".to_string());
     if let Some(git_head) = Command::new("git")
-        .args(["rev-parse", "--git-path", "HEAD"])
+        .args(["rev-parse", "--git-path", &head_ref])
         .output()
         .ok()
         .filter(|output| output.status.success())

@@ -36,11 +36,13 @@ type MenuContextValue = {
     openAt: (x: number, y: number) => void;
 };
 
-type NativeMenuAccessor = {
-    set(state: { enabled: boolean; DropdownMenu: unknown; ContextMenu: unknown }): void;
-};
-
-type GetNativeMenuAccessor = () => NativeMenuAccessor;
+// tamagui v3's registration seam (@tamagui/native `registerNativeMenuAdapter`).
+// an adapter registers by name and exposes its dropdown module under `Menu`.
+type RegisterNativeMenuAdapter = (adapter: {
+    name: string;
+    Menu: unknown;
+    ContextMenu: unknown;
+}) => void;
 
 const MenuContext = createContext<MenuContextValue | null>(null);
 
@@ -404,12 +406,12 @@ function createGpuiNativeMenu(kind: MenuKind) {
 
 let didSetup = false;
 
-export function setupTamaguiNativeMenus(getNativeMenuAccessor: GetNativeMenuAccessor) {
+export function setupTamaguiNativeMenus(registerNativeMenuAdapter: RegisterNativeMenuAdapter) {
     if (didSetup) return;
     didSetup = true;
-    getNativeMenuAccessor().set({
-        enabled: true,
-        DropdownMenu: createGpuiNativeMenu("Menu"),
+    registerNativeMenuAdapter({
+        name: "gpui",
+        Menu: createGpuiNativeMenu("Menu"),
         ContextMenu: createGpuiNativeMenu("ContextMenu"),
     });
 }

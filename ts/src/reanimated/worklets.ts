@@ -1199,6 +1199,12 @@ export function getDynamicFeatureFlag(_name: string): boolean {
 }
 export function setDynamicFeatureFlag(_name: string, _value: boolean): void {}
 
+// Reanimated installs this debug hook during module initialization. Its native
+// implementation is a no-op that reports false, and RNGPUI has no slow-animation mode.
+export function toggleSlowAnimationsOnUIRuntime(): boolean {
+  return false
+}
+
 export default {
   runOnJS,
   runOnUI,

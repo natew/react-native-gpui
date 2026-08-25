@@ -16,8 +16,11 @@
 #
 # CONTROLS THAT MATTER:
 #   * window forced to 1360x880. IOSurface is a per-full-resolution backing store
-#     (~19.1 MB at this size on a 2x display), so a footprint taken at another
-#     window size is not comparable to any other number here.
+#     (18.26 MiB at this size on a 2x display), so a footprint taken at another
+#     window size is not comparable to any other number here. RNGPUI_WINDOW_SIZE
+#     overrides the pin, which exists for ONE purpose: proving the IOSurface total
+#     scales with window area, which is how you tell Metal drawables apart from a
+#     component's fixed allocation. Any comparison across rungs leaves it alone.
 #   * busiest of three samples, because one sample routinely catches a process
 #     between phases and reads a committed one as small.
 #   * measured AFTER a settle delay: first paint is what buys the graphics
@@ -35,7 +38,7 @@ cd "$WORKDIR" || exit 2
 USER_GUI_PID=$(cat /tmp/agentbus-gpui-user.pid 2>/dev/null || print 0)
 
 RNGPUI_NO_ACTIVATE=1 \
-RNGPUI_WINDOW_SIZE=1360,880 \
+RNGPUI_WINDOW_SIZE=${RNGPUI_WINDOW_SIZE:-1360,880} \
 RNGPUI_FONT_DIR=${RNGPUI_FONT_DIR:-$HOME/team-machine/gui/native-shell/fonts} \
 RNGPUI_EXAMPLE_TIMEOUT_MS=90000 \
 AGENTBUS_FIXTURE_ONLY=${AGENTBUS_FIXTURE_ONLY:-1} \

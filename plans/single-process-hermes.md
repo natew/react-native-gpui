@@ -114,7 +114,7 @@ GPUI/Metal/window init; optimize (defer liquid-glass, lean first frame, warm) to
       it (Hermes auto-detects HBC). hermesc accepts the Bun-bundled JS as-is. dev watcher: TODO.
 - [x] **Scale to full Tamagui ControlRoom — RENDERS, single process** (`bundle-app-hermes.mjs`,
       1.8 MB js / 1.37 MB hbc). Fixed `import.meta` (Hermes can't parse it → `define` strips it).
-      Pixels: full sidebar/stage/panels/status bar/SVG icons/theming (`/tmp/agentbus-app2.png`).
+      Pixels: full sidebar/stage/panels/status bar/SVG icons/theming (`/tmp/team-machine-app2.png`).
 - [x] **Startup < 200 ms — MET for the REAL app: ~135 ms cold** (127–141 ms wall, bytecode).
       Breakdown (RNGPUI_STARTUP_TIMING): bundle mmap 0.2 ms · JS eval+first render ~60 ms ·
       GPUI/Metal/window ~120 ms. **Key optimization: overlap** — moved the first-tree wait from
@@ -127,14 +127,14 @@ GPUI/Metal/window init; optimize (defer liquid-glass, lean first frame, warm) to
       lacks that the app/RN need: **Headers** (the connection blocker — `new Headers()` per request),
       TextEncoder/TextDecoder, btoa/atob, localStorage (in-memory), navigator, URLSearchParams.
       Result: status bar "● live", real sessions in the sidebar, real git changes in the panel
-      (`/tmp/agentbus-live2.png`). WS delivers live updates; fetch loads REST data.
+      (`/tmp/team-machine-live2.png`). WS delivers live updates; fetch loads REST data.
 
 ## STATUS: COMPLETE ✅
-Single-process desktop renderer working end-to-end: the agentbus ControlRoom runs in ONE process
+Single-process desktop renderer working end-to-end: the team-machine ControlRoom runs in ONE process
 (Rust host on the main thread + embedded Hermes on a JS thread + in-memory bridge), **no Bun, no
 second process, no NDJSON pipe**, connected to a live daemon, **cold start ~135–140 ms** (target
 was < 200). Branch `single-process-hermes` (worktree ~/rng-hermes); gui bundler
-`agentbus/gui/native-shell/scripts/bundle-app-hermes.mjs`.
+`team-machine/gui/native-shell/scripts/bundle-app-hermes.mjs`.
 
 Launch: `RNGPUI_BUNDLE=/path/app.hbc rngpui-service` (bytecode mmap'd; build via
 `bundle-app-hermes.mjs --bytecode` → hermesc). Measure: `ts/scripts/measure-hermes-startup.mjs`.
@@ -151,7 +151,7 @@ Launch: `RNGPUI_BUNDLE=/path/app.hbc rngpui-service` (bytecode mmap'd; build via
 
 ### remaining host fns (ported from node spawns)
 - native file picker (`apis.ts` runFilePickerScript) → Rust NSOpenPanel host fn.
-- fetch / WebSocket → Rust IO host fns + JS-thread completion callbacks (for live agentbus data).
+- fetch / WebSocket → Rust IO host fns + JS-thread completion callbacks (for live team-machine data).
 
 ## Later (runtime perf, after it's working)
 

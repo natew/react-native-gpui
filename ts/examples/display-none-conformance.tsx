@@ -3,7 +3,7 @@
  *
  * Before the renderer skipped hidden children, GPUI could prepaint a hidden
  * text child whose measured layout never ran and panic with:
- * "measurement has not been performed on agentbus".
+ * "measurement has not been performed on team-machine".
  *
  * Collapsed native-layout panes expose the same edge through zero-sized text:
  * GPUI text prepaint must not run when the React subtree has no drawable box.
@@ -14,9 +14,9 @@ function App() {
     return (
         <View style={s.root}>
             <View style={s.hiddenView}>
-                <Text style={s.hiddenText}>agentbus</Text>
+                <Text style={s.hiddenText}>team-machine</Text>
             </View>
-            <Text style={s.hiddenText}>agentbus</Text>
+            <Text style={s.hiddenText}>team-machine</Text>
             <View style={s.zeroPane}>
                 <Text style={s.zeroText} numberOfLines={1}>
                     collapsed text should not be prepainted

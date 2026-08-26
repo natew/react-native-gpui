@@ -389,7 +389,7 @@ impl TextLayout {
                 // `runs` would leak one probe's truncation into the next call — the
                 // definite-width pass then shapes the full string against runs covering
                 // only the truncated prefix, and the shaper silently drops every glyph
-                // past the runs (the "Mac.lan · ~/agentbus paints as Mac" flicker, and
+                // past the runs (the "Mac.lan · ~/team-machine paints as Mac" flicker, and
                 // its multi-line numberOfLines cousin). work on a pristine copy per cache
                 // miss; cache hits must not allocate a Vec they immediately discard.
                 let wrap_width = if text_style.white_space == WhiteSpace::Normal {
@@ -450,7 +450,7 @@ impl TextLayout {
                     // wrapped line-clamp (numberOfLines={n>1}): the measure pass wraps +
                     // truncates to the taffy probe width, which flickers between probes
                     // (a tiny min-content probe shaped "Mac…" while the real box fits
-                    // "Mac.lan · ~/agentbus"). reshape at prepaint, same as single-line.
+                    // "Mac.lan · ~/team-machine"). reshape at prepaint, same as single-line.
                     Some(TextReshape {
                         text: text.clone(),
                         runs: runs.clone(),

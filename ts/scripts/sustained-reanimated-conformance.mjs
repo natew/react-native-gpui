@@ -25,7 +25,7 @@ import { hermescArgs } from './hermesc-args.mjs'
 const here = dirname(fileURLToPath(import.meta.url))
 const tsRoot = resolve(here, '..')
 const repoRoot = resolve(tsRoot, '..')
-const guiRoot = resolve(process.env.RNGPUI_GUI_ROOT || join(homedir(), 'agentbus', 'gui'))
+const guiRoot = resolve(process.env.RNGPUI_GUI_ROOT || join(homedir(), 'team-machine', 'gui'))
 const rngEntry = resolve(tsRoot, 'src/index.ts')
 const fixture = resolve(
   process.env.RNGPUI_SUSTAINED_FIXTURE || resolve(guiRoot, 'native-shell/sustained-reanimated-conformance.tsx'),

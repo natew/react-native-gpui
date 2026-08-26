@@ -376,7 +376,7 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
 
     await waitForSocket(socketPath, () => child.exitCode != null);
     // settle before the first capture. 500ms covers a pure-Metal tree, but a
-    // WKWebView underlay (the agentbus chat/timeline stage) loads + renders its
+    // WKWebView underlay (the team-machine chat/timeline stage) loads + renders its
     // HTML async AFTER the gpui tree commits — and under machine load that can
     // take well over a second, so a fixed sleep races it (the blank-webview bug).
     // Instead: find the webview's bounds, then poll the live capture frame until

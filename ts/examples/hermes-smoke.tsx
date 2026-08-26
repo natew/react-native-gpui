@@ -1,5 +1,5 @@
 // Minimal end-to-end smoke for the single-process Hermes host: renders a few native
-// View/Text nodes through the library's own reconciler. No Tamagui, no agentbus app — just
+// View/Text nodes through the library's own reconciler. No Tamagui, no team-machine app — just
 // proves bundle eval → reconcile → __rngpui_applyTree → GPUI window + paint, in one process.
 //
 //   bun scripts/bundle-hermes.mjs examples/hermes-smoke.tsx /tmp/hermes-smoke.js

@@ -12,7 +12,7 @@
 //   --tolerance n           rgb-distance tolerance for --expect (default 12)
 //
 // examples:
-//   bun scripts/pixel-sample.mjs /tmp/agentbus-parity/desktop-dark.png --at 40,40
+//   bun scripts/pixel-sample.mjs /tmp/team-machine-parity/desktop-dark.png --at 40,40
 //   bun scripts/pixel-sample.mjs cap.png --avg 0,0,200,48 --json
 //   bun scripts/pixel-sample.mjs cap.png --expect 0,0,40,40=#101115 --tolerance 16
 import { pngSize } from './png.mjs'

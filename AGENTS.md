@@ -18,15 +18,15 @@ RNGPUI_BUNDLE=/tmp/kitchen.hbc RNGPUI_NO_ACTIVATE=1 ../rust/target/release/rngpu
 
 ## Releasing into Team Machine
 
-`~/agentbus/gui` consumes this package locally, but it is not symlinked. The
+`~/team-machine/gui` consumes this package locally, but it is not symlinked. The
 Team Machine native shell deliberately copies this package into
-`~/agentbus/gui/node_modules/react-native-gpui` as a real directory so the app and
+`~/team-machine/gui/node_modules/react-native-gpui` as a real directory so the app and
 renderer share one React instance.
 
 Do not manually copy this repo into Team Machine. Use the Team Machine-side release script:
 
 ```sh
-cd ~/agentbus/gui
+cd ~/team-machine/gui
 bun run release:gpui
 ```
 
@@ -35,11 +35,11 @@ That script:
 - bumps this repo's root, `ts/`, and Rust crate versions;
 - builds the package and native `rngpui-service`;
 - copies `dist/`, `native/`, `package.json`, and `README.md` into Team Machine;
-- writes `~/agentbus/gui/native-shell/react-native-gpui-release.json`;
+- writes `~/team-machine/gui/native-shell/react-native-gpui-release.json`;
 - commits the version bump in this repo;
-- commits the version marker in `~/agentbus`.
+- commits the version marker in `~/team-machine`.
 
-Use `bun run sync:gpui` in `~/agentbus/gui` only for quick local iteration. It
+Use `bun run sync:gpui` in `~/team-machine/gui` only for quick local iteration. It
 refreshes the copied package but does not create a version-history marker.
 
 ## Developer CLI: `rngpui` (inspect + drive a GPUI app)
@@ -87,7 +87,7 @@ rngpui diff /tmp/before.png /tmp/rngpui-shot.png --out /tmp/diff.png
 - `--size WxH` is honored end-to-end — the capture PNG comes back at that logical size ×
   the backing scale (1360x880 → 2720x1760). (The old LaunchServices `.app` capture path
   produced a wrongly-clamped ~784x507; the CLI direct-spawn path used by `shot` is correct.)
-- `--fixture` loads deterministic demo data (`AGENTBUS_FIXTURE_ONLY=1`); without it the
+- `--fixture` loads deterministic demo data (`TM_FIXTURE_ONLY=1`); without it the
   Team Machine app paints an empty "connecting…" shell when no daemon is reachable.
 - `--select <selector>` is repeatable; `--json` for machine output; `--out` to place the PNG.
 - `reshot` only re-reads the **current** frame of a kept session — it does not re-bundle
@@ -125,7 +125,7 @@ rngpui diff /tmp/before.png /tmp/rngpui-shot.png --out /tmp/diff.png
   do-then-get workflows.
 - `close --session <dir>` — terminate the owned service and remove its session dir.
 - `--attach` — target a running rngpui window (the largest, driveable-first). This
-  **includes** the user's `agentbus-gpui-user` window — it is not skipped. `get *`
+  **includes** the user's `team-machine-gpui-user` window — it is not skipped. `get *`
   is read-only and safe against it (CGWindowList capture + a read-only tree dump, no
   focus theft, no input). **Never** run `do`/`flow` with `--attach`: those inject
   synthetic taps/keys and would drive the user's window. To drive, `--launch`/`--bundle`

@@ -10,7 +10,7 @@
 The hover *animation* is already off-thread and correct: a sidebar row hover
 sweep produces native hitbox flips → coalesced `pseudo` events → Tamagui
 `avoidReRenders` emitter → reanimated drives the style on the UI runtime. Measured
-on the agentbus gui (offscreen, `measure-frame-cost.mjs --perf-trace`): ~146 hover
+on the tm gui (offscreen, `measure-frame-cost.mjs --perf-trace`): ~146 hover
 flips → ~168 off-thread `setNodeStyle` crossings, **0 React commits from the rows
 themselves.** Good.
 

@@ -1586,7 +1586,7 @@ impl Render for ServiceApp {
         // `cx.theme().caret` / `.foreground` / `.muted_foreground`), no per-app fixes.
         //
         // Drive the INPUT mode from the real window appearance, not the root-bg heuristic
-        // above: agentbus follows the system light/dark via the JS color layer and never
+        // above: team-machine follows the system light/dark via the JS color layer and never
         // sets a bg on the synthetic root, so `root_theme_mode` is stuck on Light — which
         // would render dark-mode inputs with black text. `window.appearance()` is the
         // ground truth the app itself follows.
@@ -1648,7 +1648,7 @@ impl Render for ServiceApp {
             && !elements::native_layout_has_animations()
             // Veto only while the inspector is ACTIVELY inspecting (overlay/menu shown) —
             // that adds a structural overlay child. An enabled-but-idle inspector (the
-            // common case behind `~/.agentbus/gui-debug`) renders no overlay, so the tree
+            // common case behind `~/.team-machine/gui-debug`) renders no overlay, so the tree
             // is structurally stable and reuse is sound.
             && !self.inspector.wants_input_grab()
             && !render_gate_disabled()
@@ -2924,7 +2924,7 @@ fn pick_paths_native(
 /// stdout is piped to `head`, SIGKILL) and the service lingered as an orphan —
 /// the user found a pile of hanging rngpui-service processes. Root fix in ONE
 /// place: under test mode, poll the parent pid and exit when it changes
-/// (orphaned processes reparent to launchd). The real app (`agentbus gui`)
+/// (orphaned processes reparent to launchd). The real app (`tm gui`)
 /// never sets RNGPUI_TEST_MODE, so its lifecycle is untouched.
 fn spawn_parent_exit_watchdog() {
     // Reap-on-orphan is the DEFAULT, not opt-in: any process that spawns this
@@ -2934,7 +2934,7 @@ fn spawn_parent_exit_watchdog() {
     // every tool path that forgot the flag leaked an orphaned service (the
     // "hanging rngpui-service" reports). Two exemptions keep long-lived launches
     // alive:
-    //   - the real `agentbus gui` app is launched via LaunchServices with parent
+    //   - the real `tm gui` app is launched via LaunchServices with parent
     //     launchd, so the `parent <= 1` check below already exempts it (the
     //     USER_OWNED_DO_NOT_KILL label is an extra belt in case it's ever a child);
     //   - `rngpui ... --keep` / `rngpui dev` sessions are CONTRACTUALLY long-lived

@@ -27,8 +27,8 @@ Measured on 2026-07-18 with a non-activating, on-screen composited test window:
 | Path | Actual result | Interpretation |
 | --- | --- | --- |
 | GPUI display-linked procedural animation | present p50 8.33 ms, p95 8.33 ms, 0 gaps over 12.5 ms | the GPUI and Metal base can sustain 120 Hz |
-| Agentbus Overview, 400 sessions | present p50 8.33 ms, p95 8.33 ms, 2 missed intervals in about 120 frames | real native scroll sustains 120 Hz |
-| Agentbus sidebar with stationary hover, 400 sessions | present p50 8.33 ms, p95 8.33 ms, 3 missed intervals in about 120 frames | native scroll plus hover sustains 120 Hz |
+| Team Machine Overview, 400 sessions | present p50 8.33 ms, p95 8.33 ms, 2 missed intervals in about 120 frames | real native scroll sustains 120 Hz |
+| Team Machine sidebar with stationary hover, 400 sessions | present p50 8.33 ms, p95 8.33 ms, 3 missed intervals in about 120 frames | native scroll plus hover sustains 120 Hz |
 | Tiny React `setState` animation | 182 rAF ticks, 150 paints, 149 distinct presented paint generations | React per-frame commits do not sustain 120 visual updates |
 
 Run the strict engine baseline with:
@@ -38,14 +38,14 @@ cd ts
 bun run conformance:presentation-pacing
 ```
 
-Run the real Agentbus gate with:
+Run the real Team Machine gate with:
 
 ```sh
-cd /Users/n8/agentbus/gui
+cd /Users/n8/team-machine/gui
 bun native-shell/scripts/measure-frame-cost.mjs --assert --require-120hz
 ```
 
-The Agentbus scroll sequence is scheduled by the GPUI window display link. An older
+The Team Machine scroll sequence is scheduled by the GPUI window display link. An older
 harness sent one socket request, waited for its reply, and then slept 8 ms. That loop
 averaged 9 to 10 ms and created the 90 to 100 fps result it was trying to measure.
 
@@ -63,7 +63,7 @@ reaches the next display deadline.
   Scrolling, gestures, and animation should stay in AppKit, GPUI, or the off-thread
   animation overlay.
 - GPUI rebuilds the immediate-mode element tree on each dirty draw. Retained layout
-  reuse and list chunk recycling keep the current Agentbus scroll draw around 3 ms,
+  reuse and list chunk recycling keep the current Team Machine scroll draw around 3 ms,
   but structural commits still scale with mounted nodes. Further tree and layout
   retention is the next large CPU-side engine win.
 - Every performance gate for visible motion should report source events, paints, and

@@ -12,7 +12,7 @@
 //
 // example:
 //   bun native-shell/scripts/capture-desktop.ts && \
-//     bun ../../react-native-gpui/ts/scripts/png-grid.mjs /tmp/agentbus-desktop.png
+//     bun ../../react-native-gpui/ts/scripts/png-grid.mjs /tmp/team-machine-desktop.png
 import { readPng } from './png.mjs'
 import { averageColor, toHex } from './pixel.mjs'
 

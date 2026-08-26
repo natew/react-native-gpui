@@ -1,4 +1,4 @@
-// Isolated test of the host fetch (+ WebSocket) bridge against a live agentbus daemon.
+// Isolated test of the host fetch (+ WebSocket) bridge against a live team-machine daemon.
 import { useEffect, useState } from "react";
 import { AppRegistry, Text, View } from "../src/index";
 

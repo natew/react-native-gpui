@@ -158,7 +158,7 @@
   }
 
   // fetch — bridged to the Rust host (ureq) on a worker thread; resolves with a minimal
-  // Response (ok/status/text()/json()). Enough for the agentbus REST client.
+  // Response (ok/status/text()/json()). Enough for the team-machine REST client.
   var fetchSeq = 1;
   var fetchPending = Object.create(null);
   g.fetch = function (url, init) {
@@ -354,7 +354,7 @@
   };
 
   // ── web globals Hermes doesn't ship (the app + RN APIs expect them) ─────────
-  // Headers (used by the agentbus REST client — `new Headers()` per request).
+  // Headers (used by the team-machine REST client — `new Headers()` per request).
   function Headers(init) {
     this._m = {};
     if (init) {

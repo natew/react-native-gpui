@@ -45,8 +45,8 @@ shot/dev flags:
   --appearance light|dark  force the app theme (RNGPUI_FORCE_APPEARANCE) — no system toggle
   --select <selector>      measure this node (repeatable): prints bounds + sampled color
   --crop <x,y,w,h>         (reserved) region of interest
-  --fixture                load deterministic demo data (AGENTBUS_FIXTURE_ONLY=1) — the
-                           agentbus app paints an empty shell without a daemon or fixture
+  --fixture                load deterministic demo data (TM_FIXTURE_ONLY=1) — the
+                           team-machine app paints an empty shell without a daemon or fixture
   --out <png>              where to write the capture (default /tmp/rngpui-shot.png)
 
 target (pick one; defaults to --attach):

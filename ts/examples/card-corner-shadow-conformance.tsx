@@ -1,7 +1,7 @@
 // Corner-clip + drop-shadow conformance fixture for the two native stage surfaces:
 // a WebView (composited as an AppKit underlay below Metal) and the GhosttyTerminal
 // (painted into the Metal scene). Both carry a borderRadius + a boxShadow, exactly
-// the way the agentbus stage drives them. Rendered on a bright contrasting field so
+// the way the team-machine stage drives them. Rendered on a bright contrasting field so
 // the rounded clip (the bright field shows through the corner, not a square surface)
 // and the soft shadow falloff (a darker band just outside the card edge) are both
 // measurable in pixels by check-card-corner-shadow-conformance.ts.

@@ -31,17 +31,17 @@ export type ShotFlags = {
     keep: boolean;
 };
 
-// the agentbus app paints an empty "connecting…" shell without data; the fixture
+// the team-machine app paints an empty "connecting…" shell without data; the fixture
 // env loads deterministic demo sessions so an offscreen shot shows the real layout.
-// honored by both the agentbus bundle and rngpui examples (which simply ignore it).
+// honored by both the team-machine bundle and rngpui examples (which simply ignore it).
 function shotEnv(flags: ShotFlags): Record<string, string> {
     const env: Record<string, string> = {};
-    if (flags.fixture) env.AGENTBUS_FIXTURE_ONLY = "1";
+    if (flags.fixture) env.TM_FIXTURE_ONLY = "1";
     if (flags.appearance === "light" || flags.appearance === "dark") {
         // native bridge theme (flips tamagui via the appearance event) AND the JS-side
-        // capture entries — covers the agentbus bundle and the parity/capture fixtures.
+        // capture entries — covers the team-machine bundle and the parity/capture fixtures.
         env.RNGPUI_FORCE_APPEARANCE = flags.appearance;
-        env.AGENTBUS_CAPTURE_APPEARANCE = flags.appearance;
+        env.TM_CAPTURE_APPEARANCE = flags.appearance;
     }
     return env;
 }

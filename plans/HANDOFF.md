@@ -9,7 +9,7 @@ Read §1–§3 first; they're enough to land the merge. §4+ is depth.
 
 ## 1. What is already done (do NOT redo)
 
-A complete rewrite of the agentbus desktop app to run in **ONE process** — no Bun, no second
+A complete rewrite of the team-machine desktop app to run in **ONE process** — no Bun, no second
 process, no NDJSON pipe:
 
 - The Rust GPUI binary (`rngpui-service`) embeds **Hermes** on a dedicated JS thread and runs
@@ -17,7 +17,7 @@ process, no NDJSON pipe:
 - The JSON element-tree protocol and the entire native-event protocol are **unchanged**; only
   the transport moved from OS pipes to in-process host calls via a thin JSI C ABI shim.
 - **Validated with real pixels**: the full Tamagui ControlRoom renders, connects to a live
-  `agentbus serve` daemon (real sessions + git changes), fetch + WebSocket both work.
+  `tm serve` daemon (real sessions + git changes), fetch + WebSocket both work.
 - **Cold start ~135 ms** for the full app (target was <200). Measured, repeatable.
 - **Resize-freeze fixed** (event coalescing + batched React updates) and **user-confirmed**.
 
@@ -48,9 +48,9 @@ that dir is gone, rebuild: `git clone --depth 1 https://github.com/facebook/herm
 hermes -B hermes/build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build hermes/build
 --target hermesc libhermesvm`. (ninja required: `brew install ninja`.)
 
-**Also uncommitted, in `~/agentbus` (separate repo):** the gui-side bundler
+**Also uncommitted, in `~/team-machine` (separate repo):** the gui-side bundler
 `gui/native-shell/scripts/bundle-app-hermes.mjs` (new) + minor edits. Commit those too (§6).
-NOTE `~/agentbus` and `~/react-native-gpui` both host *other* live agent sessions — stage by
+NOTE `~/team-machine` and `~/react-native-gpui` both host *other* live agent sessions — stage by
 explicit file list, never `git add -A`.
 
 ---
@@ -98,12 +98,12 @@ keep it functional — more work.)
 
 ### Then VALIDATE (don't skip — "renders" != "works"):
 ```sh
-cd ~/agentbus/gui && RNGPUI_LOCAL=~/react-native-gpui/ts \
-  bun native-shell/scripts/bundle-app-hermes.mjs /tmp/agentbus-app.js --bytecode
+cd ~/team-machine/gui && RNGPUI_LOCAL=~/react-native-gpui/ts \
+  bun native-shell/scripts/bundle-app-hermes.mjs /tmp/team-machine-app.js --bytecode
 # point the launcher at main now (not the worktree):
-AGENTBUS_GUI=~/agentbus/gui  ~/rng-hermes/run-hermes-app.sh   # or copy run-hermes-app.sh + adjust RNG
+TM_GUI=~/team-machine/gui  ~/rng-hermes/run-hermes-app.sh   # or copy run-hermes-app.sh + adjust RNG
 ```
-Expect: window opens, status bar "live · 127.0.0.1:7777" (start `agentbus serve` first),
+Expect: window opens, status bar "live · 127.0.0.1:7777" (start `tm serve` first),
 real sessions in the sidebar, ~135 ms cold start (`RNGPUI_STARTUP_TIMING=1` prints
 `[startup] first render +Xms`). Resize the window on the Terminal tab → must stay smooth.
 
@@ -164,7 +164,7 @@ Two threads, one process. `rust/src/service.rs` `main()` is the Rust entry; GPUI
 
 Key files: `rust/src/{service.rs,bridge.rs,hermes.rs,hermes_preamble.js}`, `rust/build.rs`,
 `rust/hermes_shim/*`, `ts/src/{runtime.ts,render.ts,colors.ts,apis.ts}`,
-`gui/native-shell/scripts/bundle-app-hermes.mjs` (in ~/agentbus).
+`gui/native-shell/scripts/bundle-app-hermes.mjs` (in ~/team-machine).
 
 ---
 
@@ -178,22 +178,22 @@ GH=$(find target/release/build -path '*ghostty-install/lib' -type d | head -1)
 cp "$GH"/libghostty-vt*.dylib ~/github/hermes/build/lib/libhermesvm.dylib target/release/
 
 # bundle (Bun is only the dev bundler; output runs under Hermes)
-cd ~/agentbus/gui && RNGPUI_LOCAL=~/rng-hermes/ts \
-  bun native-shell/scripts/bundle-app-hermes.mjs /tmp/agentbus-app.js --bytecode
+cd ~/team-machine/gui && RNGPUI_LOCAL=~/rng-hermes/ts \
+  bun native-shell/scripts/bundle-app-hermes.mjs /tmp/team-machine-app.js --bytecode
 
 # run a real window (no Bun, single process). EVERYTHING is one binary:
-RNGPUI_BUNDLE=/tmp/agentbus-app.hbc AGENTBUS_URL=http://127.0.0.1:7777 \
+RNGPUI_BUNDLE=/tmp/team-machine-app.hbc TM_URL=http://127.0.0.1:7777 \
   ~/rng-hermes/rust/target/release/rngpui-service
 #   ...or just:  ~/rng-hermes/run-hermes-app.sh   (does all of the above + an .app wrapper)
 
 # measure cold start
 node ~/rng-hermes/ts/scripts/measure-hermes-startup.mjs \
-  ~/rng-hermes/rust/target/release/rngpui-service /tmp/agentbus-app.hbc 8
+  ~/rng-hermes/rust/target/release/rngpui-service /tmp/team-machine-app.hbc 8
 ```
 
-Commit the ~/agentbus gui side (explicit files only):
+Commit the ~/tm gui side (explicit files only):
 ```sh
-cd ~/agentbus && git add gui/native-shell/scripts/bundle-app-hermes.mjs \
+cd ~/team-machine && git add gui/native-shell/scripts/bundle-app-hermes.mjs \
   gui/native-shell/scripts/measure-startup.mjs gui/native-shell/startup-measure.tsx \
   gui/native-shell/scripts/open-gpui.mjs gui/package.json gui/native-shell/README.md && git commit -m "..."
 ```
@@ -202,7 +202,7 @@ cd ~/agentbus && git add gui/native-shell/scripts/bundle-app-hermes.mjs \
 
 ## 7. Driving + visually verifying the app (you cannot run foreground GUI tests blindly)
 
-HARD RULE (see `~/agentbus/CLAUDE.md`): no foreground/focus-stealing GUI runs except when the
+HARD RULE (see `~/team-machine/CLAUDE.md`): no foreground/focus-stealing GUI runs except when the
 user asks. The app's macOS accessibility tree is **empty** (`get_window_state` -> element_count
 0), so AX-by-index doesn't work — drive by **pixel** with **cua-driver** (it posts input to
 backgrounded windows via CGEvent.postToPid, no focus theft):

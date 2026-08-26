@@ -25,7 +25,7 @@
 #     between phases and reads a committed one as small.
 #   * measured AFTER a settle delay: first paint is what buys the graphics
 #     allocations, so an early sample reports a floor that has not happened yet.
-#   * the user's GUI (/tmp/agentbus-gpui-user.pid) is excluded BY PID and never
+#   * the user's GUI (/tmp/team-machine-gpui-user.pid) is excluded BY PID and never
 #     sampled. It is a full ControlRoom holding the user's own state, so counting
 #     it as a baseline would silently inflate every number here.
 set -u
@@ -35,13 +35,13 @@ shift 2
 (($# > 0)) || { print "usage: measure-footprint.sh <label> <cwd> <command...>"; exit 2 }
 
 cd "$WORKDIR" || exit 2
-USER_GUI_PID=$(cat /tmp/agentbus-gpui-user.pid 2>/dev/null || print 0)
+USER_GUI_PID=$(cat /tmp/team-machine-gpui-user.pid 2>/dev/null || print 0)
 
 RNGPUI_NO_ACTIVATE=1 \
 RNGPUI_WINDOW_SIZE=${RNGPUI_WINDOW_SIZE:-1360,880} \
 RNGPUI_FONT_DIR=${RNGPUI_FONT_DIR:-$HOME/team-machine/gui/native-shell/fonts} \
 RNGPUI_EXAMPLE_TIMEOUT_MS=90000 \
-AGENTBUS_FIXTURE_ONLY=${AGENTBUS_FIXTURE_ONLY:-1} \
+TM_FIXTURE_ONLY=${TM_FIXTURE_ONLY:-1} \
 "$@" >/dev/null 2>&1 &
 runner=$!
 

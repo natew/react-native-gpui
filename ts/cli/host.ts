@@ -305,8 +305,8 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
             RNGPUI_CONTROL_SOCKET: socketPath,
             RNGPUI_APP_NAME: appName,
             ...(opts.appearance ? { RNGPUI_FORCE_APPEARANCE: opts.appearance } : {}),
-            ...(opts.appearance ? { AGENTBUS_CAPTURE_APPEARANCE: opts.appearance } : {}),
-            ...(opts.fixture === true ? { AGENTBUS_FIXTURE_ONLY: "1" } : {}),
+            ...(opts.appearance ? { TM_CAPTURE_APPEARANCE: opts.appearance } : {}),
+            ...(opts.fixture === true ? { TM_FIXTURE_ONLY: "1" } : {}),
         },
         // stderr goes to a session log file, never a pipe back to this process: the
         // service outlives the cli (dev/--keep), and an eprintln! into a closed pipe

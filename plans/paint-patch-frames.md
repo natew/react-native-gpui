@@ -130,7 +130,7 @@ channel, so it cannot hide a visible error: the clamp bug above was off by 4.4e-
 
 ## Measured
 
-Team Machine's desktop tree against a frozen fixture (`AGENTBUS_FIXTURE_ONLY=1`), 385 nodes,
+Team Machine's desktop tree against a frozen fixture (`TM_FIXTURE_ONLY=1`), 385 nodes,
 8 armed spinners, offscreen and non-activating, no daemon and no input.
 
 **Correctness.** Steady state: 316 patched frames, `ok=316 MISMATCH=0`, max alpha delta

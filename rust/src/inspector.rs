@@ -1364,7 +1364,7 @@ pub fn webview_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<u64> {
     // reach behind ANY overlay so the inspector can never select a hidden node,
     // and an app that mounts a portal host has a full-window, entirely transparent
     // container painted over everything — which made every WebView in such an app
-    // permanently unscrollable through `do scroll` (measured against agentbus,
+    // permanently unscrollable through `do scroll` (measured against team-machine,
     // whose whole transcript is a WebView: hits[0] was the empty portal container,
     // so `webview_at` answered None at every point on screen).
     for hit in hits {

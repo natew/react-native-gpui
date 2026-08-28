@@ -150,6 +150,7 @@ export {
     DeviceEventEmitter,
     NativeEventEmitter,
     AccessibilityInfo,
+    LogBox,
     TurboModuleRegistry,
     FilePicker,
     VoiceRecorder,

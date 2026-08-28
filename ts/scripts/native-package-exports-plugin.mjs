@@ -3,11 +3,12 @@ import { dirname, join, resolve } from 'node:path'
 
 const packageJsonCache = new Map()
 
-// Force the `react-native` export condition to win. Node/Bun pick the FIRST
+// Force React Native package entry points to win. Node/Bun pick the FIRST
 // matching key in an export map, so a package that lists `browser` before
 // `react-native` (nanoid, tamagui, on-zero, …) resolves to its DOM build even
-// with `conditions: ['react-native']` set on the build. This plugin overrides
-// those, and only those.
+// with `conditions: ['react-native']` set on the build. Bun also ignores the
+// legacy top-level `react-native` field used by packages such as
+// react-native-screens. This plugin overrides those, and only those.
 //
 // It must claim ONLY the packages it actually rewrites. A Bun 1.3.14 bundler bug
 // makes an onResolve callback that MATCHES a specifier and returns `undefined`
@@ -16,8 +17,9 @@ const packageJsonCache = new Map()
 // ("Property 'import_manifest' doesn't exist"). A broad `/^[^./].*/` filter put
 // every bare import in range of that bug to serve the ~7% that need the
 // override. So the filter is built from the packages that really declare a
-// react-native condition; everything else never enters the plugin and Bun
-// resolves it natively. Keep that invariant: do not widen this filter.
+// react-native condition or entry point; everything else never enters the
+// plugin and Bun resolves it natively. Keep that invariant: do not widen this
+// filter.
 export function nativePackageExportsPlugin({ root, name = 'native package exports' } = {}) {
   const fallbackRoot = root ? resolve(root) : process.cwd()
   const filter = reactNativePackageFilter(fallbackRoot)
@@ -31,7 +33,8 @@ export function nativePackageExportsPlugin({ root, name = 'native package export
   }
 }
 
-// every installed package whose export map declares a react-native condition:
+// every installed package whose export map declares a react-native condition
+// or whose top-level react-native field names its native entry point:
 // the root tree, the ancestor node_modules a workspace resolves through, and
 // nested node_modules (a hoisted tree still nests duplicates). realpath dedup
 // keeps a symlinked store from being walked twice or cycling. ~1800
@@ -100,7 +103,9 @@ function reactNativePackageFilter(root) {
         }
         values.push(...Object.values(value))
       }
-      if (hasReactNativeTarget && pkg?.name) names.add(pkg.name)
+      if ((hasReactNativeTarget || typeof pkg?.['react-native'] === 'string') && pkg?.name) {
+        names.add(pkg.name)
+      }
       const nestedNodeModules = join(packageDir, 'node_modules')
       if (existsSync(nestedNodeModules)) nodeModulesStack.push(nestedNodeModules)
     }
@@ -125,6 +130,12 @@ function resolveReactNativePackageExport(specifier, importer) {
   const packageJsonPath = findPackageJson(parsed.name, defaultPath, importer)
   if (!packageJsonPath) return { path: defaultPath }
   const pkg = readPackageJson(packageJsonPath)
+  if (!parsed.subpath && typeof pkg?.['react-native'] === 'string') {
+    const nativeEntry = pkg['react-native'].startsWith('.')
+      ? pkg['react-native']
+      : `./${pkg['react-native']}`
+    return { path: Bun.resolveSync(nativeEntry, dirname(packageJsonPath)) }
+  }
   if (!pkg?.exports) return { path: defaultPath }
   const exportKey = parsed.subpath ? `.${parsed.subpath}` : '.'
   const match = exportValueForKey(pkg.exports, exportKey)

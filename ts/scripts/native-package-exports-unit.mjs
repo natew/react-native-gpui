@@ -11,9 +11,11 @@ const modules = join(root, "node_modules");
 const ordinary = join(modules, "ordinary-package");
 const executor = join(modules, "executor-package");
 const conditional = join(modules, "conditional-package");
+const legacy = join(modules, "legacy-native-package");
 mkdirSync(ordinary, { recursive: true });
 mkdirSync(join(executor, "realtime"), { recursive: true });
 mkdirSync(conditional, { recursive: true });
+mkdirSync(legacy, { recursive: true });
 
 writeFileSync(
     join(ordinary, "package.json"),
@@ -66,14 +68,26 @@ writeFileSync(
 );
 writeFileSync(join(conditional, "native.js"), "export const platformValue = 'native';\n");
 writeFileSync(join(conditional, "web.js"), "export const platformValue = 'web';\n");
+writeFileSync(
+    join(legacy, "package.json"),
+    JSON.stringify({
+        name: "legacy-native-package",
+        type: "module",
+        main: "./web.js",
+        "react-native": "native.js",
+    }),
+);
+writeFileSync(join(legacy, "native.js"), "export const legacyValue = 'legacy-native';\n");
+writeFileSync(join(legacy, "web.js"), "export const legacyValue = 'legacy-web';\n");
 writeFileSync(join(root, "alias.js"), "export const aliasValue = 'alias';\n");
 writeFileSync(
     join(root, "entry.js"),
     [
         "import { ordinaryValue } from 'ordinary-package/barrel';",
         "import { platformValue } from 'conditional-package';",
+        "import { legacyValue } from 'legacy-native-package';",
         "import { aliasValue } from 'virtual-alias';",
-        "globalThis.__rngpuiNativeExportsResult = `${ordinaryValue}:${platformValue}:${aliasValue}`;",
+        "globalThis.__rngpuiNativeExportsResult = `${ordinaryValue}:${platformValue}:${legacyValue}:${aliasValue}`;",
     ].join("\n"),
 );
 
@@ -100,8 +114,8 @@ try {
     const code = await result.outputs[0].text();
     globalThis.__rngpuiNativeExportsResult = undefined;
     new Function(code)();
-    assert.equal(globalThis.__rngpuiNativeExportsResult, "42:native:alias");
-    console.log("NATIVE_PACKAGE_EXPORTS_UNIT_PASS ordinary-export-star=native-condition=prior-alias");
+    assert.equal(globalThis.__rngpuiNativeExportsResult, "42:native:legacy-native:alias");
+    console.log("NATIVE_PACKAGE_EXPORTS_UNIT_PASS ordinary-export-star=native-condition=legacy-native-entry=prior-alias");
 } finally {
     delete globalThis.__rngpuiNativeExportsResult;
     rmSync(root, { recursive: true, force: true });

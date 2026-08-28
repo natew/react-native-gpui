@@ -316,6 +316,11 @@ export const AccessibilityInfo = {
     setAccessibilityFocus(_reactTag: number): void {},
 };
 
+export const LogBox = {
+    ignoreAllLogs(_ignore?: boolean): void {},
+    ignoreLogs(_patterns: Array<string | RegExp>): void {},
+};
+
 // Native-library compatibility surface. Desktop has no TurboModule registry,
 // but packages such as expo-clipboard import the API before deciding whether to use it.
 export const TurboModuleRegistry = {

@@ -40,6 +40,8 @@ export type SerializedNode = {
     autoFocus?: boolean;
     mostRecentEventCount?: number;
     src?: string;
+    /** `<Image resizeMode>` — how the picture fills the box layout gave the element. */
+    resizeMode?: string;
     /** `<Diff>` options. The patch itself uses `text` so large-field interning applies. */
     wordDiff?: boolean;
     collapsedPaths?: string[];

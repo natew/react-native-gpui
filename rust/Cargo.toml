@@ -30,6 +30,8 @@ libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "dfac6f
 # sync-send / async-recv channel: Hermes and debug-control threads hand parsed trees
 # and commands to a foreground gpui task that applies them and calls cx.notify().
 flume = "0.11"
+# BoxFuture / AsyncRead for the gpui HttpClient impl in src/http.rs.
+futures = "0.3"
 raw-window-handle = "0.6"
 # microphone capture for the JS VoiceRecorder API (default input device, native config).
 cpal = "0.15"

@@ -167,10 +167,35 @@ pub struct TerminalPayload {
     pub frames: Arc<[TerminalFrame]>,
 }
 
+/// RN's `<Image resizeMode>`. Carried as its own enum because GPUI's `ObjectFit`
+/// is neither `Copy` nor `PartialEq`, and the element payload is both.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ImageFit {
+    Cover,
+    Contain,
+    Stretch,
+    Center,
+}
+
+impl ImageFit {
+    pub fn object_fit(self) -> gpui::ObjectFit {
+        match self {
+            ImageFit::Cover => gpui::ObjectFit::Cover,
+            ImageFit::Contain => gpui::ObjectFit::Contain,
+            ImageFit::Stretch => gpui::ObjectFit::Fill,
+            // RN's `center` draws the image at its own size, centred.
+            ImageFit::Center => gpui::ObjectFit::None,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub enum SpecializedElement {
     Text(TextPayload),
-    Image { src: Option<String> },
+    Image {
+        src: Option<String>,
+        resize_mode: ImageFit,
+    },
     Svg { path: gpui::SharedString },
     WebView { src: Option<String> },
     System(SystemPayload),
@@ -297,10 +322,18 @@ impl ReactElement {
 
     pub fn src(&self) -> Option<&str> {
         match self.specialized.as_deref() {
-            Some(SpecializedElement::Image { src }) | Some(SpecializedElement::WebView { src }) => {
+            Some(SpecializedElement::Image { src, .. }) | Some(SpecializedElement::WebView { src }) => {
                 src.as_deref()
             }
             _ => None,
+        }
+    }
+
+    /// `<Image resizeMode>`, defaulting to RN's `cover`.
+    pub fn image_resize_mode(&self) -> ImageFit {
+        match self.specialized.as_deref() {
+            Some(SpecializedElement::Image { resize_mode, .. }) => *resize_mode,
+            _ => ImageFit::Cover,
         }
     }
 

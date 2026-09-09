@@ -3,14 +3,20 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Bounds, Display, Element, ElementId, GlobalElementId, ImageSource,
-    IntoElement, LayoutId, Pixels, Styled, Window, img, px,
+    IntoElement, LayoutId, Pixels, Styled, StyledImage, Window, img, px,
 };
 
 use crate::elements::{ReactElement, report_layout};
-use crate::style::Dim;
 
 /// `<Image source={{ uri }} />` → a GPUI `img`. `http(s)` uris load over the
 /// network via GPUI's image cache; anything else is treated as a local file path.
+///
+/// The element lays out through its OWN style, exactly like a `View`, and the
+/// `img` fills that box. It used to be the img itself, sized only from
+/// `style.width`/`style.height` when both were pixel values, so every RN-shaped
+/// image (`flex: 1`, `width: '100%'`, an absolutely positioned fill) laid out at
+/// 0x0 and never appeared. `resizeMode` then decides how the picture fills that
+/// box, defaulting to RN's `cover`.
 pub struct ReactImageElement {
     element: Arc<ReactElement>,
     _window_id: u64,
@@ -41,13 +47,9 @@ impl ReactImageElement {
             PathBuf::from(src).into()
         };
 
-        let mut el = img(source);
-        if let Some(w) = style.width.and_then(Dim::as_px) {
-            el = el.w(px(w));
-        }
-        if let Some(h) = style.height.and_then(Dim::as_px) {
-            el = el.h(px(h));
-        }
+        let mut el = img(source)
+            .size_full()
+            .object_fit(self.element.image_resize_mode().object_fit());
         if let Some(r) = style.border_radius {
             el = el.rounded(px(r));
         }
@@ -74,16 +76,16 @@ impl Element for ReactImageElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
-        let hidden_style = self.element.build_gpui_style(None);
-        if hidden_style.display == Display::None {
+        let style = self.element.build_gpui_style(None);
+        if style.display == Display::None {
             self.child = None;
-            return (window.request_layout(hidden_style, [], cx), ());
+            return (window.request_layout(style, [], cx), ());
         }
 
         let mut child = self.build_child();
-        let layout_id = child.request_layout(window, cx);
+        let child_layout = child.request_layout(window, cx);
         self.child = Some(child);
-        (layout_id, ())
+        (window.request_layout(style, [child_layout], cx), ())
     }
 
     fn prepaint(

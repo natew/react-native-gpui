@@ -48,6 +48,7 @@ mod elements;
 mod frame_clock;
 mod frame_trace;
 mod hermes;
+mod http;
 mod hit_passthrough;
 mod icons;
 mod inspector;
@@ -530,7 +531,16 @@ fn parse_json_tree(
             selectable,
             runs: runs.into(),
         })),
-        "image" => Some(SpecializedElement::Image { src }),
+        "image" => Some(SpecializedElement::Image {
+            src,
+            resize_mode: match obj.get("resizeMode").and_then(|v| v.as_str()) {
+                Some("contain") => elements::ImageFit::Contain,
+                Some("stretch") => elements::ImageFit::Stretch,
+                Some("center") => elements::ImageFit::Center,
+                // `repeat` has no GPUI equivalent; tiling would need its own paint.
+                _ => elements::ImageFit::Cover,
+            },
+        }),
         "svg" => Some(SpecializedElement::Svg {
             path: gpui::SharedString::new(text.as_deref().unwrap_or_default()),
         }),
@@ -3073,7 +3083,11 @@ fn main() {
     // capture mode opens hidden too (no flash); liquid_glass reveals it invisibly.
     let show_window = (!test_mode || test_onscreen) && !capture_onscreen;
 
-    let app = gpui::Application::new().with_assets(icons::Assets);
+    // gpui's default client is a NullHttpClient, which silently fails every
+    // remote `<Image>` (see http.rs).
+    let app = gpui::Application::new()
+        .with_assets(icons::Assets)
+        .with_http_client(std::sync::Arc::new(http::UreqHttpClient));
     startup_mark("Application::new");
     app.run(move |cx: &mut App| {
         startup_mark("app.run entered");

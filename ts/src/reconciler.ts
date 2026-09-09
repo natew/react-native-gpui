@@ -1210,10 +1210,13 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
             if (props.value != null) node.value = String(props.value);
             if (props.defaultValue != null) node.defaultValue = String(props.defaultValue);
             break;
-        case "Image":
+        case "Image": {
             node.type = "image";
             node.src = imageSource(props.source) ?? (props.src as string);
+            const resizeMode = stringProp(props, "resizeMode");
+            if (resizeMode) node.resizeMode = resizeMode;
             break;
+        }
         case "Svg":
             node.type = "svg";
             node.name = props.name as string;

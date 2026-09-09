@@ -175,6 +175,7 @@ pub enum ImageFit {
     Contain,
     Stretch,
     Center,
+    None,
 }
 
 impl ImageFit {
@@ -183,8 +184,12 @@ impl ImageFit {
             ImageFit::Cover => gpui::ObjectFit::Cover,
             ImageFit::Contain => gpui::ObjectFit::Contain,
             ImageFit::Stretch => gpui::ObjectFit::Fill,
-            // RN's `center` draws the image at its own size, centred.
-            ImageFit::Center => gpui::ObjectFit::None,
+            // RN's `center` centres the image at its own size but scales an
+            // oversized one DOWN to fit, which is exactly ScaleDown. Plain
+            // `None` never scales, so it would overflow the box instead.
+            ImageFit::Center => gpui::ObjectFit::ScaleDown,
+            // RN's `none` keeps the image at its own size either way.
+            ImageFit::None => gpui::ObjectFit::None,
         }
     }
 }

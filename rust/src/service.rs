@@ -537,6 +537,7 @@ fn parse_json_tree(
                 Some("contain") => elements::ImageFit::Contain,
                 Some("stretch") => elements::ImageFit::Stretch,
                 Some("center") => elements::ImageFit::Center,
+                Some("none") => elements::ImageFit::None,
                 // `repeat` has no GPUI equivalent; tiling would need its own paint.
                 _ => elements::ImageFit::Cover,
             },

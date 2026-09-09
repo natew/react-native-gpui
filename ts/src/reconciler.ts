@@ -1213,7 +1213,12 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
         case "Image": {
             node.type = "image";
             node.src = imageSource(props.source) ?? (props.src as string);
-            const resizeMode = stringProp(props, "resizeMode");
+            // RN accepts resizeMode as a prop OR inside style, with the prop
+            // winning. Reading only the prop made <Image style={{ resizeMode }}>
+            // silently fall back to cover.
+            const resizeMode =
+                stringProp(props, "resizeMode") ??
+                (typeof style.resizeMode === "string" ? style.resizeMode : undefined);
             if (resizeMode) node.resizeMode = resizeMode;
             break;
         }

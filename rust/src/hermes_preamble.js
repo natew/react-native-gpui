@@ -81,24 +81,45 @@
 
   // requestAnimationFrame rides the host's real vsync (rust frame_clock.rs /
   // CVDisplayLink): arming __rngpui_requestFrame gets ONE __rngpui_fireFrame back
-  // on the next display refresh. At most one fire is in flight — the host only
-  // fires while armed, and we only re-arm after running callbacks. Both runtimes
+  // on the next display refresh. At most one fire is in flight: __rafArmed is the
+  // whole invariant, so arming twice is a no-op and a frame ends by re-arming only
+  // if work is still queued. A fire runs callbacks, then finalizers. Both runtimes
   // (React + reanimated worklet/UI) get this same implementation here, before any
   // bundle evaluates.
   var __rafDebug = g.process && g.process.env && g.process.env.RNGPUI_RAF_DEBUG;
   var __rafSeq = 0;
   var __rafCallbacks = new Map();
+  var __rafFinalizers = [];
   var __rafNextId = 1;
+  var __rafArmed = false;
+  function __rafArm() {
+    if (__rafArmed) return;
+    __rafArmed = true;
+    g.__rngpui_requestFrame('');
+  }
   g.requestAnimationFrame = function (cb) {
     var id = __rafNextId++;
     __rafCallbacks.set(id, cb);
     if (__rafDebug) { g.__rngpui_log('debug: rAF schedule #' + (++__rafSeq)); }
-    if (__rafCallbacks.size === 1) g.__rngpui_requestFrame('');
+    __rafArm();
     return id;
   };
   g.cancelAnimationFrame = function (id) { __rafCallbacks.delete(id); };
+  // reanimated 4.5+ requires this on the runtime its worklets run on: mappers.ts
+  // reads it once as `schedulingFunction`, and scheduledMapperRun reschedules
+  // itself through it after EVERY run, so it is the mapper loop's only clock.
+  // animationsManager's scheduleFlush rides it too. Upstream's worklets runLoop
+  // only pushes, because its UI-runtime frame loop reschedules unconditionally
+  // and is therefore always running. Ours is armed on demand, so a finalizer has
+  // to arm it as well or the loop stops the moment no ordinary callback is
+  // outstanding, and reanimated silently stops applying updates.
+  g.requestAnimationFrameFinalizer = function (cb) {
+    if (typeof cb !== 'function') return;
+    __rafFinalizers.push(cb);
+    __rafArm();
+  };
   g.__rngpui_fireFrame = function () {
-    if (__rafCallbacks.size === 0) return;
+    __rafArmed = false;
     // snapshot ids: callbacks registered DURING this frame run next frame, and a
     // callback cancelling a same-frame sibling must win (browser semantics).
     var ids = Array.from(__rafCallbacks.keys());
@@ -109,8 +130,19 @@
       __rafCallbacks.delete(ids[i]);
       try { cb(ts); } catch (e) { g.__rngpui_log('error: rAF callback threw ' + ((e && e.stack) || e)); }
     }
-    // registrations made while firing may not have crossed size 0→1; re-arm.
-    if (__rafCallbacks.size > 0) g.__rngpui_requestFrame('');
+    // finalizers run after every callback of the same frame. One that queues
+    // another finalizer (which is exactly what scheduledMapperRun does) lands in
+    // the fresh array and waits for the next frame instead of spinning this one.
+    // Upstream drains microtasks between the two phases; Hermes drains ours after
+    // the Rust tick that called this, so a queueMicrotask'd mapper run lands one
+    // phase later than on React Native.
+    var finalizers = __rafFinalizers;
+    __rafFinalizers = [];
+    for (var j = 0; j < finalizers.length; j++) {
+      try { finalizers[j](); } catch (e) { g.__rngpui_log('error: rAF finalizer threw ' + ((e && e.stack) || e)); }
+    }
+    // registrations made while firing did not arm, since we were still armed.
+    if (__rafCallbacks.size > 0 || __rafFinalizers.length > 0) __rafArm();
   };
 
   // queueMicrotask via Promise (Hermes drains microtasks after each Rust loop tick).

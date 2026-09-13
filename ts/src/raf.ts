@@ -1,5 +1,5 @@
 // requestAnimationFrame: under the gpui host BOTH runtimes get the real
-// vsync-driven implementation from rust/src/hermes_preamble.js (frame_clock.rs /
+// vsync-driven implementation from rust/src/jsc_preamble.js (frame_clock.rs /
 // CVDisplayLink — armed via __rngpui_requestFrame, fired as __rngpui_fireFrame
 // once per display refresh). That preamble evaluates before any bundle, so by the
 // time this module loads, rAF already exists and this file does nothing.

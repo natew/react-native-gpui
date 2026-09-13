@@ -4,9 +4,9 @@
 #   usage: measure-footprint.sh <label> <cwd> <command...>
 #
 #   ts:  ./scripts/measure-footprint.sh floor . \
-#          node scripts/run-hermes-example.mjs examples/minimal-one-view.tsx
+#          node scripts/run-example.mjs examples/minimal-one-view.tsx
 #   gui: ./scripts/measure-footprint.sh controlroom ~/team-machine/gui \
-#          node native-shell/scripts/run-hermes-fixture.mjs native-shell/app.tsx
+#          node native-shell/scripts/run-gpui-fixture.mjs native-shell/app.tsx
 #
 # METRIC: phys_footprint, from `vmmap -summary`. This is Apple's own accounting and
 # what Activity Monitor's Memory column shows. Two reasons not to use an RSS sum:

@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { homedir } from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -11,7 +10,6 @@ const repoRoot = resolve(tsRoot, "..");
 const workdir = mkdtempSync(join(tsRoot, ".rngpui-reload-"));
 const entry = join(workdir, "app.tsx");
 const outJs = join(workdir, "app.js");
-const outHbc = outJs.replace(/\.js$/, ".hbc");
 const dumpPath = join(workdir, "tree.json");
 const pidPath = join(workdir, "service.pid");
 let child = null;
@@ -22,7 +20,7 @@ try {
         cwd: tsRoot,
         env: {
             ...process.env,
-            RNGPUI_BUNDLE: outHbc,
+            RNGPUI_BUNDLE: outJs,
             RNGPUI_DUMP_TREE: dumpPath,
             RNGPUI_NO_ACTIVATE: "1",
             RNGPUI_TEST_MODE: "1",
@@ -75,7 +73,7 @@ AppRegistry.registerComponent("ReloadConformance", () => App);
 AppRegistry.runApplication("ReloadConformance", { width: 420, height: 240 });
 `,
     );
-    const result = spawnSync("bun", ["scripts/bundle-hermes.mjs", entry, outJs, "--bytecode"], {
+    const result = spawnSync("bun", ["scripts/bundle-app.mjs", entry, outJs], {
         cwd: tsRoot,
         encoding: "utf8",
         env: { ...process.env, NODE_ENV: "production" },
@@ -117,15 +115,9 @@ function serviceBinary() {
 
 function stageServiceDylibs(binary) {
     const releaseDir = dirname(binary);
-    const hermesRoot = resolve(process.env.HERMES_ROOT || join(homedir(), "github", "hermes"));
-    const hermesDylib = resolve(hermesRoot, "build", "lib", "libhermesvm.dylib");
-    const stagedHermes = join(releaseDir, "libhermesvm.dylib");
-    if (!existsSync(stagedHermes)) {
-        if (!existsSync(hermesDylib)) throw new Error(`libhermesvm.dylib not found: ${hermesDylib}`);
-        copyFileSync(hermesDylib, stagedHermes);
-    }
     for (const dylib of findDylibs(resolve(releaseDir, "build"), "libghostty-vt")) {
-        copyFileSync(dylib, join(releaseDir, dylib.split("/").pop()));
+        const destination = join(releaseDir, dylib.split("/").pop());
+        if (!existsSync(destination)) copyFileSync(dylib, destination);
     }
 }
 

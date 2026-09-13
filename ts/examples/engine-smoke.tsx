@@ -1,9 +1,9 @@
-// Minimal end-to-end smoke for the single-process Hermes host: renders a few native
+// Minimal end-to-end smoke for the single-process JavaScriptCore host: renders a few native
 // View/Text nodes through the library's own reconciler. No Tamagui, no team-machine app — just
 // proves bundle eval → reconcile → __rngpui_applyTree → GPUI window + paint, in one process.
 //
-//   bun scripts/bundle-hermes.mjs examples/hermes-smoke.tsx /tmp/hermes-smoke.js
-//   RNGPUI_BUNDLE=/tmp/hermes-smoke.js rngpui-service
+//   bun scripts/bundle-app.mjs examples/engine-smoke.tsx /tmp/engine-smoke.js
+//   RNGPUI_BUNDLE=/tmp/engine-smoke.js rngpui-service
 import { useEffect, useState } from "react";
 import { AppRegistry, Text, View } from "../src/index";
 
@@ -28,7 +28,7 @@ function App() {
         >
             <View style={{ padding: 24, backgroundColor: "#313244", borderRadius: 12 }}>
                 <Text style={{ color: "#cdd6f4", fontSize: 28, fontWeight: "700" }}>
-                    Hello from Hermes
+                    Hello from JavaScriptCore
                 </Text>
                 <Text style={{ color: "#a6adc8", fontSize: 16, marginTop: 8 }}>
                     single process · no Bun · no pipe

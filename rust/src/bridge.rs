@@ -1,5 +1,5 @@
 //! The Rust→JS event channel. In the single-process model the JS runs in an embedded
-//! Hermes runtime on the JS thread (see hermes.rs); events are pushed as JSON strings onto
+//! JavaScriptCore runtime on the JS thread (see jsc.rs); events are pushed as JSON strings onto
 //! a `flume` channel that the JS thread's loop drains and dispatches via
 //! `globalThis.__rngpui_onHostEvent`. `runtime.ts` parses these into `BridgeEvent`s and
 //! routes them back to React handlers. The JSON shapes are unchanged from the old stdio bridge.
@@ -43,7 +43,7 @@ pub fn events_emitted_count() -> u64 {
 pub fn emit_line(line: &str) {
     EVENTS_EMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // queue for the JS thread's loop, which calls __rngpui_onHostEvent(line) on the JS thread.
-    crate::hermes::post("__rngpui_onHostEvent", line.to_string());
+    crate::jsc::post("__rngpui_onHostEvent", line.to_string());
 }
 
 fn emit_value(v: serde_json::Value) {

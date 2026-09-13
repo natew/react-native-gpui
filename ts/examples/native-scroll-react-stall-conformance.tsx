@@ -10,7 +10,7 @@ function App() {
             console.log("CONFORMANCE native-scroll-react-stall STALL_START");
             const until = Date.now() + STALL_MS;
             while (Date.now() < until) {
-                // keep Hermes' React runtime busy while AppKit and GPUI scroll.
+                // keep JavaScriptCore' React runtime busy while AppKit and GPUI scroll.
             }
             console.log("CONFORMANCE native-scroll-react-stall STALL_END");
         }, 700);

@@ -18,7 +18,7 @@ let colorSchemeOverride: ColorSchemeName | undefined;
 let appearanceUpdateSink: (() => void) | undefined;
 
 // The host injects the real system scheme as a global before the bundle evaluates
-// (hermes.rs reads AppleInterfaceStyle), so the FIRST serialize already resolves
+// (jsc.rs reads AppleInterfaceStyle), so the FIRST serialize already resolves
 // DynamicColorIOS values under the right scheme — no dark flash in light mode. The
 // window's `appearance` event (→ applyNativeColorScheme) still corrects any
 // mismatch after open and on every macOS light/dark toggle.

@@ -1,7 +1,7 @@
 //! Request/reply debug control socket for the `rngpui` CLI.
 //!
 //! This is intentionally separate from the app transport. The production runtime is
-//! one process: Rust GPUI host + embedded Hermes. The CLI talks to that host over a
+//! one process: Rust GPUI host + embedded JavaScriptCore. The CLI talks to that host over a
 //! Unix socket only when `RNGPUI_CONTROL_SOCKET` is set.
 
 use std::io::{BufRead, BufReader, Write};
@@ -95,7 +95,7 @@ fn handle_stream(mut stream: UnixStream, tx: &Sender<Incoming>) {
         write_response(&mut stream, response);
         return;
     }
-    if let Some(mut response) = handle_hermes_request(&request) {
+    if let Some(mut response) = handle_jsc_request(&request) {
         if let Value::Object(map) = &mut response {
             map.insert("reqId".into(), json!(req_id));
         }
@@ -130,7 +130,7 @@ fn handle_stream(mut stream: UnixStream, tx: &Sender<Incoming>) {
     write_response(&mut stream, response);
 }
 
-fn handle_hermes_request(value: &Value) -> Option<Value> {
+fn handle_jsc_request(value: &Value) -> Option<Value> {
     let cmd = value.get("$cmd").and_then(Value::as_str)?;
     match cmd {
         "hotEval" | "evalJs" => {
@@ -144,7 +144,7 @@ fn handle_hermes_request(value: &Value) -> Option<Value> {
                     "rngpui-eval.js"
                 });
             let hot = cmd == "hotEval";
-            match crate::hermes::eval_script_blocking(
+            match crate::jsc::eval_script_blocking(
                 code.to_string(),
                 url.to_string(),
                 hot,

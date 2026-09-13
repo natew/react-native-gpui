@@ -1,7 +1,7 @@
 /**
- * Runtime bridge — in-process host calls to the embedded Hermes host (rust/src/hermes.rs).
+ * Runtime bridge — in-process host calls to the embedded JavaScriptCore host (rust/src/jsc.rs).
  *
- * Single-process model: this code runs inside Hermes on the JS thread; the Rust binary owns
+ * Single-process model: this code runs inside JavaScriptCore on the JS thread; the Rust binary owns
  * the GPUI/Metal main thread. Instead of spawning a service and streaming NDJSON over pipes,
  * every committed tree is handed to the host fn `globalThis.__rngpui_applyTree(json)`, and
  * native events arrive by the host calling `globalThis.__rngpui_onHostEvent(json)`.
@@ -198,7 +198,8 @@ export type RendererProvenance = {
     rendererVersion: string;
     gpuiRevision: string;
     serviceVersion: string;
-    hermesVersion: string;
+    jsEngine: string;
+    jsEngineVersion: string;
     bundleUrl: string | null;
     development: boolean;
 };

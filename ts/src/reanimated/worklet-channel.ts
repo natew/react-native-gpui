@@ -1,6 +1,6 @@
 // host-fn channel adapter for the worklet runtime.
 //
-// the two Hermes runtimes (React + UI) cross only as JSON strings through rust
+// the two JavaScriptCore runtimes (React + UI) cross only as JSON strings through rust
 // host fns (see plans/off-thread-reanimated.md §Crossings):
 //   - React→UI:  __rngpui_uiPost(json)  (host fn present on the React runtime)
 //   - UI→React:  __rngpui_jsPost(json)   (host fn present on the UI runtime)

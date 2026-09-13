@@ -1,10 +1,9 @@
-// Measure single-process Hermes cold start: process launch → first painted frame.
+// Measure single-process JavaScriptCore cold start: process launch → first painted frame.
 // Uses the invisible on-screen capture window (paints, no focus theft) and reads the
 // binary's "[startup] first paint complete +Xms" marker (RNGPUI_STARTUP_TIMING).
 //
-//   node scripts/measure-hermes-startup.mjs <binary> <bundle.js|.hbc> [runs]
-//   node scripts/measure-hermes-startup.mjs <binary> <bundle.js|.hbc> --runs 8 --max-ms 200
-import { homedir } from "node:os";
+//   node scripts/measure-startup.mjs <binary> <bundle.js> [runs]
+//   node scripts/measure-startup.mjs <binary> <bundle.js> --runs 8 --max-ms 200
 import { spawn } from 'node:child_process'
 import { copyFileSync, existsSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -23,7 +22,7 @@ for (let i = 2; i < process.argv.length; i++) {
 const bin = positional[0]
 const bundle = positional[1]
 if (!bin || !bundle) {
-  console.error('usage: node scripts/measure-hermes-startup.mjs <binary> <bundle.js|.hbc> [runs] [--max-ms 200]')
+  console.error('usage: node scripts/measure-startup.mjs <binary> <bundle.js> [runs] [--max-ms 200]')
   process.exit(1)
 }
 if (positional[2]) runs = Number(positional[2])
@@ -116,7 +115,7 @@ if (maxMs > 0) {
 }
 
 function startupMarks(log) {
-  return [...log.matchAll(/^\[(?:hermes )?startup\] (.+?) \+([\d.]+)ms$/gm)].map((match) => ({
+  return [...log.matchAll(/^\[(?:jsc )?startup\] (.+?) \+([\d.]+)ms$/gm)].map((match) => ({
     label: match[1],
     ms: Number(match[2]),
   }))
@@ -124,20 +123,16 @@ function startupMarks(log) {
 
 function stageServiceDylibs(binary) {
   const releaseDir = dirname(resolve(binary))
-  const hermesRoot = resolve(process.env.HERMES_ROOT || join(homedir(), 'github', 'hermes'))
-  const hermesDylib = resolve(hermesRoot, 'build', 'lib', 'libhermesvm.dylib')
-  const stagedHermes = join(releaseDir, 'libhermesvm.dylib')
-  if (!existsSync(stagedHermes)) {
-    if (!existsSync(hermesDylib)) throw new Error(`libhermesvm.dylib not found: ${hermesDylib}`)
-    copyFileSync(hermesDylib, stagedHermes)
-  }
 
   const ghostty = findDylibs(resolve(releaseDir, 'build'), 'libghostty-vt')
   const stagedGhostty = findDylibs(releaseDir, 'libghostty-vt')
   if (!ghostty.length && !stagedGhostty.length) {
     throw new Error(`libghostty-vt dylib not found under ${resolve(releaseDir, 'build')} or ${releaseDir}`)
   }
-  for (const dylib of ghostty) copyFileSync(dylib, join(releaseDir, dylib.split('/').pop()))
+  for (const dylib of ghostty) {
+    const destination = join(releaseDir, dylib.split('/').pop())
+    if (!existsSync(destination)) copyFileSync(dylib, destination)
+  }
 }
 
 function findDylibs(dir, prefix) {

@@ -1,6 +1,6 @@
-// Host environment for the single-process Hermes runtime. Wires JS globals to the Rust
-// host functions installed by rust/src/hermes.rs, and is evaluated before the app bundle.
-// Hermes provides ES built-ins (JSON, Promise + microtasks, Date, Map, etc.); this layer
+// Host environment for the single-process JavaScriptCore runtime. Wires JS globals to the Rust
+// host functions installed by rust/src/jsc.rs, and is evaluated before the app bundle.
+// JavaScriptCore provides ES built-ins (JSON, Promise + microtasks, Date, Map, etc.); this layer
 // adds the browser/RN-ish globals the app expects: console, timers, rAF, performance.
 (function () {
   var g = globalThis;
@@ -133,7 +133,7 @@
     // finalizers run after every callback of the same frame. One that queues
     // another finalizer (which is exactly what scheduledMapperRun does) lands in
     // the fresh array and waits for the next frame instead of spinning this one.
-    // Upstream drains microtasks between the two phases; Hermes drains ours after
+    // Upstream drains microtasks between the two phases; JavaScriptCore drains ours after
     // the Rust tick that called this, so a queueMicrotask'd mapper run lands one
     // phase later than on React Native.
     var finalizers = __rafFinalizers;
@@ -145,7 +145,7 @@
     if (__rafCallbacks.size > 0 || __rafFinalizers.length > 0) __rafArm();
   };
 
-  // queueMicrotask via Promise (Hermes drains microtasks after each Rust loop tick).
+  // queueMicrotask via Promise (JavaScriptCore drains microtasks after each Rust loop tick).
   if (typeof g.queueMicrotask !== 'function') {
     g.queueMicrotask = function (cb) { Promise.resolve().then(cb); };
   }
@@ -321,7 +321,7 @@
     this._id = wsSeq++;
     this.url = String(url);
     this.readyState = 0; // CONNECTING
-    // 'arraybuffer' | 'blob' — what an inbound binary frame is delivered as. Hermes has no
+    // 'arraybuffer' | 'blob' — what an inbound binary frame is delivered as. JavaScriptCore has no
     // Blob, so we hand back an ArrayBuffer regardless; default matches the browser default.
     this.binaryType = 'blob';
     this.onopen = null; this.onmessage = null; this.onclose = null; this.onerror = null;
@@ -330,7 +330,7 @@
     // Browsers accept either a single string or an array of strings for the
     // second WS arg, and send them as the Sec-WebSocket-Protocol header.
     // Zero uses this to smuggle its auth token, so the host worker MUST
-    // forward the list — see ws_thread in hermes.rs.
+    // forward the list — see ws_thread in jsc.rs.
     var protoList = null;
     if (typeof protocols === 'string') protoList = [protocols];
     else if (Array.isArray(protocols)) protoList = protocols.map(String);
@@ -375,7 +375,7 @@
     else if (e.type === 'message') {
       // an inbound binary frame arrives base64-encoded (Rust ws_thread encodes it); decode
       // to an ArrayBuffer so the consumer sees real bytes, not a base64 string. (binaryType
-      // 'blob' has no Blob in Hermes, so we deliver an ArrayBuffer in both modes.)
+      // 'blob' has no Blob in JavaScriptCore, so we deliver an ArrayBuffer in both modes.)
       var data = e.binary ? g.__rngpui_base64ToBytes(e.data).buffer : e.data;
       ws._emit('message', { type: 'message', data: data });
     }
@@ -385,7 +385,7 @@
     }
   };
 
-  // ── web globals Hermes doesn't ship (the app + RN APIs expect them) ─────────
+  // ── web globals JavaScriptCore doesn't ship (the app + RN APIs expect them) ─────────
   // Headers (used by the team-machine REST client — `new Headers()` per request).
   function Headers(init) {
     this._m = {};
@@ -426,7 +426,7 @@
     return out;
   };
 
-  // UTF-8 TextEncoder/TextDecoder (Hermes has Uint8Array).
+  // UTF-8 TextEncoder/TextDecoder (JavaScriptCore has Uint8Array).
   if (typeof g.TextEncoder === 'undefined') {
     g.TextEncoder = function () {};
     g.TextEncoder.prototype.encode = function (str) {
@@ -473,7 +473,7 @@
   }
 
   if (typeof g.navigator === 'undefined') {
-    g.navigator = { userAgent: 'rngpui-hermes', platform: 'MacIntel', language: 'en-US', onLine: true, product: 'ReactNative' };
+    g.navigator = { userAgent: 'rngpui-jsc', platform: 'MacIntel', language: 'en-US', onLine: true, product: 'ReactNative' };
   }
 
   // URLSearchParams (basic).
@@ -498,7 +498,7 @@
     g.URLSearchParams = USP;
   }
 
-  // URL — Hermes ships no URL. The @rocicorp/zero client + on-zero http-pull transport
+  // URL — JavaScriptCore ships no URL. The @rocicorp/zero client + on-zero http-pull transport
   // parse and MUTATE URLs (read .origin/.protocol/.host/.hostname/.port/.pathname/.search/
   // .searchParams/.href/.toString; assign .protocol to rewrite ws→http). This covers the
   // forms they use: absolute http(s)/ws(s) URLs and `new URL(absPathOrAbsURL, base)`.
@@ -532,11 +532,28 @@
       } else if (base != null) {
         var b = parseAbsolute(String(base));
         if (input.charAt(0) === '/') {
-          // absolute-path reference against base origin (the only relative form zero uses)
+          // absolute-path reference against base origin
           var pm2 = /^([^?#]*)(\?[^#]*)?(#.*)?$/.exec(input);
           parts = { protocol: b.protocol, hostname: b.hostname, port: b.port, pathname: pm2[1] || '/', search: pm2[2] || '', hash: pm2[3] || '' };
         } else {
-          throw new TypeError('rngpui URL polyfill: only absolute-path relative refs are supported: ' + input);
+          // relative path against base pathname directory
+          var pm2 = /^([^?#]*)(\?[^#]*)?(#.*)?$/.exec(input);
+          var relPath = pm2[1] || '';
+          var baseDir = b.pathname.substring(0, b.pathname.lastIndexOf('/') + 1);
+          var fullPath = baseDir + relPath;
+          var segments = fullPath.split('/');
+          var resolved = [];
+          for (var i = 0; i < segments.length; i++) {
+            var seg = segments[i];
+            if (seg === '' && i > 0 && i < segments.length - 1) continue;
+            if (seg === '.') continue;
+            if (seg === '..') {
+              if (resolved.length > 1) resolved.pop();
+            } else {
+              resolved.push(seg);
+            }
+          }
+          parts = { protocol: b.protocol, hostname: b.hostname, port: b.port, pathname: resolved.join('/') || '/', search: pm2[2] || '', hash: pm2[3] || '' };
         }
       } else {
         throw new TypeError('Invalid URL (no base): ' + input);

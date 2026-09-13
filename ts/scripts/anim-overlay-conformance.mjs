@@ -22,13 +22,12 @@ const holdMs = 500
 rmSync(outDir, { recursive: true, force: true })
 mkdirSync(outDir, { recursive: true })
 const outJs = `${outDir}/app.js`
-const outHbc = `${outDir}/app.hbc`
 const dumpPath = `${outDir}/tree.json`
 
-// bundle the fixture to HBC (esbuild via Bun + reanimated seam plugin).
+// bundle the fixture to JS (esbuild via Bun + reanimated seam plugin).
 const bundle = spawnSync(
   'bun',
-  ['scripts/bundle-hermes.mjs', resolve(tsRoot, 'examples/anim-overlay-conformance.tsx'), outJs, '--bytecode'],
+  ['scripts/bundle-app.mjs', resolve(tsRoot, 'examples/anim-overlay-conformance.tsx'), outJs],
   { cwd: tsRoot, encoding: 'utf8', env: { ...process.env, NODE_ENV: 'production' } },
 )
 if (bundle.status !== 0) {
@@ -47,7 +46,7 @@ const child = spawn(serviceBin, [], {
   cwd: tsRoot,
   env: {
     ...process.env,
-    RNGPUI_BUNDLE: outHbc,
+    RNGPUI_BUNDLE: outJs,
     RNGPUI_NO_ACTIVATE: '1',
     RNGPUI_TEST_MODE: '1',
     RNGPUI_DUMP_TREE: dumpPath,

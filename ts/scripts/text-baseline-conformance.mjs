@@ -17,7 +17,7 @@ const pngPath = `/tmp/rngpui-text-baseline-${process.pid}.png`;
 rmSync(pngPath, { force: true });
 const run = spawnSync(
     "node",
-    ["scripts/run-hermes-example.mjs", "examples/text-baseline-conformance.tsx"],
+    ["scripts/run-example.mjs", "examples/text-baseline-conformance.tsx"],
     {
         cwd: tsRoot,
         encoding: "utf8",

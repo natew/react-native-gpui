@@ -34,7 +34,7 @@ mkdirSync(outDir, { recursive: true });
 // backing surface at full opacity (no alpha-divide quantization), which is exactly
 // what the absolute-color assertions below need.
 const controlSocketPath = `${outDir}/control.sock`;
-const child = spawn("node", ["scripts/run-hermes-example.mjs", "examples/webview-overlay-conformance.tsx"], {
+const child = spawn("node", ["scripts/run-example.mjs", "examples/webview-overlay-conformance.tsx"], {
     cwd: root,
     env: conformanceEnv({
         RNGPUI_SERVICE_PID_FILE: servicePidPath,

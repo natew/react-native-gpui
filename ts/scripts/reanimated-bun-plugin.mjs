@@ -1,5 +1,5 @@
 // Bun-build plugin: wire real react-native-reanimated@4 + react-native-worklets +
-// @tamagui/animations-reanimated for the embedded Hermes target.
+// @tamagui/animations-reanimated for the embedded JavaScriptCore target.
 //
 // HOW IT WORKS (the winning approach — see scripts/prebuild-reanimated.mjs):
 // reanimated's `lib/module` re-export-barrel graph trips Bun's bundler into a
@@ -10,15 +10,15 @@
 // external. This plugin then simply ALIASES:
 //   react-native-reanimated      → .reanimated-prebuilt/react-native-reanimated.mjs
 //   @tamagui/animations-reanimated → .reanimated-prebuilt/tamagui-animations-reanimated.mjs
-//   react-native-worklets        → ts/src/reanimated/worklets.ts (single-runtime stub,
+//   react-native-worklets        → ts/src/reanimated/worklets.ts (cross-runtime adapter,
 //                                   which force-imports the seam → installs the globals)
 // Bun then just includes those single files — no deep tree-shake of reanimated's graph.
 //
-// gpui runs ONE Hermes runtime: worklets execute as ordinary inline closures, runOnUI =
-// queueMicrotask, runOnJS = identity, and `global._updateProps` is the off-thread fast
-// path (→ `__rngpui_setNodeStyle` → Rust animated-style overlay → cx.notify without a
-// React re-commit). The prebuilt chunks contain the real reanimated + Tamagui driver;
-// the seam + worklets stub (this repo) provide the thin native seam.
+// gpui runs separate React and UI JavaScriptCore runtimes. Worklets and shared values cross
+// through the adapter, and `global._updateProps` is the off-thread fast path
+// (→ `__rngpui_setNodeStyle` → Rust animated-style overlay → cx.notify without a React
+// re-commit). The prebuilt chunks contain the real reanimated + Tamagui driver; the seam
+// and worklets adapter provide the thin native seam.
 //
 // Run `bun scripts/prebuild-reanimated.mjs` whenever react-native-reanimated or
 // @tamagui/animations-reanimated changes (or on postinstall). If the prebuilt chunk is
@@ -61,9 +61,8 @@ export function reanimatedBunPlugin(opts = {}) {
   // the SharedValues a worklet depends on (its mapper inputs); without the babel lift
   // the closure is empty, the mapper subscribes to nothing, a `sv.value = …` write never
   // re-runs the mapper, and a Tamagui spring never advances (snaps to its target). The
-  // lifted function still runs with LEXICAL scope on the single runtime (the
-  // `this.__closure` form lives only in `__initData.code`, used for cross-runtime
-  // serialization we never do), so the per-frame `frame()` rAF loop keeps working.
+  // lifted function carries `this.__closure` in `__initData.code` so the UI runtime can
+  // deserialize the mapper with the SharedValues it captured.
   const pluginRequire = createRequire(resolve(resolveRoot, 'package.json'))
   let babel = null
   let workletsPluginPath = null

@@ -198,7 +198,7 @@ export async function runGet(host: Host, sub: string, args: string[], json: bool
             json,
             () => {
                 console.log(`  renderer: ${result.renderer} ${result.rendererVersion}`);
-                console.log(`  service: ${result.serviceVersion}  GPUI: ${result.gpuiRevision}  Hermes: ${result.hermesVersion}`);
+                console.log(`  service: ${result.serviceVersion}  GPUI: ${result.gpuiRevision}  JS: ${result.jsEngine} ${result.jsEngineVersion}`);
                 console.log(`  bundle: ${result.bundleUrl ?? "(embedded)"}  development=${result.development === true}`);
             },
             result,

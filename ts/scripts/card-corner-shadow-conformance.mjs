@@ -96,7 +96,7 @@ check(
 // ---- step 2: webview native corner-clip + decor-shadow path (log proof) ----
 const geomLog = await run(
     "node",
-    ["scripts/run-hermes-example.mjs", FIXTURE, "--timeout-ms", "9000"],
+    ["scripts/run-example.mjs", FIXTURE, "--timeout-ms", "9000"],
     { RNGPUI_NO_ACTIVATE: "1", RNGPUI_TEST_MODE: "1", RNGPUI_WEBVIEW_GEOMETRY_DEBUG: "1" },
 );
 check(

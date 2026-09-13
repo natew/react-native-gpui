@@ -17,11 +17,10 @@ const tsRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const repoRoot = resolve(tsRoot, '..')
 const outDir = process.argv[2] || '/tmp/rngpui-offthread-stall-conformance'
 const outJs = `${outDir}/app.js`
-const outHbc = `${outDir}/app.hbc`
 
 const bundle = spawnSync(
   'bun',
-  ['scripts/bundle-hermes.mjs', resolve(tsRoot, 'examples/offthread-stall-conformance.tsx'), outJs, '--bytecode'],
+  ['scripts/bundle-app.mjs', resolve(tsRoot, 'examples/offthread-stall-conformance.tsx'), outJs],
   { cwd: tsRoot, encoding: 'utf8', env: { ...process.env, NODE_ENV: 'production' } },
 )
 if (bundle.status !== 0) {
@@ -38,7 +37,7 @@ const child = spawn(serviceBin, [], {
   cwd: tsRoot,
   env: {
     ...process.env,
-    RNGPUI_BUNDLE: outHbc,
+    RNGPUI_BUNDLE: outJs,
     RNGPUI_NO_ACTIVATE: '1',
     RNGPUI_TEST_MODE: '1',
     RNGPUI_ANIM_TRACE: '1',

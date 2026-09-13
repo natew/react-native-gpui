@@ -23,7 +23,6 @@ const outDir = process.argv[2] || '/tmp/rngpui-reanimated-conformance'
 rmSync(outDir, { recursive: true, force: true })
 mkdirSync(outDir, { recursive: true })
 const outJs = `${outDir}/app.js`
-const outHbc = `${outDir}/app.hbc`
 const dumpPath = `${outDir}/tree.json`
 
 // ensure the prebuilt reanimated chunk exists (build it if missing).
@@ -38,7 +37,7 @@ if (!existsSync(resolve(tsRoot, '.reanimated-prebuilt/react-native-reanimated.mj
 
 const bundle = spawnSync(
   'bun',
-  ['scripts/bundle-hermes.mjs', resolve(tsRoot, 'examples/reanimated-conformance.tsx'), outJs, '--bytecode'],
+  ['scripts/bundle-app.mjs', resolve(tsRoot, 'examples/reanimated-conformance.tsx'), outJs],
   { cwd: tsRoot, encoding: 'utf8', env: { ...process.env, NODE_ENV: 'production' } },
 )
 if (bundle.status !== 0) {
@@ -55,7 +54,7 @@ const child = spawn(serviceBin, [], {
   cwd: tsRoot,
   env: {
     ...process.env,
-    RNGPUI_BUNDLE: outHbc,
+    RNGPUI_BUNDLE: outJs,
     RNGPUI_NO_ACTIVATE: '1',
     RNGPUI_TEST_MODE: '1',
     RNGPUI_DUMP_TREE: dumpPath,

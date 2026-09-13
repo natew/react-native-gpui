@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { homedir } from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,7 +22,7 @@ for (let i = 0; i < args.length; i++) {
 
 const entry = positional[0];
 if (!entry) {
-    console.error("usage: node scripts/run-hermes-example.mjs <entry.tsx> [--timeout-ms N] [--interactive]");
+    console.error("usage: node scripts/run-example.mjs <entry.tsx> [--timeout-ms N] [--interactive]");
     process.exit(1);
 }
 
@@ -50,7 +49,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 }
 
 try {
-    const bundle = spawnSync("bun", ["scripts/bundle-hermes.mjs", resolve(tsRoot, entry), outJs, "--bytecode"], {
+    const bundle = spawnSync("bun", ["scripts/bundle-app.mjs", resolve(tsRoot, entry), outJs], {
         cwd: tsRoot,
         encoding: "utf8",
         env: { ...process.env, NODE_ENV: process.env.NODE_ENV || "production" },
@@ -60,13 +59,13 @@ try {
         process.stderr.write(bundle.stderr);
         process.exit(bundle.status || 1);
     }
-    const hbc = outJs.replace(/\.js$/, ".hbc");
+    const bundlePath = outJs;
     const bin = serviceBinary();
     child = spawn(bin, [], {
         cwd: tsRoot,
         env: {
             ...process.env,
-            RNGPUI_BUNDLE: hbc,
+            RNGPUI_BUNDLE: bundlePath,
             RNGPUI_UI_BUNDLE: resolve(tsRoot, "dist", "ui-runtime.js"),
             RNGPUI_NO_ACTIVATE: "1",
             // parent-exit watchdog: the service reaps itself if this runner dies unreaped
@@ -83,7 +82,7 @@ try {
         timer = setTimeout(() => {
             if (finished) return;
             finished = true;
-            console.error(`HERMES_EXAMPLE_TIMEOUT ${entry} after ${timeoutMs}ms`);
+            console.error(`EXAMPLE_TIMEOUT ${entry} after ${timeoutMs}ms`);
             cleanup();
             process.exit(124);
         }, timeoutMs);
@@ -112,20 +111,15 @@ function serviceBinary() {
 
 function stageServiceDylibs(binary) {
     const releaseDir = dirname(binary);
-    const hermesRoot = resolve(process.env.HERMES_ROOT || join(homedir(), "github", "hermes"));
-    const hermesDylib = resolve(hermesRoot, "build", "lib", "libhermesvm.dylib");
-    const stagedHermes = join(releaseDir, "libhermesvm.dylib");
-    if (!existsSync(stagedHermes)) {
-        if (!existsSync(hermesDylib)) throw new Error(`libhermesvm.dylib not found: ${hermesDylib}`);
-        copyFileSync(hermesDylib, stagedHermes);
-    }
-
     const ghostty = findDylibs(resolve(releaseDir, "build"), "libghostty-vt");
     const stagedGhostty = findDylibs(releaseDir, "libghostty-vt");
     if (!ghostty.length && !stagedGhostty.length) {
         throw new Error(`libghostty-vt dylib not found under ${resolve(releaseDir, "build")} or ${releaseDir}`);
     }
-    for (const dylib of ghostty) copyFileSync(dylib, join(releaseDir, dylib.split("/").pop()));
+    for (const dylib of ghostty) {
+        const destination = join(releaseDir, dylib.split("/").pop());
+        if (!existsSync(destination)) copyFileSync(dylib, destination);
+    }
 }
 
 function findDylibs(dir, prefix) {

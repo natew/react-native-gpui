@@ -1,4 +1,4 @@
-// react-native-worklets — the cross-runtime surface for the gpui Hermes target.
+// react-native-worklets — the cross-runtime surface for the gpui JavaScriptCore target.
 //
 // port of soot's react-native-worklets stub
 // (packages/compat/src/stubs/react-native-worklets-pkg/index.ts) onto rngpui's
@@ -6,7 +6,7 @@
 // `react-native-worklets` import onto this module, so every export the previous
 // single-runtime stub had MUST continue to exist (the export surface is a contract).
 //
-// ARCHITECTURE (see plans/off-thread-reanimated.md): rngpui runs TWO Hermes
+// ARCHITECTURE (see plans/off-thread-reanimated.md): rngpui runs TWO JavaScriptCore
 // runtimes — the React runtime (role 'react') and the UI runtime (role 'ui') — that
 // cross only as JSON strings through rust host fns, with shared-value primitives in
 // a shared ArrayBuffer (`globalThis.__rngpui_svSlots`). on the React runtime, with
@@ -247,8 +247,8 @@ const HOST_SET_SHARED_VALUE_WORKLET = markSyntheticWorklet(function (
   ;(sharedValue as { value: unknown }).value = revive(payload)
 },
 0x50071,
-// explicit source (NOT toString — the app bundle is Hermes bytecode): the exact
-// JS equivalent of the function above, evaluated on the UI runtime. keep in sync.
+// explicit source keeps the cross-runtime function independent of transpiler changes to
+// Function#toString. this is the exact JS equivalent evaluated on the UI runtime. keep in sync.
 `function (sharedValue, payload) {
   function revive(value) {
     if (value && typeof value === 'object' && value.__rngpuiReanimatedAnimation === true) {
@@ -300,10 +300,8 @@ function markSyntheticWorklet<T extends (...args: unknown[]) => unknown>(
     writable: false,
   })
   Object.defineProperty(worklet, '__initData', {
-    // CAREFUL: fn.toString() is only valid source when the bundle ships source.
-    // In a Hermes BYTECODE bundle (app.hbc) toString() returns "{ [bytecode] }",
-    // which evals to garbage on the peer runtime — any synthetic worklet whose
-    // code actually CROSSES must pass an explicit `code` string.
+    // Synthetic worklets that cross runtimes pass explicit source above. toString is
+    // sufficient for local compatibility stubs that never leave this source runtime.
     value: { code: code ?? fn.toString() },
     enumerable: false,
     configurable: true,
@@ -860,7 +858,7 @@ function cloneScheduledValue(value: unknown): unknown {
 
 /**
  * `scheduleOnUI(fn, ...args)` — real iOS schedules `fn` on the UI runtime. rngpui's
- * UI runtime is the second Hermes runtime, so workletized callbacks dispatch there
+ * UI runtime is the second JavaScriptCore runtime, so workletized callbacks dispatch there
  * from the React runtime. plain callbacks (not serializable worklets) and the no-
  * bridge path keep the local microtask behavior.
  */

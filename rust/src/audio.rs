@@ -1,6 +1,6 @@
 //! Microphone capture for the JS `VoiceRecorder` API. Mirrors the fetch bridge shape
-//! (rust/src/hermes.rs `host_fetch`): JS calls a host fn with a small json command, the
-//! work happens off the JS thread, and the result is posted back via `hermes::post`.
+//! (rust/src/jsc.rs `host_fetch`): JS calls a host fn with a small json command, the
+//! work happens off the JS thread, and the result is posted back via `jsc::post`.
 //!
 //! Capture model: `start` opens the default input device at its native config and pushes
 //! mono f32 samples into a shared buffer from cpal's audio callback thread. `stop` takes
@@ -22,7 +22,7 @@ use std::time::Instant;
 use base64::Engine as _;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use crate::hermes::post;
+use crate::jsc::post;
 
 const TARGET_HZ: u32 = 16_000;
 

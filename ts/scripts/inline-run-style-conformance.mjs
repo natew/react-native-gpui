@@ -34,7 +34,7 @@ if (!existsSync(fontDir)) {
 rmSync(pngPath, { force: true });
 const run = spawnSync(
     "node",
-    ["scripts/run-hermes-example.mjs", "examples/inline-run-style-conformance.tsx"],
+    ["scripts/run-example.mjs", "examples/inline-run-style-conformance.tsx"],
     {
         cwd: tsRoot,
         encoding: "utf8",

@@ -1,5 +1,5 @@
-// Hard cap for the single-process Hermes host startup budget.
-// Builds a bytecode fixture, launches rngpui-service, and fails if any measured
+// Hard cap for the single-process JavaScriptCore host startup budget.
+// Builds a source fixture, launches rngpui-service, and fails if any measured
 // internal first-render time exceeds 200ms.
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -24,9 +24,8 @@ function run(command, args) {
 }
 
 try {
-    run("bun", ["scripts/bundle-hermes.mjs", "examples/superconductor.tsx", outJs, "--bytecode"]);
-    const hbc = outJs.replace(/\.js$/, ".hbc");
-    const result = run("node", ["scripts/measure-hermes-startup.mjs", binary, hbc, "--runs", "6", "--max-ms", "200"]);
+    run("bun", ["scripts/bundle-app.mjs", "examples/superconductor.tsx", outJs]);
+    const result = run("node", ["scripts/measure-startup.mjs", binary, outJs, "--runs", "6", "--max-ms", "200"]);
     process.stdout.write(result.stdout);
     process.stderr.write(result.stderr);
 } finally {

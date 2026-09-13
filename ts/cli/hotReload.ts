@@ -16,10 +16,10 @@ export type HotReloadOptions = {
     once?: boolean;
 };
 
-const DEFAULT_IGNORES = ["node_modules", ".git", ".gpui-hermes", ".gpui-out", "dist"];
+const DEFAULT_IGNORES = ["node_modules", ".git", ".gpui", ".gpui-out", "dist"];
 const DEFAULT_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".css"];
 const SOCKET_READY_TIMEOUT_MS = 5_000;
-const BUNDLE_SCRIPT = join(import.meta.dirname, "..", "scripts", "bundle-hermes.mjs");
+const BUNDLE_SCRIPT = join(import.meta.dirname, "..", "scripts", "bundle-app.mjs");
 
 export async function runHotReload(options: HotReloadOptions): Promise<number> {
     const socketPath = options.socketPath || process.env.RNGPUI_CONTROL_SOCKET;

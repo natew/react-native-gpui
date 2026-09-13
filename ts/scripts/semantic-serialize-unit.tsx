@@ -1,7 +1,7 @@
 // regression unit for React host updates whose authored props are new objects but
 // whose native output is unchanged. inline styles and callbacks are common in real
 // component trees; they must refresh event handlers without re-crossing identical
-// visual nodes through the Hermes -> GPUI bridge.
+// visual nodes through the JavaScriptCore -> GPUI bridge.
 import assert from "node:assert";
 import { useEffect, useState } from "react";
 

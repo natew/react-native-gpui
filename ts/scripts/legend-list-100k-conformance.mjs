@@ -18,7 +18,6 @@ import { hasContentionFlag, startPerfContention } from "./perf-contention.mjs";
 const tsRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const workdir = mkdtempSync(join(tmpdir(), "rngpui-legend-100k-"));
 const listBundleJs = join(workdir, "list.js");
-const listBundleHbc = join(workdir, "list.hbc");
 const contentionMode = hasContentionFlag();
 const modeSuffix = contentionMode ? "-contention" : "";
 const screenshotPath = `/tmp/rngpui-legend-100k${modeSuffix}.png`;
@@ -45,7 +44,7 @@ try {
 
     perfContention = await startPerfContention(contentionMode);
     process.env.RNGPUI_LEGEND_EMPTY_REFERENCE = "1";
-    emptyHost = await launchHost("", { bundle: listBundleHbc, size: "900x700" });
+    emptyHost = await launchHost("", { bundle: listBundleJs, size: "900x700" });
     await waitForHostTree(
         emptyHost,
         (tree) => {
@@ -60,7 +59,7 @@ try {
     delete process.env.RNGPUI_LEGEND_EMPTY_REFERENCE;
 
     const launchStartedAt = performance.now();
-    host = await launchHost("", { bundle: listBundleHbc, size: "900x700" });
+    host = await launchHost("", { bundle: listBundleJs, size: "900x700" });
 
     const initialTree = await waitForTree(
         (tree) =>
@@ -376,11 +375,11 @@ function ensureReanimatedRuntime() {
 function bundleFixture(entry, output) {
     run(
         "bun",
-        ["scripts/bundle-hermes.mjs", entry, output, "--bytecode"],
+        ["scripts/bundle-app.mjs", entry, output],
         `bundle ${entry}`,
         { NODE_ENV: "production" },
     );
-    assert(existsSync(output.replace(/\.js$/, ".hbc")), `Hermes bytecode was emitted for ${entry}`);
+    assert(existsSync(output), `JavaScript bundle was emitted for ${entry}`);
 }
 
 function run(command, args, label, env = {}) {

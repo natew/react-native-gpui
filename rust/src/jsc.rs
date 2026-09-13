@@ -1,13 +1,13 @@
-//! Embedded Hermes JS engine on a dedicated thread. The Rust binary owns the macOS
+//! Embedded JavaScriptCore JS engine on a dedicated thread. The Rust binary owns the macOS
 //! main thread for GPUI/Metal; this module runs React on a JS thread and talks through the
-//! `hermes_shim` C ABI. See plans/single-process-hermes.md.
+//! `jsc_shim` C ABI.
 //!
 //! Data flow:
 //!   JS → Rust:  the bundle's reconciler calls `globalThis.__rngpui_applyTree(json)` every
-//!               commit; an ordered tree worker parses it off the Hermes thread and
+//!               commit; an ordered tree worker parses it off the JSC thread and
 //!               sends an `Incoming` on the `flume` channel the GPUI applier drains.
 //!   Rust → JS:  anything that must call into JS (`bridge::emit_*` events, fetch/ws results)
-//!               calls `hermes::post(fn, arg)`, which queues a `JsCall`; this thread's loop
+//!               calls `jsc::post(fn, arg)`, which queues a `JsCall`; this thread's loop
 //!               drains the queue and invokes the global JS fn on the JS thread.
 
 use std::cell::RefCell;
@@ -26,12 +26,12 @@ use tungstenite::stream::MaybeTlsStream;
 
 use crate::Incoming;
 
-const PREAMBLE: &str = include_str!("hermes_preamble.js");
+const PREAMBLE: &str = include_str!("jsc_preamble.js");
 
 unsafe extern "C" {
-    fn rng_hermes_create() -> *mut c_void;
-    fn rng_hermes_destroy(rt: *mut c_void);
-    fn rng_hermes_eval(
+    fn rng_jsc_create() -> *mut c_void;
+    fn rng_jsc_destroy(rt: *mut c_void);
+    fn rng_jsc_eval(
         rt: *mut c_void,
         data: *const u8,
         len: usize,
@@ -39,35 +39,80 @@ unsafe extern "C" {
         errbuf: *mut c_char,
         errcap: usize,
     ) -> i32;
-    fn rng_hermes_install_void_fn(
+    fn rng_jsc_measure_jit(
+        rt: *mut c_void,
+        elapsed_ms: *mut f64,
+        errbuf: *mut c_char,
+        errcap: usize,
+    ) -> i32;
+    fn rng_jsc_install_void_fn(
         rt: *mut c_void,
         name: *const c_char,
         f: extern "C" fn(*mut c_void, *const c_char),
         userdata: *mut c_void,
     );
-    fn rng_hermes_install_num_fn(
+    fn rng_jsc_install_num_fn(
         rt: *mut c_void,
         name: *const c_char,
         f: extern "C" fn(*mut c_void, *const c_char) -> f64,
         userdata: *mut c_void,
     );
-    fn rng_hermes_call1(
+    fn rng_jsc_call1(
         rt: *mut c_void,
         name: *const c_char,
         arg: *const c_char,
         errbuf: *mut c_char,
         errcap: usize,
     ) -> i32;
-    fn rng_hermes_drain_microtasks(rt: *mut c_void);
+    fn rng_jsc_drain_microtasks(rt: *mut c_void);
     // Externally-backed shared buffers for the reanimated UI/worklet runtime: one shared
     // memory region exposed as a zero-copy JS ArrayBuffer in multiple runtimes.
-    fn rng_hermes_shared_buffer_create(len: usize) -> *mut c_void;
-    fn rng_hermes_install_shared_buffer(
+    fn rng_jsc_shared_buffer_create(len: usize) -> *mut c_void;
+    fn rng_jsc_install_shared_buffer(
         rt: *mut c_void,
         name: *const c_char,
         buffer: *mut c_void,
         len: usize,
     );
+}
+
+pub(crate) fn require_jit() {
+    let rt = unsafe { rng_jsc_create() };
+    if rt.is_null() {
+        eprintln!("[jsc] fatal: failed to create runtime for JIT liveness probe");
+        std::process::exit(1);
+    }
+    let mut elapsed_ms = 0.0;
+    let mut error = [0_u8; 1024];
+    let status = unsafe {
+        rng_jsc_measure_jit(
+            rt,
+            &mut elapsed_ms,
+            error.as_mut_ptr() as *mut c_char,
+            error.len(),
+        )
+    };
+    unsafe { rng_jsc_destroy(rt) };
+    if status != 0 {
+        let error = unsafe { CStr::from_ptr(error.as_ptr() as *const c_char) }
+            .to_string_lossy();
+        eprintln!("[jsc] fatal: JIT liveness probe failed: {error}");
+        std::process::exit(1);
+    }
+    let max_ms = std::env::var("RNGPUI_JSC_JIT_MAX_MS")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(100.0);
+    if elapsed_ms > max_ms {
+        eprintln!(
+            "[jsc] fatal: JIT liveness probe took {:.1}ms (limit {:.1}ms); the process is interpreter-shaped. Sign the executable with com.apple.security.cs.allow-jit",
+            elapsed_ms, max_ms
+        );
+        std::process::exit(1);
+    }
+    if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some() {
+        eprintln!("[jsc] JIT liveness probe {:.1}ms", elapsed_ms);
+    }
 }
 
 // ── host → JS call queue ────────────────────────────────────────────────────
@@ -125,7 +170,7 @@ pub fn eval_script_blocking(
 }
 
 // ── reanimated worklet/UI runtime (see plans/off-thread-reanimated.md) ──────
-// A SECOND Hermes runtime on its own thread acts as reanimated's real UI
+// A SECOND JavaScriptCore runtime on its own thread acts as reanimated's real UI
 // runtime: dispatched worklets, useAnimatedStyle mappers, and animation driving
 // run there, isolated from React-thread stalls. Its own JsCall queue mirrors the
 // React runtime's.
@@ -163,7 +208,7 @@ static SV_SLOTS: OnceLock<SharedPtr> = OnceLock::new();
 fn sv_slots() -> *mut c_void {
     SV_SLOTS
         .get_or_init(|| unsafe {
-            let ptr = rng_hermes_shared_buffer_create(SV_SLOTS_FLOATS * 8);
+            let ptr = rng_jsc_shared_buffer_create(SV_SLOTS_FLOATS * 8);
             let floats = ptr as *mut f64;
             *floats = SV_SLOTS_MAGIC;
             *floats.add(1) = SV_SLOTS_FLOATS as f64;
@@ -174,7 +219,7 @@ fn sv_slots() -> *mut c_void {
 
 fn install_sv_slots(rt: *mut c_void) {
     let name = CString::new("__rngpui_svSlots").unwrap();
-    unsafe { rng_hermes_install_shared_buffer(rt, name.as_ptr(), sv_slots(), SV_SLOTS_FLOATS * 8) };
+    unsafe { rng_jsc_install_shared_buffer(rt, name.as_ptr(), sv_slots(), SV_SLOTS_FLOATS * 8) };
 }
 
 // ── timers (driven by the JS thread loop) ───────────────────────────────────
@@ -236,7 +281,7 @@ struct JsContext {
 pub(crate) fn start_tree_parser(tree_tx: Sender<Incoming>) -> Sender<String> {
     let (tree_json_tx, tree_json_rx) = flume::unbounded::<String>();
     std::thread::Builder::new()
-        .name("hermes-tree-parser".into())
+        .name("jsc-tree-parser".into())
         .spawn(move || {
             let mut first = true;
             while let Ok(json) = tree_json_rx.recv() {
@@ -251,7 +296,7 @@ pub(crate) fn start_tree_parser(tree_tx: Sender<Incoming>) -> Sender<String> {
                         crate::parse_incoming(&value)
                     }
                     Err(error) => {
-                        eprintln!("[hermes] applyTree: bad json: {error}");
+                        eprintln!("[jsc] applyTree: bad json: {error}");
                         None
                     }
                 };
@@ -268,7 +313,7 @@ pub(crate) fn start_tree_parser(tree_tx: Sender<Incoming>) -> Sender<String> {
                 }
             }
         })
-        .expect("spawn Hermes tree parser thread");
+        .expect("spawn JavaScriptCore tree parser thread");
     tree_json_tx
 }
 
@@ -322,7 +367,7 @@ extern "C" fn host_set_node_style(ud: *mut c_void, arg: *const c_char) {
     let ctx = ctx_ref(ud);
     let s = arg_str(arg);
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) else {
-        eprintln!("[hermes] setNodeStyle: bad json");
+        eprintln!("[jsc] setNodeStyle: bad json");
         return;
     };
     let Some(arr) = value.as_array() else {
@@ -368,14 +413,14 @@ extern "C" fn host_set_node_style(ud: *mut c_void, arg: *const c_char) {
     }
 }
 
-// reanimated imperative scrolling crosses directly from either Hermes runtime to
+// reanimated imperative scrolling crosses directly from either JavaScriptCore runtime to
 // the native service. it uses the same Incoming::ScrollTo path as ScrollView refs,
 // so there is one source of clamping, AppKit driver sync, and onScroll delivery.
 extern "C" fn host_scroll_to(ud: *mut c_void, arg: *const c_char) {
     let ctx = ctx_ref(ud);
     let s = arg_str(arg);
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) else {
-        eprintln!("[hermes] scrollTo: bad json");
+        eprintln!("[jsc] scrollTo: bad json");
         return;
     };
     let Some(values) = value.as_array() else {
@@ -404,7 +449,7 @@ extern "C" fn host_animate_node_style(ud: *mut c_void, arg: *const c_char) {
     let ctx = ctx_ref(ud);
     let s = arg_str(arg);
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) else {
-        eprintln!("[hermes] animateNodeStyle: bad json");
+        eprintln!("[jsc] animateNodeStyle: bad json");
         return;
     };
     let Some(global_id) = value.get("globalId").and_then(|v| v.as_u64()) else {
@@ -496,14 +541,14 @@ extern "C" fn host_reload_app(_ud: *mut c_void, _arg: *const c_char) {
 /// `install_reload_signal_handler` (the live-reload watcher).
 pub(crate) fn reload_app() {
     // dev rebuild-on-reload: the launcher can set RNGPUI_RELOAD_CMD (e.g. a
-    // one-shot Hermes bundle build) so a reload picks up source edits without a
+    // one-shot JavaScriptCore bundle build) so a reload picks up source edits without a
     // separate watcher. runs synchronously — the exec below reads the bundle
     // from disk, so it must complete first. a failed rebuild aborts the reload:
     // re-exec'ing stale bytecode would silently mask the build error.
     if let Ok(cmd) = std::env::var("RNGPUI_RELOAD_CMD")
         && !cmd.trim().is_empty()
     {
-        eprintln!("[hermes] reload: running RNGPUI_RELOAD_CMD: {cmd}");
+        eprintln!("[jsc] reload: running RNGPUI_RELOAD_CMD: {cmd}");
         match std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(&cmd)
@@ -512,12 +557,12 @@ pub(crate) fn reload_app() {
             Ok(status) if status.success() => {}
             Ok(status) => {
                 eprintln!(
-                    "[hermes] reload aborted: RNGPUI_RELOAD_CMD exited with {status}; keeping the running bundle"
+                    "[jsc] reload aborted: RNGPUI_RELOAD_CMD exited with {status}; keeping the running bundle"
                 );
                 return;
             }
             Err(error) => {
-                eprintln!("[hermes] reload aborted: RNGPUI_RELOAD_CMD failed to spawn: {error}");
+                eprintln!("[jsc] reload aborted: RNGPUI_RELOAD_CMD failed to spawn: {error}");
                 return;
             }
         }
@@ -525,14 +570,14 @@ pub(crate) fn reload_app() {
     let exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(error) => {
-            eprintln!("[hermes] reload current_exe failed: {error}");
+            eprintln!("[jsc] reload current_exe failed: {error}");
             std::process::exit(1);
         }
     };
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    eprintln!("[hermes] reloading app bundle via exec");
+    eprintln!("[jsc] reloading app bundle via exec");
     let error = std::process::Command::new(exe).args(args).exec();
-    eprintln!("[hermes] reload exec failed: {error}");
+    eprintln!("[jsc] reload exec failed: {error}");
     std::process::exit(1);
 }
 
@@ -555,7 +600,7 @@ extern "C" fn on_sigusr2(_sig: libc::c_int) {
 pub(crate) fn install_reload_signal_handler() {
     let mut fds = [0i32; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        eprintln!("[hermes] reload signal pipe failed; kill -USR2 reload disabled");
+        eprintln!("[jsc] reload signal pipe failed; kill -USR2 reload disabled");
         return;
     }
     RELOAD_PIPE_WRITE.store(fds[1], std::sync::atomic::Ordering::Relaxed);
@@ -681,7 +726,7 @@ fn ws_set_nonblocking(stream: &mut MaybeTlsStream<TcpStream>) {
 }
 
 /// Build a tungstenite handshake request, optionally injecting
-/// `Sec-WebSocket-Protocol` so Hermes-land WebSocket users can pass
+/// `Sec-WebSocket-Protocol` so JavaScriptCore-land WebSocket users can pass
 /// subprotocols (e.g. `@rocicorp/zero` smuggles its auth token there).
 fn build_ws_request(
     url: &str,
@@ -822,7 +867,7 @@ extern "C" fn host_ws_send(_ud: *mut c_void, arg: *const c_char) {
                 Ok(bytes) => {
                     let _ = tx.send(WsCmd::SendBinary(bytes));
                 }
-                Err(e) => eprintln!("[hermes] ws send: bad binary base64: {e}"),
+                Err(e) => eprintln!("[jsc] ws send: bad binary base64: {e}"),
             }
         } else {
             let _ = tx.send(WsCmd::Send(data));
@@ -873,7 +918,7 @@ fn eval(rt: *mut c_void, data: &[u8], url: &str) -> Result<(), String> {
     let curl = CString::new(url).unwrap_or_default();
     let mut err = [0u8; 2048];
     let rc = unsafe {
-        rng_hermes_eval(
+        rng_jsc_eval(
             rt,
             data.as_ptr(),
             data.len(),
@@ -896,7 +941,7 @@ fn call1(rt: *mut c_void, name: &str, arg: &str) {
     let carg = CString::new(arg).unwrap_or_default();
     let mut err = [0u8; 2048];
     let rc = unsafe {
-        rng_hermes_call1(
+        rng_jsc_call1(
             rt,
             cname.as_ptr(),
             carg.as_ptr(),
@@ -908,7 +953,7 @@ fn call1(rt: *mut c_void, name: &str, arg: &str) {
         let msg = unsafe { CStr::from_ptr(err.as_ptr() as *const c_char) }
             .to_string_lossy()
             .into_owned();
-        eprintln!("[hermes] call {name} failed: {msg}");
+        eprintln!("[jsc] call {name} failed: {msg}");
     }
 }
 
@@ -919,7 +964,7 @@ fn install_void(
     ud: *mut c_void,
 ) {
     let cname = CString::new(name).unwrap();
-    unsafe { rng_hermes_install_void_fn(rt, cname.as_ptr(), f, ud) };
+    unsafe { rng_jsc_install_void_fn(rt, cname.as_ptr(), f, ud) };
 }
 
 fn install_num(
@@ -929,7 +974,7 @@ fn install_num(
     ud: *mut c_void,
 ) {
     let cname = CString::new(name).unwrap();
-    unsafe { rng_hermes_install_num_fn(rt, cname.as_ptr(), f, ud) };
+    unsafe { rng_jsc_install_num_fn(rt, cname.as_ptr(), f, ud) };
 }
 
 /// The JS Appearance module needs the system scheme BEFORE the first React commit
@@ -959,7 +1004,7 @@ fn system_color_scheme() -> &'static str {
     "dark"
 }
 
-/// Spawn the JS thread: create the Hermes runtime, install host fns, evaluate the preamble
+/// Spawn the JS thread: create the JavaScriptCore runtime, install host fns, evaluate the preamble
 /// + `bundle`, then run the JS event loop. The first React commit (during bundle eval) sends
 ///
 /// `Incoming::Tree` on `tree_tx`, which `main()` awaits inside `app.run`.
@@ -974,21 +1019,21 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>, tree_json_tx: Sender<St
     );
 
     std::thread::Builder::new()
-        .name("hermes-js".into())
+        .name("jsc-js".into())
         .stack_size(16 * 1024 * 1024)
         .spawn(move || {
             let thread_start = Instant::now();
             let mark = |label: &str| {
                 if std::env::var_os("RNGPUI_STARTUP_TIMING").is_some() {
                     eprintln!(
-                        "[hermes startup] {label} +{:.1}ms",
+                        "[jsc startup] {label} +{:.1}ms",
                         thread_start.elapsed().as_secs_f64() * 1000.0
                     );
                 }
             };
-            let rt = unsafe { rng_hermes_create() };
+            let rt = unsafe { rng_jsc_create() };
             if rt.is_null() {
-                eprintln!("[hermes] failed to create runtime");
+                eprintln!("[jsc] failed to create runtime");
                 std::process::exit(1);
             }
             mark("runtime created");
@@ -1035,31 +1080,31 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>, tree_json_tx: Sender<St
                 system_color_scheme()
             );
             if let Err(e) = eval(rt, env_script.as_bytes(), "host-env.js") {
-                eprintln!("[hermes] env eval failed: {e}");
+                eprintln!("[jsc] env eval failed: {e}");
                 std::process::exit(1);
             }
             mark("environment installed");
 
-            if let Err(e) = eval(rt, PREAMBLE.as_bytes(), "hermes-preamble.js") {
-                eprintln!("[hermes] preamble eval failed: {e}");
+            if let Err(e) = eval(rt, PREAMBLE.as_bytes(), "jsc-preamble.js") {
+                eprintln!("[jsc] preamble eval failed: {e}");
                 std::process::exit(1);
             }
             mark("preamble evaluated");
             if let Err(e) = eval(rt, &bundle, "app.bundle") {
-                eprintln!("[hermes] bundle eval failed: {e}");
+                eprintln!("[jsc] bundle eval failed: {e}");
                 std::process::exit(1);
             }
-            unsafe { rng_hermes_drain_microtasks(rt) };
+            unsafe { rng_jsc_drain_microtasks(rt) };
             mark("bundle evaluated");
 
             run_loop(rt, &ctx, &calls_rx);
-            unsafe { rng_hermes_destroy(rt) };
+            unsafe { rng_jsc_destroy(rt) };
         })
-        .expect("spawn hermes-js thread");
+        .expect("spawn jsc-js thread");
 }
 
 /// Spawn the reanimated worklet/UI runtime thread (plans/off-thread-reanimated.md):
-/// a second Hermes runtime where dispatched worklets, `useAnimatedStyle` mappers,
+/// a second JavaScriptCore runtime where dispatched worklets, `useAnimatedStyle` mappers,
 /// and animation driving run, isolated from React-thread stalls. Its
 /// `_updateProps` crosses straight to the render thread as
 /// `Incoming::SetNodeStyle` — never touching the React runtime. The ui bundle is
@@ -1073,12 +1118,12 @@ pub fn start_ui(bundle: Vec<u8>, tree_tx: Sender<Incoming>, tree_json_tx: Sender
     );
 
     std::thread::Builder::new()
-        .name("hermes-ui".into())
+        .name("jsc-ui".into())
         .stack_size(16 * 1024 * 1024)
         .spawn(move || {
-            let rt = unsafe { rng_hermes_create() };
+            let rt = unsafe { rng_jsc_create() };
             if rt.is_null() {
-                eprintln!("[hermes-ui] failed to create runtime");
+                eprintln!("[jsc-ui] failed to create runtime");
                 std::process::exit(1);
             }
             let ctx = Box::new(JsContext {
@@ -1108,23 +1153,23 @@ pub fn start_ui(bundle: Vec<u8>, tree_tx: Sender<Incoming>, tree_json_tx: Sender
                 std::process::id(),
             );
             if let Err(e) = eval(rt, env_script.as_bytes(), "host-env.js") {
-                eprintln!("[hermes-ui] env eval failed: {e}");
+                eprintln!("[jsc-ui] env eval failed: {e}");
                 std::process::exit(1);
             }
-            if let Err(e) = eval(rt, PREAMBLE.as_bytes(), "hermes-preamble.js") {
-                eprintln!("[hermes-ui] preamble eval failed: {e}");
+            if let Err(e) = eval(rt, PREAMBLE.as_bytes(), "jsc-preamble.js") {
+                eprintln!("[jsc-ui] preamble eval failed: {e}");
                 std::process::exit(1);
             }
             if let Err(e) = eval(rt, &bundle, "ui-runtime.bundle") {
-                eprintln!("[hermes-ui] ui bundle eval failed: {e}");
+                eprintln!("[jsc-ui] ui bundle eval failed: {e}");
                 std::process::exit(1);
             }
-            unsafe { rng_hermes_drain_microtasks(rt) };
+            unsafe { rng_jsc_drain_microtasks(rt) };
 
             run_loop(rt, &ctx, &calls_rx);
-            unsafe { rng_hermes_destroy(rt) };
+            unsafe { rng_jsc_destroy(rt) };
         })
-        .expect("spawn hermes-ui thread");
+        .expect("spawn jsc-ui thread");
 }
 
 // High-frequency events that are safe to coalesce to "latest wins" — a window resize (or
@@ -1342,7 +1387,7 @@ fn dispatch_coalesced(rt: *mut c_void, batch: Vec<HostCall>) {
     }
     let plan = plan_dispatch(batch);
     if std::env::var_os("RNGPUI_DEBUG_QUEUE").is_some() && raw_len > 16 {
-        eprintln!("[hermes] coalesced batch {raw_len} -> {}", plan.len());
+        eprintln!("[jsc] coalesced batch {raw_len} -> {}", plan.len());
     }
     // Execute the plan: consecutive `onHostEvent` calls ride one `__rngpui_onHostEventBatch`
     // (a single React batchedUpdates); a non-event call breaks the run and fires inline.
@@ -1384,11 +1429,11 @@ fn dispatch_batch(rt: *mut c_void, batch: Vec<JsCall>) {
                 } else {
                     eval(rt, code.as_bytes(), &url)
                 };
-                unsafe { rng_hermes_drain_microtasks(rt) };
+                unsafe { rng_jsc_drain_microtasks(rt) };
                 if let Some(reply) = reply {
                     let _ = reply.send(result);
                 } else if let Err(error) = result {
-                    eprintln!("[hermes] eval failed: {error}");
+                    eprintln!("[jsc] eval failed: {error}");
                 }
             }
         }
@@ -1408,10 +1453,10 @@ fn run_loop(rt: *mut c_void, ctx: &JsContext, calls_rx: &Receiver<JsCall>) {
         .and_then(|v| v.parse().ok())
         .unwrap_or(4.0);
     loop {
-        // React's initial mount and Promise continuations can be queued as Hermes
-        // microtasks even when there are no native calls or timers. Drain before
-        // blocking; otherwise startup waits for max_wait before the first tree.
-        unsafe { rng_hermes_drain_microtasks(rt) };
+        // React's initial mount and Promise continuations can be queued as microtasks
+        // even when there are no native calls or timers. Drain before blocking;
+        // otherwise startup waits for max_wait before the first tree.
+        unsafe { rng_jsc_drain_microtasks(rt) };
         // block until the next call or the next timer deadline (rAF arrives as a
         // fireFrame JsCall posted by the vsync frame_clock, not a timer).
         let wait = ctx
@@ -1450,7 +1495,7 @@ fn run_loop(rt: *mut c_void, ctx: &JsContext, calls_rx: &Receiver<JsCall>) {
         for id in due {
             call1(rt, "__rngpui_fireTimer", &id.to_string());
         }
-        unsafe { rng_hermes_drain_microtasks(rt) };
+        unsafe { rng_jsc_drain_microtasks(rt) };
 
         if let Some((len, label, started)) = trace {
             let ms = started.elapsed().as_secs_f64() * 1000.0;

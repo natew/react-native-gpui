@@ -3,7 +3,7 @@ name = "react-native-gpui"
 version = "0.1.38"
 edition = "2024"
 
-# the renderer service: hosts Hermes on a JS thread, renders committed React trees
+# the renderer service: hosts JavaScriptCore on a JS thread, renders committed React trees
 # with GPUI, and posts native events back into JS. this is the single native artifact
 # the npm package ships and drives.
 [[bin]]
@@ -27,7 +27,7 @@ rustc-hash = "2"
 anyhow = "1.0"
 base64 = "0.22"
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "dfac6f3e8e7ff1567a7dead6639ef36c42e4f15a" }
-# sync-send / async-recv channel: Hermes and debug-control threads hand parsed trees
+# sync-send / async-recv channel: JavaScriptCore and debug-control threads hand parsed trees
 # and commands to a foreground gpui task that applies them and calls cx.notify().
 flume = "0.11"
 # BoxFuture / AsyncRead for the gpui HttpClient impl in src/http.rs.
@@ -44,7 +44,7 @@ url = "2"
 libc = "0.2"
 
 [build-dependencies]
-# compiles the Hermes JSI C ABI shim (hermes_shim.cpp + jsi.cpp) — see build.rs.
+# compiles the JavaScriptCore C ABI shim — see build.rs.
 cc = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]

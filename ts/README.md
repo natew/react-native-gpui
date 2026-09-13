@@ -31,8 +31,8 @@ AppRegistry.runApplication("App");
 ```
 
 ```sh
-bun run scripts/bundle-hermes.mjs app.tsx /tmp/app.js --bytecode
-RNGPUI_BUNDLE=/tmp/app.hbc native/rngpui-service
+bun run scripts/bundle-app.mjs app.tsx /tmp/app.js
+RNGPUI_BUNDLE=/tmp/app.js native/rngpui-service
 ```
 
 ## How it works
@@ -41,14 +41,14 @@ RNGPUI_BUNDLE=/tmp/app.hbc native/rngpui-service
 React tree ──► react-reconciler ──► serialized node tree ──► __rngpui_applyTree()
                                                                     │
                                                               rngpui-service
-                                                         Rust + GPUI + Hermes
+                                                     Rust + GPUI + JavaScriptCore
                                                                     │
    onPress / onChangeText / onLayout / resize  ◄──── __rngpui_onHostEvent()
 ```
 
-The TypeScript side is bundled to Hermes bytecode and evaluated inside the native
-service. React reconciles your components into a flat node tree; host globals pass
-commits and UI events in memory between Hermes and GPUI. Stable element ids keep
+The TypeScript side is bundled to a self-contained JS file and evaluated inside the native
+service via system JavaScriptCore. React reconciles your components into a flat node tree; host globals pass
+commits and UI events in memory between JavaScriptCore and GPUI. Stable element ids keep
 native state (text-input contents, scroll offsets, web views) alive across
 re-renders.
 
@@ -125,8 +125,8 @@ control socket, build command, output bundle, and watched roots:
 ```sh
 rngpui dev \
   --socket /tmp/my-app.control.sock \
-  --bundle native-shell/.gpui-hermes/hot-update.js \
-  --build "NODE_ENV=development bun native-shell/scripts/bundle-app-hermes.mjs native-shell/app.tsx native-shell/.gpui-hermes/hot-update.js" \
+  --bundle native-shell/.gpui/hot-update.js \
+  --build "NODE_ENV=development bun native-shell/scripts/bundle-app-gpui.mjs native-shell/app.tsx native-shell/.gpui/hot-update.js" \
   --root app --root interface --root native-shell
 ```
 
@@ -156,7 +156,7 @@ not create one React node per line.
 
 Use `PerformanceHUD.setEnabled(true)` or `rngpui do hud on` for the native
 frame/layout/paint overlay. `Renderer.getProvenance()` and
-`rngpui get provenance` report the exact renderer, service, GPUI, Hermes, and
+`rngpui get provenance` report the exact renderer, service, GPUI, JavaScriptCore, and
 bundle identity.
 
 ## Native inspector
@@ -214,7 +214,7 @@ window.addEventListener("message", (e) => { /* host postMessage */ })
 ## Building from source
 
 This package ships a prebuilt `rngpui-service` binary in `native/`. To build it
-yourself you need a Rust toolchain and the local Hermes build at `~/github/hermes`:
+yourself you need a Rust toolchain; macOS supplies the JavaScriptCore framework:
 
 ```sh
 npm run build        # builds the Rust service, copies it into native/, then tsc → dist/

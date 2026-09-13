@@ -6,7 +6,7 @@
 //! every remote image failed to load and painted nothing, so the whole `<Image>`
 //! surface only ever worked for local file paths.
 //!
-//! ureq already carries the embedded JS host's `fetch` (see `hermes.rs`), so this
+//! ureq already carries the embedded JS host's `fetch` (see `jsc.rs`), so this
 //! is the same blocking request moved onto a pool thread and handed back through
 //! a channel the GPUI executor can await.
 

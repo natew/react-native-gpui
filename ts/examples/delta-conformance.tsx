@@ -5,7 +5,7 @@
  * reconciler emits the changed row + ancestors in full and the other ~119 rows as
  * `{ globalId, ref: true }` refs; the host reuses their prior Arcs.
  *
- * Asserts end-to-end (real Hermes + reconciler + rust binary, offscreen):
+ * Asserts end-to-end (real JavaScriptCore + reconciler + rust binary, offscreen):
  *   - the CHANGED row reflects its new width  -> changed node crossed in FULL (not a
  *     stale false-ref)
  *   - an UNCHANGED row still measures with the SAME, valid geometry after the delta ->
@@ -14,7 +14,7 @@
  * Run with RNGPUI_ANIM_TRACE=1 to also see `applyTree bytes=N` per commit: a large full
  * first commit, then a small delta — the measured win.
  *
- *   bun run scripts/run-hermes-example.mjs examples/delta-conformance.tsx --timeout-ms 8000
+ *   bun run scripts/run-example.mjs examples/delta-conformance.tsx --timeout-ms 8000
  */
 import { useEffect, useRef, useState } from "react";
 import { findNodeHandle, render, Text, View } from "../src/index";

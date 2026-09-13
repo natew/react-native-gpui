@@ -15,7 +15,7 @@ let output = "";
 
 const child = spawn(
     "node",
-    ["scripts/run-hermes-example.mjs", "examples/presentation-pacing-conformance.tsx", "--timeout-ms", "15000"],
+    ["scripts/run-example.mjs", "examples/presentation-pacing-conformance.tsx", "--timeout-ms", "15000"],
     {
         cwd: new URL("..", import.meta.url).pathname,
         env: {

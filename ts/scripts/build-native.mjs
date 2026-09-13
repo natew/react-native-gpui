@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
@@ -9,19 +8,12 @@ const releaseDir = resolve(root, "..", "rust", "target", "release");
 const serviceSource = join(releaseDir, "rngpui-service");
 const nativeDir = join(root, "native");
 const serviceTarget = join(nativeDir, "rngpui-service");
+const jscEntitlements = resolve(root, "..", "rust", "jsc.entitlements");
 
 mkdirSync(nativeDir, { recursive: true });
 stage(serviceSource, serviceTarget);
 
 const linkedDylibs = linkedLibraries(serviceTarget);
-const needsHermes = linkedDylibs.some((line) => line.includes("libhermesvm"));
-const hermesDylib = join(process.env.HERMES_ROOT || join(homedir(), "github", "hermes"), "build", "lib", "libhermesvm.dylib");
-if (needsHermes) {
-    if (!existsSync(hermesDylib)) {
-        throw new Error(`rngpui-service links libhermesvm, but libhermesvm.dylib was not found at ${hermesDylib}`);
-    }
-    stage(hermesDylib, join(nativeDir, "libhermesvm.dylib"));
-}
 
 const needsGhostty = linkedDylibs.some((line) => line.includes("libghostty-vt"));
 const ghosttyDylibs = findNativeDylibs(join(releaseDir, "build"));
@@ -42,6 +34,13 @@ for (const dylib of ghosttyDylibs) {
 
 if (readdirSync(nativeDir).some((entry) => entry.endsWith(".dylib")) && !hasRpath(serviceTarget, "@executable_path")) {
     execFileSync("install_name_tool", ["-add_rpath", "@executable_path", serviceTarget]);
+}
+
+// JavaScriptCore silently falls back to its interpreter when this entitlement is absent.
+// Sign both developer entry points after every byte-changing staging operation so direct
+// cargo runs and the npm package cannot enter that state.
+for (const binary of [serviceSource, serviceTarget]) {
+    execFileSync("codesign", ["--force", "--sign", "-", "--entitlements", jscEntitlements, binary]);
 }
 
 // the worklet/UI runtime bundle ships next to the binary — the service resolves

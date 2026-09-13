@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 // Build the reanimated worklet/UI runtime bundle (dist/ui-runtime.js) — the
-// app-independent second-runtime bundle hermes::start_ui evaluates (see
-// plans/off-thread-reanimated.md). Plain JS (not bytecode) so it carries no
-// hermesc version coupling; eval cost is a few ms at startup.
+// app-independent second-runtime bundle jsc::start_ui evaluates (see
+// plans/off-thread-reanimated.md). Plain JS source keeps the runtime portable;
+// eval cost is a few ms at startup.
 //
 //   bun scripts/build-ui-runtime.mjs [--force]
 //
@@ -10,7 +10,7 @@
 // or the bundler scripts is newer than the output. Always (re)stages the bundle
 // next to every rngpui-service binary it can find — the service resolves
 // `ui-runtime.js` beside its executable (rust/src/service.rs load_ui_bundle).
-// bundle-hermes.mjs invokes this after every app bundle, so all launchers in
+// bundle-app.mjs invokes this after every app bundle, so all launchers in
 // this repo stay staged automatically.
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -33,7 +33,7 @@ function newestMtime(path) {
 const sources = [
     join(root, "src", "reanimated"),
     join(root, "src", "raf.ts"),
-    join(root, "scripts", "bundle-hermes.mjs"),
+    join(root, "scripts", "bundle-app.mjs"),
     join(root, "scripts", "reanimated-bun-plugin.mjs"),
     join(root, "scripts", "prebuild-reanimated.mjs"),
 ];
@@ -45,7 +45,7 @@ const fresh =
 if (!fresh) {
     mkdirSync(join(root, "dist"), { recursive: true });
     const entry = join(root, "src", "reanimated", "ui-entry.ts");
-    const result = spawnSync("bun", ["scripts/bundle-hermes.mjs", entry, out], {
+    const result = spawnSync("bun", ["scripts/bundle-app.mjs", entry, out], {
         cwd: root,
         stdio: "inherit",
         env: { ...process.env, NODE_ENV: "production" },

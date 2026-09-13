@@ -1,5 +1,5 @@
 // Host → native imperative commands. These don't go through the React commit/tree;
-// the embedded Hermes runtime hands them to the native service as host calls.
+// the embedded JavaScriptCore runtime hands them to the native service as host calls.
 // Components call `sendCommand`; the render layer wires the sink to the bridge.
 import type { RendererProvenance, SerializedTerminalFrame } from "./runtime";
 

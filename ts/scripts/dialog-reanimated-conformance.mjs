@@ -5,13 +5,13 @@
 //
 // Isolation: builds against the GUI's full tamagui stack (gui/node_modules) into a TEMP
 // bundle, using a TEMP reanimated prebuilt dir; runs the rng cargo release service. Does
-// NOT write the shared app.hbc and does NOT sync into gui/node_modules.
+// NOT write the shared app.js and does NOT sync into gui/node_modules.
 //
 // Steps:
 //   1. prebuild reanimated + @tamagui/animations-reanimated from the gui into /tmp.
 //   2. Bun-build gui/native-shell/dialog-reanimated-conformance.tsx with the gui's
 //      react-native/react/single-React aliases + the rng reanimated plugin (worklet
-//      transform on app/tamagui source, prebuilt-chunk aliasing) → temp HBC.
+//      transform on app/tamagui source, prebuilt-chunk aliasing) → temp JS.
 //   3. Run offscreen, poll RNGPUI_DUMP_TREE for the dialog-content style ramp, assert a
 //      real spring ramp + setNodeStyle-dominated fast path.
 
@@ -22,7 +22,6 @@ import { dirname, join, resolve } from 'node:path'
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { reanimatedBunPlugin } from './reanimated-bun-plugin.mjs'
-import { hermescArgs } from './hermesc-args.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const tsRoot = resolve(here, '..')
@@ -38,7 +37,6 @@ const prebuiltDir = '/tmp/gui-reanimated-prebuilt'
 rmSync(outDir, { recursive: true, force: true })
 mkdirSync(outDir, { recursive: true })
 const outJs = join(outDir, 'app.js')
-const outHbc = join(outDir, 'app.hbc')
 const dumpPath = join(outDir, 'tree.json')
 
 if (!existsSync(fixture)) fail(`fixture missing: ${fixture}`)
@@ -104,7 +102,7 @@ for (const spec of guiPkgSpecifiers) {
 }
 
 const aliases = {
-  name: 'gui hermes aliases',
+  name: 'gui jsc aliases',
   setup(b) {
     b.onResolve({ filter: /^react(\/jsx-runtime|\/jsx-dev-runtime)?$/ }, (a) => ({ path: single[a.path] }))
     // react-native → gpui index. NOTE: the reanimated plugin also aliases this, but we
@@ -153,13 +151,7 @@ if (!result.success) {
 const code = await result.outputs.find((o) => o.kind === 'entry-point').text()
 await Bun.write(outJs, code)
 
-const hermesc = process.env.HERMESC || join(homedir(), 'github', 'hermes', 'build', 'bin', 'hermesc')
-const hbc = spawnSync(hermesc, [...hermescArgs, '-out', outHbc, outJs], { encoding: 'utf8' })
-if (hbc.status !== 0) {
-  process.stderr.write(hbc.stderr || '')
-  fail('hermesc failed')
-}
-log(`bundled ${(code.length / 1024).toFixed(0)} KB → ${outHbc}`)
+log(`bundled ${(code.length / 1024).toFixed(0)} KB → ${outJs}`)
 
 // 3. run offscreen + assert.
 const serviceBin = resolve(process.env.RNGPUI_SERVICE || resolve(repoRoot, 'rust', 'target', 'release', 'rngpui-service'))
@@ -170,7 +162,7 @@ const child = spawn(serviceBin, [], {
   cwd: tsRoot,
   env: {
     ...process.env,
-    RNGPUI_BUNDLE: outHbc,
+    RNGPUI_BUNDLE: outJs,
     RNGPUI_NO_ACTIVATE: '1',
     RNGPUI_TEST_MODE: '1',
     RNGPUI_DUMP_TREE: dumpPath,

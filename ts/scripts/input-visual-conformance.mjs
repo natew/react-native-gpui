@@ -148,7 +148,7 @@ async function runAppearance(appearance) {
     const pidPath = `${outDir}/${appearance}-service.pid`;
     const socketPath = join(outDir, `${appearance}-control.sock`);
     rmSync(capturePath, { force: true });
-    const child = spawn("node", ["scripts/run-hermes-example.mjs", "examples/input-visual-conformance.tsx"], {
+    const child = spawn("node", ["scripts/run-example.mjs", "examples/input-visual-conformance.tsx"], {
         cwd: tsRoot,
         env: {
             ...process.env,

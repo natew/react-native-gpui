@@ -12,8 +12,8 @@
 // every animation frame; we coalesce all ops within one rAF tick into ONE host crossing
 // (`__rngpui_setNodeStyle`), which lands in Rust's animated-style overlay and re-renders
 // WITHOUT a React re-commit. That is off-thread-style animation: the spring driver and
-// the useAnimatedStyle mapper run inline (single Hermes runtime, KIND=UI), and only the
-// resulting style deltas cross to native.
+// the useAnimatedStyle mapper run in the UI JavaScriptCore runtime, and only the resulting
+// style deltas cross to native.
 //
 // CRITICAL ordering: __RUNTIME_KIND=2 and RN$Bridgeless=true MUST be installed before
 // reanimated first evaluates, or runtimeKind.ts defaults to ReactNative (1), defineAnimation

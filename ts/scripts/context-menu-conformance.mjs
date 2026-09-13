@@ -12,12 +12,11 @@ const outDir = process.argv[2] || "/tmp/rngpui-context-menu-conformance";
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 const outJs = join(outDir, "app.js");
-const outHbc = join(outDir, "app.hbc");
 const controlSocket = join(outDir, "control.sock");
 
 const bundle = spawnSync(
     "bun",
-    ["scripts/bundle-hermes.mjs", resolve(tsRoot, "examples/context-menu-conformance.tsx"), outJs, "--bytecode"],
+    ["scripts/bundle-app.mjs", resolve(tsRoot, "examples/context-menu-conformance.tsx"), outJs],
     { cwd: tsRoot, encoding: "utf8", env: { ...process.env, NODE_ENV: "production" } },
 );
 if (bundle.status !== 0) {
@@ -36,7 +35,7 @@ const child = spawn(serviceBin, [], {
     cwd: tsRoot,
     env: {
         ...process.env,
-        RNGPUI_BUNDLE: outHbc,
+        RNGPUI_BUNDLE: outJs,
         RNGPUI_NO_ACTIVATE: "1",
         RNGPUI_TEST_MODE: "1",
         RNGPUI_CONTROL_SOCKET: controlSocket,

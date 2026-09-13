@@ -1,12 +1,11 @@
 // Launch / attach plumbing for the `rngpui` developer CLI.
 //
-// The only launch model is the Hermes one-process host:
-//   entry.tsx -> bundle-hermes.mjs -> app.hbc -> rngpui-service
+// The only launch model is the JavaScriptCore one-process host:
+//   entry.tsx -> bundle-app.mjs -> app.js -> rngpui-service
 //
 // Bun is used as a compiler only. The app runtime is always the Rust service with
-// embedded Hermes, and debug commands go over RNGPUI_CONTROL_SOCKET.
+// embedded JavaScriptCore, and debug commands go over RNGPUI_CONTROL_SOCKET.
 
-import { homedir } from "node:os";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createConnection } from "node:net";
 import {
@@ -206,17 +205,11 @@ function serviceBinary() {
 
 function stageServiceDylibs(binary: string) {
     const releaseDir = dirname(binary);
-    if (existsSync(join(releaseDir, "libhermesvm.dylib")) && findDylibs(releaseDir, "libghostty-vt").length > 0) {
-        return;
-    }
-    const hermesRoot = resolve(process.env.HERMES_ROOT || join(homedir(), "github", "hermes"));
-    const hermesDylib = resolve(hermesRoot, "build", "lib", "libhermesvm.dylib");
-    if (!existsSync(hermesDylib)) throw new Error(`libhermesvm.dylib not found: ${hermesDylib}`);
-    copyFileSync(hermesDylib, join(releaseDir, "libhermesvm.dylib"));
-
     const ghostty = findDylibs(resolve(tsRoot, "..", "rust", "target", "release", "build"), "libghostty-vt");
-    if (ghostty.length === 0) throw new Error("libghostty-vt dylib not found under rust/target/release/build");
-    for (const dylib of ghostty) copyFileSync(dylib, join(releaseDir, dylib.split("/").pop() || "libghostty-vt.dylib"));
+    for (const dylib of ghostty) {
+        const dest = join(releaseDir, dylib.split("/").pop() || "libghostty-vt.dylib");
+        if (!existsSync(dest)) copyFileSync(dylib, dest);
+    }
 }
 
 function findDylibs(dir: string, prefix: string): string[] {
@@ -238,17 +231,16 @@ function bundleEntry(entry: string, workdir: string, development: boolean) {
     const entryPath = resolve(entry);
     if (!existsSync(entryPath)) throw new Error(`entry not found: ${entryPath}`);
     const outJs = join(workdir, "app.js");
-    const result = spawnSync("bun", ["scripts/bundle-hermes.mjs", entryPath, outJs, "--bytecode"], {
+    const result = spawnSync("bun", ["scripts/bundle-app.mjs", entryPath, outJs], {
         cwd: tsRoot,
         encoding: "utf8",
         env: { ...process.env, NODE_ENV: development ? "development" : "production" },
     });
     if (result.status !== 0) {
-        throw new Error(`bundle-hermes failed\n${result.stdout}\n${result.stderr}`);
+        throw new Error(`bundle-app failed\n${result.stdout}\n${result.stderr}`);
     }
-    const outHbc = outJs.replace(/\.js$/, ".hbc");
-    if (!existsSync(outHbc)) throw new Error(`bundle-hermes did not write ${outHbc}`);
-    return outHbc;
+    if (!existsSync(outJs)) throw new Error(`bundle-app did not write ${outJs}`);
+    return outJs;
 }
 
 function writeSession(dir: string, meta: SessionMeta) {
@@ -503,7 +495,7 @@ export async function attachHost(): Promise<AttachedHost> {
             return b.window.width * b.window.height - a.window.width * a.window.height;
         });
     if (candidates.length === 0) {
-        throw new Error("no running rngpui window found; launch one with --launch <entry.tsx> or --bundle <app.hbc>");
+        throw new Error("no running rngpui window found; launch one with --launch <entry.tsx> or --bundle <app.js>");
     }
     const { window, meta } = candidates[0];
     const controlSocketPath = isMetaDriveable(meta) ? meta.controlSocketPath : undefined;

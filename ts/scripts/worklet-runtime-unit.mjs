@@ -5,7 +5,7 @@
  * ONE bun process — a 'react' and a 'ui' — wired to each other with loopback
  * channels (each channel's send() calls the OTHER runtime's onMessage), over a
  * single shared __rngpui_svSlots ArrayBuffer (the rust host's role). this lets us
- * exercise the real cross-runtime machinery without Hermes / rust.
+ * exercise the real cross-runtime machinery without JavaScriptCore / rust.
  *
  * proves:
  *   - slot alloc striping (react=even, ui=odd)
@@ -66,7 +66,7 @@ ui = new WorkletRuntime({ channel: uiChannel, buffer, role: "ui" });
 
 // =========================================================================
 // 0. platform functions cross by stable builtin name. their implementation is
-// bundled as Hermes bytecode, whose Function#toString is not executable source.
+// transformed by a bundler, whose Function#toString is not a stable cross-runtime contract.
 // =========================================================================
 {
   const spec = serializeValue(scrollTo);

@@ -23,12 +23,12 @@ import { join, resolve } from "node:path";
 const HELP = `rngpui — react-native-gpui developer CLI
 
 usage:
-  rngpui shot <--bundle app.hbc | --launch entry.tsx | --session dir> [--size WxH] [--appearance light|dark] [--select id ...] [--out png] [--fixture] [--keep]
+  rngpui shot <--bundle app.js | --launch entry.tsx | --session dir> [--size WxH] [--appearance light|dark] [--select id ...] [--out png] [--fixture] [--keep]
   rngpui reshot --session <dir> [--select id ...] [--out png]      sub-second re-capture of a kept session
   rngpui dev --launch <entry.tsx> [--root <dir> ...] [--size WxH]   launch once and Fast Refresh on edit
   rngpui dev --socket <control.sock> --build <cmd> --bundle <bundle.js> --root <dir>   Fast Refresh an owned external instance
   rngpui diff <before.png> <after.png> [--out highlight.png] [--threshold n]
-  rngpui <get|do> <subcommand> [selector] [--launch <entry.tsx> | --bundle <app.hbc> | --session <dir> | --attach] [--json]
+  rngpui <get|do> <subcommand> [selector] [--launch <entry.tsx> | --bundle <app.js> | --session <dir> | --attach] [--json]
   rngpui trace <selector ...|--all> [--keys k1,k2] [--ms n] [--action "tap <sel>"] [target] [--json]
   rngpui flow [--profile] tap <selector> [tap <selector> ...] [--out <dir>] [target]
   rngpui close --session <dir>
@@ -37,7 +37,7 @@ the fast loop (offscreen, no screenshots, one command):
   shot                   launch → wait for a stable frame → write png + tree → print
                          the png path + bounds/color of every --select'd node. ONE call.
   dev                    launch one development instance and keep its PID and native state
-                         while Hermes React Refresh applies source edits.
+                         while JavaScriptCore React Refresh applies source edits.
   reshot                 re-capture a kept --session instantly (state/data changed → look again).
   diff                   compare two pngs: changed-pixel ratio + changed-region box (+ --out highlight).
 
@@ -50,8 +50,8 @@ shot/dev flags:
   --out <png>              where to write the capture (default /tmp/rngpui-shot.png)
 
 target (pick one; defaults to --attach):
-  --launch <entry.tsx>   compile the entry to Hermes bytecode, then spawn rngpui-service
-  --bundle <app.hbc>     spawn rngpui-service against an existing Hermes bundle
+  --launch <entry.tsx>   bundle the entry to JavaScript source, then spawn rngpui-service
+  --bundle <app.js>      spawn rngpui-service against an existing JavaScript source bundle
   --keep                 keep the launched service alive and print its session dir
   --session <dir>        reuse a kept driveable session for do-then-get workflows
   --attach               attach to a running rngpui window; driveable only when
@@ -71,7 +71,7 @@ get (introspect — read-only):
   get color <selector|x,y>       sampled dominant/average color in a node or at a point
   get point <x,y>                topmost node + pixel color at a window point
   get frames                     painted-frame counter + live fps + frame-gap stats
-  get provenance                 native renderer/service/GPUI/Hermes/bundle identity
+  get provenance                 native renderer/service/GPUI/JavaScriptCore/bundle identity
 
 trace (animation forensics — no screenshots):
   trace <selector ...>           record every animated style write (off-thread
@@ -108,7 +108,7 @@ selectors:
   200,300        literal window-coordinate point
 
 examples:
-  rngpui shot --bundle native-shell/.gpui-hermes/app.hbc --size 1360x880 --fixture --appearance dark --select stage --select trees-rail
+  rngpui shot --bundle native-shell/.gpui/app.js --size 1360x880 --fixture --appearance dark --select stage --select trees-rail
   rngpui dev --launch app/index.tsx --fixture                           # Fast Refresh until Ctrl-C
   rngpui reshot --session /var/.../rngpui-cli-XXXX --select composer
   rngpui diff /tmp/before.png /tmp/rngpui-shot.png --out /tmp/diff.png

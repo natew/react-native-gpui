@@ -47,7 +47,7 @@ mod dump;
 mod elements;
 mod frame_clock;
 mod frame_trace;
-mod hermes;
+mod jsc;
 mod http;
 mod hit_passthrough;
 mod icons;
@@ -207,7 +207,7 @@ const RN_WEBVIEW_SHIM: &str = "window.ReactNativeWebView={postMessage:function(d
 // The prior committed tree's globalId -> Arc index, used to resolve delta `ref` nodes
 // (unchanged subtrees the reconciler didn't re-serialize). Rebuilt from the
 // reconstructed tree after every commit so reused subtrees stay resolvable for future
-// refs. Thread-local because `parse_json_tree` runs on the ordered Hermes tree parser
+// refs. Thread-local because `parse_json_tree` runs on the ordered JavaScriptCore tree parser
 // thread; this also isolates the index per
 // test thread so parallel tests don't pollute each other.
 thread_local! {
@@ -1582,7 +1582,7 @@ impl Render for ServiceApp {
         hit_passthrough::set_input_grab(self.inspector.wants_input_grab());
         // flush the previous frame's stage breakdown + reset accumulators for this frame.
         frame_trace::begin_render(self.root_dirty);
-        // The tree is applied (and a re-render scheduled) by the hermes JS thread's
+        // The tree is applied (and a re-render scheduled) by the jsc JS thread's
         // foreground task in `main`, not polled here — rendering is fully on-demand: this
         // runs only on a new tree, input, scroll, or resize, so the app idles at ~0fps.
         let theme_mode = root_theme_mode(&self.root);
@@ -2831,20 +2831,19 @@ fn build_app_menu_item(item: AppCommandMenuItem) -> MenuItem {
     }
 }
 
-/// Read the app bundle named by RNGPUI_BUNDLE — Hermes bytecode (`app.hbc`) or JS source.
-/// Hermes auto-detects HBC vs. source by magic, so either works.
+/// Read the app bundle named by RNGPUI_BUNDLE — JS source.
 fn load_bundle() -> Vec<u8> {
     let path = match std::env::var("RNGPUI_BUNDLE") {
         Ok(p) => p,
         Err(_) => {
-            eprintln!("[hermes] RNGPUI_BUNDLE not set — point it at app.hbc or app.js");
+            eprintln!("[jsc] RNGPUI_BUNDLE not set — point it at app.js");
             std::process::exit(1);
         }
     };
     match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) => {
-            eprintln!("[hermes] cannot read bundle {path}: {e}");
+            eprintln!("[jsc] cannot read bundle {path}: {e}");
             std::process::exit(1);
         }
     }
@@ -2869,7 +2868,7 @@ fn load_ui_bundle() -> Vec<u8> {
         Ok(bytes) => bytes,
         Err(e) => {
             eprintln!(
-                "[hermes-ui] cannot read ui-runtime bundle {}: {e} — set RNGPUI_UI_BUNDLE or stage ui-runtime.js next to the binary (rngpui ts: `bun scripts/build-ui-runtime.mjs`)",
+                "[jsc-ui] cannot read ui-runtime bundle {}: {e} — set RNGPUI_UI_BUNDLE or stage ui-runtime.js next to the binary (rngpui ts: `bun scripts/build-ui-runtime.mjs`)",
                 path.display()
             );
             std::process::exit(1);
@@ -3015,13 +3014,19 @@ fn main() {
             eprintln!("[rngpui] failed to write service pid file {path}: {error}");
         }
     }
-    // `kill -USR2 <pid>` = live reload (same path as Cmd+R); see hermes.rs.
-    hermes::install_reload_signal_handler();
-    // The JS runs in an embedded Hermes runtime on a dedicated thread (hermes.rs). The
-    // bundle's reconciler hands every committed tree to __rngpui_applyTree. an ordered worker
-    // parses it off the React thread and sends an Incoming on this channel: the first tree
-    // bootstraps the window size, the rest are applied by a foreground task that calls
-    // cx.notify() — no polling.
+    // `kill -USR2 <pid>` = live reload (same path as Cmd+R); see jsc.rs.
+    jsc::install_reload_signal_handler();
+    // The JS runs in an embedded JavaScriptCore runtime on a dedicated thread (jsc.rs). The
+    // Rust side owns the main thread for GPUI/Metal.
+    //
+    // Data flow:
+    //   JS → Rust:  the reconciler calls `globalThis.__rngpui_applyTree(json)` every commit;
+    //               an ordered tree worker parses it off the JS thread and sends an
+    //               `Incoming` on the `flume` channel the GPUI applier drains.
+    //   Rust → JS:  native events + fetch/ws results flow back to the JS thread via jsc::post.
+    //
+    // The worklet/UI runtime (start_ui) starts first, then the app bundle (start), so
+    // reanimated's shared memory and UI loop are ready before the first React commit.
     let (tree_tx, tree_rx) = flume::unbounded::<Incoming>();
     #[cfg(target_os = "macos")]
     {
@@ -3043,7 +3048,8 @@ fn main() {
     }
 
     // start the JS engine; its first synchronous React commit sends the first tree below.
-    // native events + fetch/ws results flow back to the JS thread via hermes::post.
+    // native events + fetch/ws results flow back to the JS thread via jsc::post.
+    jsc::require_jit();
     let bundle = load_bundle();
     startup_mark("bundle loaded");
     // the reanimated worklet/UI runtime boots first (its call queue must exist
@@ -3051,9 +3057,9 @@ fn main() {
     // runtimes overlap each other and the GPUI platform init below. JsCalls
     // queued while a bundle is still evaluating drain once its run_loop starts,
     // so the startup interleaving is loss-free in both directions.
-    let tree_json_tx = hermes::start_tree_parser(tree_tx.clone());
-    hermes::start_ui(load_ui_bundle(), tree_tx.clone(), tree_json_tx.clone());
-    hermes::start(bundle, tree_tx, tree_json_tx);
+    let tree_json_tx = jsc::start_tree_parser(tree_tx.clone());
+    jsc::start_ui(load_ui_bundle(), tree_tx.clone(), tree_json_tx.clone());
+    jsc::start(bundle, tree_tx, tree_json_tx);
     // NOTE: we deliberately do NOT block for the first tree here. The GPUI platform init
     // below (Application::new + app.run + gpui_component::init) is tree-independent and is
     // the dominant cold-start cost (~85ms), so we let it overlap the JS eval (~60ms). The
@@ -4042,7 +4048,7 @@ fn main() {
                                 "error": error,
                             }),
                         };
-                        hermes::post("__rngpui_filePickerDone", payload.to_string());
+                        jsc::post("__rngpui_filePickerDone", payload.to_string());
                     }
                     Incoming::DebugTypeText { text, reply } => {
                         let mut focused_id = None;
@@ -4709,7 +4715,7 @@ fn main() {
                     }
                     Incoming::OpenWindow => {
                         // spawn a new process of the same binary to create a new window.
-                        // on macOS this launches a second instance with its own Hermes +
+                        // on macOS this launches a second instance with its own JavaScriptCore +
                         // GPUI window; the two windows run independently.
                         #[cfg(target_os = "macos")]
                         {

@@ -6,14 +6,14 @@
 - Build the shipped package from `ts/`: `npm run build`. This builds the release
   `rngpui-service`, copies it into `ts/native/`, emits declaration files, and
   bundles `dist/index.js`.
-- For runtime validation, compile an example to Hermes bytecode and launch the
+- For runtime validation, bundle an example to JavaScript source and launch the
   single-process host. The app runtime is always `rngpui-service`; Bun is only
   the dev bundler:
 
 ```sh
 cd ts
-bun run scripts/bundle-hermes.mjs examples/kitchen-sink.tsx /tmp/kitchen.js --bytecode
-RNGPUI_BUNDLE=/tmp/kitchen.hbc RNGPUI_NO_ACTIVATE=1 ../rust/target/release/rngpui-service
+bun run scripts/bundle-app.mjs examples/kitchen-sink.tsx /tmp/kitchen.js
+RNGPUI_BUNDLE=/tmp/kitchen.js RNGPUI_NO_ACTIVATE=1 ../rust/target/release/rngpui-service
 ```
 
 ## Releasing into Team Machine
@@ -46,7 +46,7 @@ refreshes the copied package but does not create a version-history marker.
 
 `rngpui` is the in-repo devtool for inspecting and driving a running react-native-gpui
 app **without screenshots** — modeled on soot's `sootsim` CLI. It uses the
-single-process Hermes host only: `--launch` compiles an entry to bytecode, starts
+single-process JavaScriptCore host only: `--launch` bundles an entry to source, starts
 `rngpui-service`, and talks to its native debug socket. Run it from `ts/`:
 
 ```sh
@@ -67,14 +67,14 @@ sampled color of every `--select`'d node — no second command, no flag archaeol
 
 ```sh
 # one shot: realistic size, forced theme, measured nodes (cold ≈ 2s on the Team Machine app)
-rngpui shot --bundle native-shell/.gpui-hermes/app.hbc --size 1360x880 --fixture \
+rngpui shot --bundle native-shell/.gpui/app.js --size 1360x880 --fixture \
   --appearance dark --select stage --select trees-pane
 #   png: /tmp/rngpui-shot.png (2720x1760) appearance=dark
 #   measurements:
 #     "stage" → div stage-mode-bar #454 [259,43 792x34]  dominant=#282828 (48%) avg=#1b1b21
 
 # persistent instance: keep one alive, re-capture in ~1s after a state/data change
-rngpui dev --bundle native-shell/.gpui-hermes/app.hbc --fixture     # → prints the session dir
+rngpui dev --bundle native-shell/.gpui/app.js --fixture     # → prints the session dir
 rngpui reshot --session <dir> --select composer                     # sub-second, no relaunch
 rngpui close --session <dir>
 
@@ -91,7 +91,7 @@ rngpui diff /tmp/before.png /tmp/rngpui-shot.png --out /tmp/diff.png
   Team Machine app paints an empty "connecting…" shell when no daemon is reachable.
 - `--select <selector>` is repeatable; `--json` for machine output; `--out` to place the PNG.
 - `reshot` only re-reads the **current** frame of a kept session — it does not re-bundle
-  or change the theme. After editing JS, re-`shot` (re-launches against the rebuilt `.hbc`).
+  or change the theme. After editing JS, re-`shot` (re-launches against the rebuilt bundle).
 
 **`get` (read-only introspection):**
 
@@ -116,9 +116,9 @@ rngpui diff /tmp/before.png /tmp/rngpui-shot.png --out /tmp/diff.png
 
 **Targeting:**
 
-- `--launch <entry.tsx>` — compile the entry to Hermes bytecode, spawn
+- `--launch <entry.tsx>` — bundle the entry to JavaScript source, spawn
   `rngpui-service` offscreen + non-activating, and own its debug socket.
-- `--bundle <app.hbc>` — spawn `rngpui-service` against an existing Hermes bytecode
+- `--bundle <app.js>` — spawn `rngpui-service` against an existing JavaScript source
   bundle, useful for apps with their own bundler such as Team Machine.
 - `--keep` — leave the launched service running and print a session directory on stderr.
 - `--session <dir>` or `RNGPUI_SESSION=<dir>` — reuse a kept driveable session for

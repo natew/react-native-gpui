@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 /**
  * Engine bench: run rngpui's real commit path (React reconcile -> host-config mutation ->
- * serialize -> wire delta -> JSON.stringify -> applyTree) under every JS engine we can
- * reach, on identical work.
+ * serialize -> wire delta -> JSON.stringify -> applyTree) under the two JavaScriptCore
+ * embeddings available on macOS.
  *
  *   bun scripts/engine-bench/run.mjs
  *
@@ -10,8 +10,7 @@
  * engine speed and nothing else. For rngpui's per-phase breakdown (mutation / serialize /
  * delta / stringify / bridge) set RNGPUI_COMMIT_TRACE to "1" in globals.ts and re-run.
  *
- * Engines: bun (JavaScriptCore), Hermes bytecode via the static_h build, and Static Hermes
- * native via shermes when that binary exists. HERMES_ROOT overrides the checkout.
+ * Engines: Bun's JavaScriptCore and the system JavaScriptCore framework rngpui embeds.
  */
 import { existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -19,8 +18,6 @@ import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 const root = resolve(import.meta.dirname, '../..') // ts/
-const hermesRoot = process.env.HERMES_ROOT || join(process.env.HOME, 'github/hermes')
-const bin = join(hermesRoot, 'build/bin')
 const work = mkdtempSync(join(tmpdir(), 'rngpui-engine-bench-'))
 const scenes = ['inline', 'memo']
 const RUNS = 3
@@ -37,11 +34,34 @@ const parse = (stdout) => {
 
 const best = (results) => results.filter(Boolean).sort((a, b) => a.perCommitMs - b.perCommitMs)[0]
 
+const systemJsc = join(work, 'jsc-runner')
+if (process.platform === 'darwin') {
+  const compiled = run('clang++', [
+    '-std=c++17',
+    join(root, 'scripts/engine-bench/jsc-runner.cpp'),
+    resolve(root, '../rust/jsc_shim/jsc_shim.cpp'),
+    '-framework', 'JavaScriptCore',
+    '-o', systemJsc,
+  ])
+  if (compiled.status !== 0) {
+    console.error(`[engine-bench] system JavaScriptCore runner failed to compile:\n${compiled.stderr}`)
+  } else {
+    const signed = run('codesign', [
+      '--force', '--sign', '-', '--entitlements', resolve(root, '../rust/jsc.entitlements'),
+      '--options', 'runtime', systemJsc,
+    ])
+    if (signed.status !== 0) {
+      console.error(`[engine-bench] system JavaScriptCore runner failed to sign:\n${signed.stderr}`)
+      process.exit(1)
+    }
+  }
+}
+
 const rows = []
 for (const scene of scenes) {
   const bundle = join(work, `${scene}.js`)
   const build = run('bun', [
-    'run', 'scripts/bundle-hermes.mjs',
+    'run', 'scripts/bundle-app.mjs',
     join(root, 'scripts/engine-bench', `${scene}.tsx`),
     bundle,
   ], { env: { ...process.env, NODE_ENV: 'production' } })
@@ -56,39 +76,18 @@ for (const scene of scenes) {
     ...best(Array.from({ length: RUNS }, () => parse(run('bun', [bundle]).stdout))),
   })
 
-  // Hermes bytecode: what rngpui ships today
-  const hermesc = join(bin, 'hermesc')
-  const hermes = join(bin, 'hermes')
-  if (existsSync(hermesc) && existsSync(hermes)) {
-    const hbc = join(work, `${scene}.hbc`)
-    run(hermesc, ['-emit-binary', '-O', '-Xes6-block-scoping', bundle, '-out', hbc])
+  if (existsSync(systemJsc)) {
+    const raw = Array.from({ length: RUNS }, () => run(systemJsc, [bundle]))
+    const b = best(raw.map((r) => parse(r.stdout)))
+    if (!b) {
+      console.error(`[engine-bench] systemJsc failed for ${scene}:\n${raw[0]?.stderr || raw[0]?.stdout}`)
+    }
     rows.push({
-      scene, engine: 'Hermes bytecode',
-      ...best(Array.from({ length: RUNS }, () => parse(run(hermes, ['-Xes6-block-scoping', hbc]).stdout))),
+      scene, engine: 'System JavaScriptCore',
+      ...b,
     })
-  } else {
-    console.error(`[engine-bench] no hermesc/hermes in ${bin}; build them with: ninja -C ${hermesRoot}/build bin/hermesc bin/hermes`)
   }
 
-  // Static Hermes native
-  const shermes = join(bin, 'shermes')
-  if (existsSync(shermes)) {
-    const exe = join(work, `${scene}.native`)
-    const libs = [join(hermesRoot, 'build/tools/shermes'), join(hermesRoot, 'build/lib')].join(':')
-    const compiled = run(shermes, ['-Xes6-block-scoping', '-O', bundle, '-o', exe], {
-      env: { ...process.env, LIBRARY_PATH: `${libs}:${process.env.LIBRARY_PATH || ''}` },
-    })
-    if (existsSync(exe)) {
-      rows.push({
-        scene, engine: 'Static Hermes native',
-        ...best(Array.from({ length: RUNS }, () => parse(run(exe, []).stdout))),
-      })
-    } else {
-      console.error(`[engine-bench] shermes failed for ${scene}:\n${compiled.stderr}`)
-    }
-  } else {
-    console.error(`[engine-bench] no shermes in ${bin}; build it with: ninja -C ${hermesRoot}/build bin/shermes shermes_console_a`)
-  }
 }
 
 const width = Math.max(...rows.map((r) => r.engine.length))

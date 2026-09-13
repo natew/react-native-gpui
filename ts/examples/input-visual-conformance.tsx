@@ -5,7 +5,7 @@
  *
  * Appearance: the rust input theme is forced by RNGPUI_FORCE_APPEARANCE=dark|light
  * (read in service.rs). The fixture's own backdrop color is inlined at bundle time via
- * RNGPUI_INPUT_FIXTURE_APPEARANCE (the Hermes host gives JS an empty process.env at
+ * RNGPUI_INPUT_FIXTURE_APPEARANCE (the JavaScriptCore host gives JS an empty process.env at
  * runtime, so the gate passes it as a bundle-time define) so the window matches.
  *
  * Three fields on a solid neutral-gray field background (identical in both modes, so the

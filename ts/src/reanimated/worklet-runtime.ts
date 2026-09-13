@@ -2,7 +2,7 @@
 //
 // faithful port of sootsim's worklet-runtime.ts
 // (~/soot/packages/sootsim-engine/src/render-worker/worklet-runtime.ts) adapted
-// for rngpui's two-Hermes-runtime architecture. it runs on BOTH the React
+// for rngpui's two-JavaScriptCore-runtime architecture. it runs on BOTH the React
 // runtime (role 'react', even slot ids — sootsim's "tenant") and the UI runtime
 // (role 'ui', odd slot ids — sootsim's "shell"). it exposes a small surface that
 // the compat stubs (react-native-worklets/worklets.ts, the reanimated seam) call
@@ -380,7 +380,7 @@ const OBJECT_SLOT_EXHAUSTION_ERROR = new Error(
 
 export type WorkletRuntimeRole = 'react' | 'ui'
 
-// the singleton runtime per Hermes runtime. compat stubs call getWorkletRuntime().
+// the singleton runtime per JavaScriptCore runtime. compat stubs call getWorkletRuntime().
 export class WorkletRuntime {
   private channel: WorkletChannel
   private buffer: ArrayBuffer
@@ -2289,7 +2289,7 @@ function structuredCloneSafe(value: unknown): unknown {
   if (value === null || typeof value !== 'object') {
     return typeof value === 'function' || typeof value === 'symbol' ? undefined : value
   }
-  // NOT structuredClone: Hermes doesn't have it (it silently threw here and every
+  // NOT structuredClone: JavaScriptCore doesn't have it (it silently threw here and every
   // plain closure value crossed as undefined — the dead-animation bug), and using
   // it only-when-available would make bun tests semantically diverge from the
   // real runtime. The channel is JSON-string transport, so a JSON round-trip IS

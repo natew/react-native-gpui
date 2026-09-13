@@ -1,6 +1,6 @@
 // reanimated worklet/UI runtime entry — bundled standalone as dist/ui-runtime.js
-// and evaluated by the SECOND Hermes runtime (rust hermes::start_ui, thread
-// "hermes-ui"). See plans/off-thread-reanimated.md.
+// and evaluated by the SECOND JavaScriptCore runtime (rust jsc::start_ui, thread
+// "jsc-ui"). See plans/off-thread-reanimated.md.
 //
 // This bundle is app-independent library code. It provides everything a
 // dispatched worklet needs to execute here:

@@ -199,7 +199,7 @@ export async function runShot(flags: ShotFlags): Promise<number> {
 
     const target = flags.bundle ?? flags.launch;
     if (!target) {
-        console.error("  shot needs --bundle <app.hbc>, --launch <entry.tsx>, or --session <dir>");
+        console.error("  shot needs --bundle <app.js>, --launch <entry.tsx>, or --session <dir>");
         return 1;
     }
     const env = shotEnv(flags);

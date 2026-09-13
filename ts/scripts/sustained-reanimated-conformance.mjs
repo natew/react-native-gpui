@@ -5,7 +5,7 @@
 // Builds gui/native-shell/sustained-reanimated-conformance.tsx through the SAME pipeline
 // the real desktop app uses — React Compiler (babel-plugin-react-compiler) on app source
 // THEN the reanimated worklet transform — against the gui's full tamagui stack, into a
-// TEMP bundle (isolation: no shared app.hbc, no gui/node_modules sync). Runs it offscreen
+// TEMP bundle (isolation: no shared app.js, no gui/node_modules sync). Runs it offscreen
 // for several seconds of repeated open/close with MANY animated components, with
 // RNGPUI_PERF_TRACE on, and asserts:
 //   - jsBlock stays bounded (no 60fps full-tree re-render storm → freeze),
@@ -20,7 +20,6 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { reanimatedBunPlugin } from './reanimated-bun-plugin.mjs'
-import { hermescArgs } from './hermesc-args.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const tsRoot = resolve(here, '..')
@@ -36,7 +35,6 @@ const prebuiltDir = '/tmp/gui-reanimated-prebuilt'
 rmSync(outDir, { recursive: true, force: true })
 mkdirSync(outDir, { recursive: true })
 const outJs = join(outDir, 'app.js')
-const outHbc = join(outDir, 'app.hbc')
 const dumpPath = join(outDir, 'tree.json')
 const controlSocket = join(outDir, 'control.sock')
 
@@ -95,7 +93,7 @@ const rnSvgShim = resolve(guiRoot, 'native-shell/react-native-svg.tsx')
 const rnGestureShim = resolve(guiRoot, 'native-shell/react-native-gesture-handler.ts')
 const rnCodegenShim = resolve(guiRoot, 'native-shell/react-native-codegenNativeComponent.ts')
 const aliases = {
-  name: 'gui hermes aliases',
+  name: 'gui jsc aliases',
   setup(b) {
     b.onResolve({ filter: /^react(\/jsx-runtime|\/jsx-dev-runtime|\/compiler-runtime)?$/ }, (a) => ({ path: single[a.path] }))
     b.onResolve({ filter: /^react-native$/ }, () => ({ path: rngEntry }))
@@ -159,7 +157,7 @@ const result = await Bun.build({
   },
   // ORDER MATTERS: aliases, then react-compiler (app source), then reanimated (worklet
   // transform on app + tamagui driver source + prebuilt-chunk aliasing). This mirrors
-  // gui/native-shell/scripts/bundle-app-hermes.mjs with the reanimated plugin appended.
+  // gui/native-shell/scripts/bundle-app-gpui.mjs with the reanimated plugin appended.
   plugins: [aliases, reactCompiler, reanimatedBunPlugin({ rngTsRoot: tsRoot, resolveRoot: guiRoot, prebuiltDir, aliasReactNative: false })],
   sourcemap: 'none',
   throw: false,
@@ -170,13 +168,7 @@ if (!result.success) {
 }
 const code = await result.outputs.find((o) => o.kind === 'entry-point').text()
 await Bun.write(outJs, code)
-const hermesc = process.env.HERMESC || join(homedir(), 'github', 'hermes', 'build', 'bin', 'hermesc')
-const hbc = spawnSync(hermesc, [...hermescArgs, '-out', outHbc, outJs], { encoding: 'utf8' })
-if (hbc.status !== 0) {
-  process.stderr.write(hbc.stderr || '')
-  fail('hermesc failed')
-}
-log(`bundled ${(code.length / 1024).toFixed(0)} KB → ${outHbc}`)
+log(`bundled ${(code.length / 1024).toFixed(0)} KB → ${outJs}`)
 
 // 3. run offscreen with perf trace; watch jsBlock + setNodeStyle/applyTree timeline.
 const serviceBin = resolve(process.env.RNGPUI_SERVICE || resolve(repoRoot, 'rust', 'target', 'release', 'rngpui-service'))
@@ -187,7 +179,7 @@ const child = spawn(serviceBin, [], {
   cwd: tsRoot,
   env: {
     ...process.env,
-    RNGPUI_BUNDLE: outHbc,
+    RNGPUI_BUNDLE: outJs,
     RNGPUI_NO_ACTIVATE: '1',
     RNGPUI_TEST_MODE: '1',
     RNGPUI_DUMP_TREE: dumpPath,

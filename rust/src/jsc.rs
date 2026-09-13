@@ -202,6 +202,13 @@ fn sv_slots() -> *mut c_void {
     SV_SLOTS
         .get_or_init(|| unsafe {
             let ptr = rng_jsc_shared_buffer_create(SV_SLOTS_FLOATS * 8);
+            if ptr.is_null() {
+                eprintln!(
+                    "[jsc] fatal: could not allocate the {} byte shared slot buffer",
+                    SV_SLOTS_FLOATS * 8
+                );
+                std::process::exit(1);
+            }
             let floats = ptr as *mut f64;
             *floats = SV_SLOTS_MAGIC;
             *floats.add(1) = SV_SLOTS_FLOATS as f64;

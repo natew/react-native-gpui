@@ -3479,7 +3479,7 @@ fn main() {
                         .timer(Duration::from_millis(if capture_trigger.is_some() {
                             25
                         } else {
-                            250
+                            30
                         }))
                         .await;
                     if let Some(trigger) = capture_trigger.as_deref()

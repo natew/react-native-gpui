@@ -76,12 +76,7 @@ unsafe extern "C" {
     );
 }
 
-pub(crate) fn require_jit() {
-    let rt = unsafe { rng_jsc_create() };
-    if rt.is_null() {
-        eprintln!("[jsc] fatal: failed to create runtime for JIT liveness probe");
-        std::process::exit(1);
-    }
+fn require_jit(rt: *mut c_void) {
     let mut elapsed_ms = 0.0;
     let mut error = [0_u8; 1024];
     let status = unsafe {
@@ -92,7 +87,6 @@ pub(crate) fn require_jit() {
             error.len(),
         )
     };
-    unsafe { rng_jsc_destroy(rt) };
     if status != 0 {
         let error = unsafe { CStr::from_ptr(error.as_ptr() as *const c_char) }
             .to_string_lossy();
@@ -1109,8 +1103,13 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>, tree_json_tx: Sender<St
 /// `_updateProps` crosses straight to the render thread as
 /// `Incoming::SetNodeStyle` — never touching the React runtime. The ui bundle is
 /// app-independent library code (upstream reanimated core + the worklet bridge).
-pub fn start_ui(bundle: Vec<u8>, tree_tx: Sender<Incoming>, tree_json_tx: Sender<String>) {
+pub fn start_ui(
+    bundle: Vec<u8>,
+    tree_tx: Sender<Incoming>,
+    tree_json_tx: Sender<String>,
+) -> Receiver<()> {
     let (calls_tx, calls_rx) = flume::unbounded::<JsCall>();
+    let (jit_ready_tx, jit_ready_rx) = flume::bounded(1);
     let _ = UI_CALLS.set(calls_tx);
     crate::frame_clock::register(
         crate::frame_clock::UI,
@@ -1126,6 +1125,11 @@ pub fn start_ui(bundle: Vec<u8>, tree_tx: Sender<Incoming>, tree_json_tx: Sender
                 eprintln!("[jsc-ui] failed to create runtime");
                 std::process::exit(1);
             }
+            // The UI runtime is the first real JSC context created at startup. Probing it
+            // here overlaps React bundle evaluation and GPUI initialization while still
+            // terminating an interpreter-shaped process before it can become interactive.
+            require_jit(rt);
+            let _ = jit_ready_tx.send(());
             let ctx = Box::new(JsContext {
                 tree_tx,
                 tree_json_tx,
@@ -1170,6 +1174,7 @@ pub fn start_ui(bundle: Vec<u8>, tree_tx: Sender<Incoming>, tree_json_tx: Sender
             unsafe { rng_jsc_destroy(rt) };
         })
         .expect("spawn jsc-ui thread");
+    jit_ready_rx
 }
 
 // High-frequency events that are safe to coalesce to "latest wins" — a window resize (or

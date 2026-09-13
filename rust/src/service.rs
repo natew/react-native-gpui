@@ -3049,7 +3049,6 @@ fn main() {
 
     // start the JS engine; its first synchronous React commit sends the first tree below.
     // native events + fetch/ws results flow back to the JS thread via jsc::post.
-    jsc::require_jit();
     let bundle = load_bundle();
     startup_mark("bundle loaded");
     // the reanimated worklet/UI runtime boots first (its call queue must exist
@@ -3058,7 +3057,7 @@ fn main() {
     // queued while a bundle is still evaluating drain once its run_loop starts,
     // so the startup interleaving is loss-free in both directions.
     let tree_json_tx = jsc::start_tree_parser(tree_tx.clone());
-    jsc::start_ui(load_ui_bundle(), tree_tx.clone(), tree_json_tx.clone());
+    let jit_ready = jsc::start_ui(load_ui_bundle(), tree_tx.clone(), tree_json_tx.clone());
     jsc::start(bundle, tree_tx, tree_json_tx);
     // NOTE: we deliberately do NOT block for the first tree here. The GPUI platform init
     // below (Application::new + app.run + gpui_component::init) is tree-independent and is
@@ -3092,6 +3091,9 @@ fn main() {
 
     // gpui's default client is a NullHttpClient, which silently fails every
     // remote `<Image>` (see http.rs).
+    // The probe runs on the real UI runtime in parallel with app bundle evaluation. Wait
+    // before platform initialization so an interpreter-shaped process cannot open a window.
+    jit_ready.recv().expect("JavaScriptCore JIT probe thread stopped");
     let app = gpui::Application::new()
         .with_assets(icons::Assets)
         .with_http_client(std::sync::Arc::new(http::UreqHttpClient));

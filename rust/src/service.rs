@@ -3078,7 +3078,7 @@ fn main() {
     // by gui/native-shell/scripts/check-web-parity.ts.
     let capture_onscreen = std::env::var("RNGPUI_CAPTURE_ONSCREEN").is_ok();
     let offscreen_test_window =
-        test_mode && !test_onscreen && !capture_onscreen && inspector_copy_at.is_none();
+        test_mode && !test_onscreen && !capture_onscreen;
     let window_origin = if offscreen_test_window {
         point(px(-10000.0), px(-10000.0))
     } else {

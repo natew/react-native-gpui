@@ -64,7 +64,6 @@ unsafe extern "C" {
         errbuf: *mut c_char,
         errcap: usize,
     ) -> i32;
-    fn rng_jsc_drain_microtasks(rt: *mut c_void);
     // Externally-backed shared buffers for the reanimated UI/worklet runtime: one shared
     // memory region exposed as a zero-copy JS ArrayBuffer in multiple runtimes.
     fn rng_jsc_shared_buffer_create(len: usize) -> *mut c_void;
@@ -1088,7 +1087,6 @@ pub fn start(bundle: Vec<u8>, tree_tx: Sender<Incoming>, tree_json_tx: Sender<St
                 eprintln!("[jsc] bundle eval failed: {e}");
                 std::process::exit(1);
             }
-            unsafe { rng_jsc_drain_microtasks(rt) };
             mark("bundle evaluated");
 
             run_loop(rt, &ctx, &calls_rx);
@@ -1168,8 +1166,6 @@ pub fn start_ui(
                 eprintln!("[jsc-ui] ui bundle eval failed: {e}");
                 std::process::exit(1);
             }
-            unsafe { rng_jsc_drain_microtasks(rt) };
-
             run_loop(rt, &ctx, &calls_rx);
             unsafe { rng_jsc_destroy(rt) };
         })
@@ -1434,7 +1430,6 @@ fn dispatch_batch(rt: *mut c_void, batch: Vec<JsCall>) {
                 } else {
                     eval(rt, code.as_bytes(), &url)
                 };
-                unsafe { rng_jsc_drain_microtasks(rt) };
                 if let Some(reply) = reply {
                     let _ = reply.send(result);
                 } else if let Err(error) = result {
@@ -1458,10 +1453,6 @@ fn run_loop(rt: *mut c_void, ctx: &JsContext, calls_rx: &Receiver<JsCall>) {
         .and_then(|v| v.parse().ok())
         .unwrap_or(4.0);
     loop {
-        // React's initial mount and Promise continuations can be queued as microtasks
-        // even when there are no native calls or timers. Drain before blocking;
-        // otherwise startup waits for max_wait before the first tree.
-        unsafe { rng_jsc_drain_microtasks(rt) };
         // block until the next call or the next timer deadline (rAF arrives as a
         // fireFrame JsCall posted by the vsync frame_clock, not a timer).
         let wait = ctx
@@ -1495,13 +1486,11 @@ fn run_loop(rt: *mut c_void, ctx: &JsContext, calls_rx: &Receiver<JsCall>) {
         };
         dispatch_batch(rt, batch);
 
-        // fire due timers, then run microtasks (Promises / React scheduling).
+        // fire due timers. JavaScriptCore drains microtasks before each call returns.
         let due = ctx.timers.borrow_mut().pop_due(Instant::now());
         for id in due {
             call1(rt, "__rngpui_fireTimer", &id.to_string());
         }
-        unsafe { rng_jsc_drain_microtasks(rt) };
-
         if let Some((len, label, started)) = trace {
             let ms = started.elapsed().as_secs_f64() * 1000.0;
             if ms >= perf_threshold_ms {

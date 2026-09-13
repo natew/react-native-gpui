@@ -194,10 +194,6 @@ int rng_jsc_call1(void* handle, const char* name, const char* arg, char* errbuf,
   return 1;
 }
 
-// JSC performs a microtask checkpoint when the outermost API entry returns. The self-test
-// proves that a resolved Promise runs before rng_jsc_eval returns.
-void rng_jsc_drain_microtasks(void*) {}
-
 void* rng_jsc_shared_buffer_create(size_t len) {
   void* memory = nullptr;
   size_t size = len ? len : 8;

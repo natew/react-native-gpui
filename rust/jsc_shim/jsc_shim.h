@@ -18,7 +18,6 @@ int rng_jsc_measure_jit(void* rt, double* elapsed_ms, char* errbuf, size_t errca
 void rng_jsc_install_void_fn(void* rt, const char* name, RngHostVoidFn fn, void* userdata);
 void rng_jsc_install_num_fn(void* rt, const char* name, RngHostNumFn fn, void* userdata);
 int rng_jsc_call1(void* rt, const char* name, const char* arg, char* errbuf, size_t errcap);
-void rng_jsc_drain_microtasks(void* rt);
 void* rng_jsc_shared_buffer_create(size_t len);
 void rng_jsc_install_shared_buffer(void* rt, const char* name, void* buffer, size_t len);
 

@@ -148,6 +148,7 @@ function installReanimatedNativeSeam(): void {
     _updateProps?: (operations: Array<{ shadowNodeWrapper: unknown; updates: StyleProps }>) => void
     _updatePropsFabric?: (operations: Array<{ shadowNodeWrapper: unknown; updates: StyleProps }>) => void
     _updatePropsPaper?: (operations: Array<{ tag: unknown; name?: unknown; updates: StyleProps }>) => void
+    _maybeFlushUIUpdatesQueue?: () => void
     _scrollTo?: (...args: unknown[]) => void
     _scrollToPaper?: (...args: unknown[]) => void
     _measure?: (node: unknown) => MeasuredDimensions | null
@@ -207,6 +208,10 @@ function installReanimatedNativeSeam(): void {
   g._updatePropsFabric ??= (operations) => engineUpdateProps(operations)
   g._updatePropsPaper ??= (operations) =>
     engineUpdateProps(operations.map((op) => ({ shadowNodeWrapper: op.tag, updates: op.updates })))
+  // reanimated's native renderer queues prop writes, then flushes that queue after
+  // each mapper pass. engineUpdateProps sends the write immediately, so there is no
+  // second queue to flush.
+  g._maybeFlushUIUpdatesQueue ??= () => {}
 
   // measure / scroll / dispatchCommand — gpui's reconciler owns layout, not the
   // worklet UI runtime; resolve against the live node graph through the host id.

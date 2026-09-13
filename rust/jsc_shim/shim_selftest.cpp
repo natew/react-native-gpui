@@ -45,8 +45,6 @@ int main() {
   if (rng_jsc_call1(runtime, "__rngpui_ping", "from C", error, sizeof error)) {
     std::printf("FAIL call: %s\n", error); return 5;
   }
-  rng_jsc_drain_microtasks(runtime);
-
   const size_t length = (4 + 32) * sizeof(double);
   void* shared = rng_jsc_shared_buffer_create(length);
   void* runtime_a = rng_jsc_create();

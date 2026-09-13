@@ -17,6 +17,8 @@
  *   - closure cache reuse across two dispatches of the same (hash, closureId)
  *     preserving a mutation made by the first run
  *   - shareableRef identity across two dispatches
+ *   - object SharedValue modify(..., false) preserves in-place mutations without
+ *     notifying its own mapper again
  *   - boolean slot type restoration (Float64 0/1 → false/true)
  *   - slot free parity guard (a runtime only frees ids matching its own parity)
  *
@@ -222,7 +224,35 @@ function makeWorklet(hash, source, closure = {}) {
 }
 
 // =========================================================================
-// 7. boolean slot type restoration — a boolean slot stores Float64 0/1 but proxy
+// 7. object sv modify(..., false) — reanimated uses this to mutate mapper state in
+//    place without notifying the same mapper and creating a self-sustaining frame loop.
+// =========================================================================
+{
+  const slot = react.allocObjectSharedValueSlot({ emitted: {} });
+  const uiProxy = ui.deserializeValue({ kind: "svObject", id: slot });
+  let listenerCalls = 0;
+  uiProxy.addListener(1, () => {
+    listenerCalls++;
+  });
+  const original = uiProxy.value;
+  uiProxy.modify((current) => {
+    current.emitted = { opacity: true };
+    return current;
+  }, false);
+  check(
+    "object-modify-false-mutates-in-place",
+    uiProxy.value.emitted.opacity === true,
+    `value=${JSON.stringify(uiProxy.value)}`,
+  );
+  check("object-modify-false-skips-listener", listenerCalls === 0, `listenerCalls=${listenerCalls}`);
+  uiProxy.value = original;
+  check("object-same-assignment-skips-listener", listenerCalls === 0, `listenerCalls=${listenerCalls}`);
+  uiProxy.modify((current) => current, true);
+  check("object-modify-force-notifies", listenerCalls === 1, `listenerCalls=${listenerCalls}`);
+}
+
+// =========================================================================
+// 8. boolean slot type restoration — a boolean slot stores Float64 0/1 but proxy
 //    reads restore the boolean type so `=== false` works like real reanimated.
 // =========================================================================
 {
@@ -237,7 +267,7 @@ function makeWorklet(hash, source, closure = {}) {
 }
 
 // =========================================================================
-// 8. slot free parity guard — a runtime only frees ids matching its own
+// 9. slot free parity guard — a runtime only frees ids matching its own
 //    even/odd parity. freeing a peer-owned id is a no-op (no double-free, no
 //    cross-lane corruption).
 // =========================================================================

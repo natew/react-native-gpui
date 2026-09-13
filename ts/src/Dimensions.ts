@@ -44,11 +44,13 @@ export const Dimensions = {
 
     /** internal: called by the runtime when the window reports a new size.
      *  Debounced to avoid rapid re-renders during OS-level window resize drag,
-     *  which can fire at 120Hz. Returns true if the size actually changed. */
-    _setWindow(width: number, height: number): boolean {
+     *  which can fire at 120Hz. Pass false while seeding the first render, before
+     *  subscribers exist. Returns true if the size actually changed. */
+    _setWindow(width: number, height: number, notifyListeners = true): boolean {
         if (width === windowDims.width && height === windowDims.height) return false;
         windowDims = { ...windowDims, width, height };
         screenDims = { ...screenDims, width, height };
+        if (!notifyListeners) return true;
         const payload = { window: windowDims, screen: screenDims };
         // Debounce: coalesce rapid resize events (e.g., macOS window drag) into
         // a single change notification at ~60fps. Without this the Dimensions

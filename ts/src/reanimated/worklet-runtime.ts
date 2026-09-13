@@ -1579,18 +1579,24 @@ export class WorkletRuntime {
         return readSlot()
       },
       set value(v: unknown) {
+        if (Object.is(readSlot(), v)) return
         writeSlot(v)
       },
       get(): unknown {
         return readSlot()
       },
       set(v: unknown): void {
+        const current = readSlot()
         const resolved =
-          typeof v === 'function' ? (v as (c: unknown) => unknown)(readSlot()) : v
+          typeof v === 'function' ? (v as (c: unknown) => unknown)(current) : v
+        if (Object.is(current, resolved)) return
         writeSlot(resolved)
       },
-      modify(modifier: (value: unknown) => unknown, _forceUpdate = true): void {
-        writeSlot(modifier !== undefined ? modifier(readSlot()) : readSlot())
+      modify(modifier: (value: unknown) => unknown, forceUpdate = true): void {
+        const current = readSlot()
+        const next = modifier !== undefined ? modifier(current) : current
+        if (!forceUpdate && Object.is(current, next)) return
+        writeSlot(next)
       },
       addListener(listenerId: number, fn: (value: unknown) => void): void {
         const prev = unsubscribers.get(listenerId)

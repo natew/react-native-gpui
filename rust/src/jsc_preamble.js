@@ -139,7 +139,7 @@
     var finalizers = __rafFinalizers;
     __rafFinalizers = [];
     for (var j = 0; j < finalizers.length; j++) {
-      try { finalizers[j](); } catch (e) { g.__rngpui_log('error: rAF finalizer threw ' + ((e && e.stack) || e)); }
+      try { finalizers[j](); } catch (e) { g.__rngpui_log('error: rAF finalizer threw ' + ((e && e.message) || e) + '\n' + ((e && e.stack) || '')); }
     }
     // registrations made while firing did not arm, since we were still armed.
     if (__rafCallbacks.size > 0 || __rafFinalizers.length > 0) __rafArm();

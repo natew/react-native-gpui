@@ -60,6 +60,10 @@ export function createRoot(options: RootOptions = {}): Root {
         height: options.height ?? win.height,
         children: [],
     };
+    // the requested window size is authoritative for the first render. seed the
+    // synchronous Dimensions read before components subscribe, so the later native
+    // ready event does not replay the same size through every mounted listener.
+    Dimensions._setWindow(container.width, container.height, false);
 
     // Tell the host the window size NOW, before React renders anything.
     //

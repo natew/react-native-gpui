@@ -20,17 +20,21 @@ const KEY = "native-layout-pane";
 
 function App() {
     const sawInitial = useRef(false);
+    const applied = useRef(false);
     const done = useRef(false);
-
-    useEffect(() => {
-        const timer = setTimeout(() => NativeLayout.setWidth(KEY, 284), 120);
-        return () => clearTimeout(timer);
-    }, []);
 
     function onPaneLayout(event: LayoutChangeEvent) {
         const width = Math.round(event.nativeEvent.layout.width);
         if (width === 180) {
             sawInitial.current = true;
+            // apply the override only once the initial layout is observed. the first
+            // layout event lands ~400ms after bundle eval (window create + the offscreen
+            // clamp dance), so a fixed 120ms timer raced it: onLayout never reported 180,
+            // sawInitial stayed false, and the test timed out even when 284 applied.
+            if (!applied.current) {
+                applied.current = true;
+                NativeLayout.setWidth(KEY, 284);
+            }
         }
         if (sawInitial.current && width === 284 && !done.current) {
             done.current = true;
@@ -39,13 +43,17 @@ function App() {
         }
     }
 
+    // failure detector only. the sequencing above waits on the observed initial layout,
+    // so this deadline names a missing precondition instead of bounding a race.
     useEffect(() => {
         const timer = setTimeout(() => {
             if (!done.current) {
-                console.error("NATIVE_LAYOUT_CONFORMANCE_FAIL timed out");
+                console.error(
+                    `NATIVE_LAYOUT_CONFORMANCE_FAIL timed out sawInitial=${sawInitial.current} applied=${applied.current}`,
+                );
                 process.exit(1);
             }
-        }, 1000);
+        }, 3000);
         return () => clearTimeout(timer);
     }, []);
 

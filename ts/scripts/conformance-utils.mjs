@@ -83,7 +83,8 @@ for window in list {
     let y = (bounds["Y"] as? NSNumber)?.doubleValue ?? 0
     let width = (bounds["Width"] as? NSNumber)?.doubleValue ?? 0
     let height = (bounds["Height"] as? NSNumber)?.doubleValue ?? 0
-    print("\\(id)\\t\\(pid)\\t\\(owner)\\t\\(title)\\t\\(layer)\\t\\(x)\\t\\(y)\\t\\(width)\\t\\(height)")
+    let alpha = (window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? -1
+    print("\\(id)\\t\\(pid)\\t\\(owner)\\t\\(title)\\t\\(layer)\\t\\(x)\\t\\(y)\\t\\(width)\\t\\(height)\\t\\(alpha)")
 }
 `;
     const raw = execFileSync("swift", ["-e", swift], { encoding: "utf8", stdio: "pipe" });
@@ -92,7 +93,7 @@ for window in list {
         .split("\n")
         .filter(Boolean)
         .map((line) => {
-            const [id, pid, owner, title, layer, x, y, width, height] = line.split("\t");
+            const [id, pid, owner, title, layer, x, y, width, height, alpha] = line.split("\t");
             return {
                 id: Number(id),
                 window_id: Number(id),
@@ -105,6 +106,7 @@ for window in list {
                 y: Number(y),
                 width: Number(width),
                 height: Number(height),
+                alpha: Number(alpha),
                 bounds: {
                     x: Number(x),
                     y: Number(y),

@@ -73,14 +73,27 @@ try {
         );
     }
     const visibleRatio = windowVisibleRatio(window);
-    if (visibleRatio > 0.05) {
+    // macOS constrains a fully-offscreen origin back on-screen on some display
+    // arrangements, where the service falls back to an invisible (alpha~0, click-through,
+    // non-key) on-screen window. Both states satisfy the contract this test guards: the
+    // fixture window must never be perceptible. Assert the real invariant for whichever
+    // path the service took rather than only geometry, in the same shape
+    // webview-render/webview-overlay already use.
+    const clamped = output.includes("offscreen position clamped; showing invisible");
+    if (clamped) {
+        if (window.alpha > 0.05) {
+            throw new Error(
+                `clamped fallback window is still visible: alpha=${window.alpha} x=${window.x} y=${window.y} width=${window.width} height=${window.height}`,
+            );
+        }
+    } else if (visibleRatio > 0.05) {
         throw new Error(
             `window was not mostly offscreen: x=${window.x} y=${window.y} width=${window.width} height=${window.height} visibleRatio=${visibleRatio.toFixed(4)}`,
         );
     }
 
     console.log(
-        `WINDOW_MODE_CONFORMANCE_PASS frontmost=${JSON.stringify(frontBefore)} window=${window.id} x=${window.x} y=${window.y} visibleRatio=${visibleRatio.toFixed(4)} screenshot=${screenshotPath}`,
+        `WINDOW_MODE_CONFORMANCE_PASS frontmost=${JSON.stringify(frontBefore)} window=${window.id} clamped=${clamped} alpha=${window.alpha} x=${window.x} y=${window.y} visibleRatio=${visibleRatio.toFixed(4)} screenshot=${screenshotPath}`,
     );
 } catch (error) {
     if (output.trim()) console.error(output.trim());

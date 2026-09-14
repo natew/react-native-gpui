@@ -76,6 +76,13 @@ const tasks = [
     { name: "webview-render", command: "bun", args: ["run", "scripts/webview-render-conformance.mjs"], cwd: root, timeoutMs: 12_000 },
     { name: "window-mode", command: "bun", args: ["run", "scripts/window-mode-conformance.mjs"], cwd: root },
     { name: "pseudo-driver", command: "node", args: ["scripts/pseudo-driver-conformance.mjs"], cwd: root, timeoutMs: 20_000 },
+    {
+        name: "scroll-settle-retained",
+        command: "node",
+        args: ["scripts/scroll-settle-retained-conformance.mjs"],
+        cwd: root,
+        timeoutMs: 20_000,
+    },
 ];
 
 const results = [];

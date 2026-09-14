@@ -86,6 +86,7 @@
         "conformance:focus-visible": "node scripts/focus-visible-conformance.mjs",
         "conformance:drive": "node scripts/drive-conformance.mjs",
         "conformance:scroll-performance": "bun run scripts/scroll-performance-conformance.mjs",
+        "conformance:scroll-settle-retained": "node scripts/scroll-settle-retained-conformance.mjs",
         "conformance:reload": "node scripts/reload-conformance.mjs",
         "conformance:hot-reload": "node scripts/hot-reload-conformance.mjs",
         "conformance:hot-reload-cli": "node scripts/hot-reload-cli-conformance.mjs",

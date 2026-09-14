@@ -39,6 +39,11 @@ const tasks = [
     { name: "inline-run-style", command: "node", args: ["scripts/inline-run-style-conformance.mjs"], cwd: root, timeoutMs: 60_000 },
     { name: "input-visual", command: "node", args: ["scripts/input-visual-conformance.mjs"], cwd: root, timeoutMs: 60_000 },
     { name: "cargo-test", command: "cargo", args: ["test"], cwd: `${repo}/rust`, timeoutMs: 25_000 },
+    // compiles and runs the shim's own C++ selftest (0.9s wall). the collection
+    // assertion in it is the only thing that can fail if the forced-collection
+    // path stops collecting, and it stays green over a no-op shim only if the
+    // WeakRef control is removed.
+    { name: "jsc-shim", command: "bun", args: ["run", "scripts/jsc-shim-unit.mjs"], cwd: root, timeoutMs: 20_000 },
     { name: "appearance", command: "bun", args: ["run", "scripts/appearance-conformance.ts"], cwd: root, timeoutMs: 10_000 },
     { name: "file-picker", command: "bun", args: ["run", "scripts/file-picker-conformance.ts"], cwd: root },
     { name: "display-none", command: "bun", args: ["run", "scripts/display-none-conformance.ts"], cwd: root },

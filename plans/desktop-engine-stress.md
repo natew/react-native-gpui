@@ -63,6 +63,49 @@ The revert and reapply are both in the history rather than squashed: the revert 
 on a non-reproducible measurement (see below), and this branch does not rewrite history. The net
 effect is the original change.
 
+### 4. A blank capture was reported as a corner/shadow defect — `06ac787`
+
+The capture timer writes a frame every 25ms from service start, so a slow first paint yields frames
+of uniform window background. `waitForCapture` (`ts/cli/host.ts:624`) checked only that the frame
+file existed and was non-empty, so a blank frame reached the assertions. This gate read one as
+`terminal interior should be the terminal fill — got #232323` (the fixture paints `#050507` there)
+plus `terminal shadow should fall off — 4px out (lum 35) must be darker than 40px out (lum 30)`, an
+inverted gradient. Sampling that capture with the gate's own helpers returned `#232323` at every
+point including the field, which the fixture paints `#f2c84b`: nothing had painted.
+
+RAN: the same fixture, binary and command then passed three consecutive runs, at load 13.5, 16.5 and
+19.1. The highest load passed and the failing run was not the most loaded, so this does not track
+load the way the feed gate does. TESTED: whole-frame luminance variance is 7567.6 on a real 900x620
+frame and 0 on a uniform one; the new precondition rejects the observed blank (`#232323`, max
+channel delta 207) against a tolerance of 40 and accepts the painted field (`#ebc864`). INFERRED: the
+blank frame is a first paint slower than the capture. The observation that would have differed is a
+failing run whose capture is verifiably non-blank; I did not get one, and I no longer hold the blank
+frame because the later passing runs overwrote it.
+
+Fix: wait for painted pixels before the first capture (whole-frame variance, best-effort, 1500ms
+budget, `RNGPUI_SHOT_FRAME_BUDGET_MS`), and assert in the gate that the app painted before measuring
+geometry.
+
+Two things this gate got right, once it could see: with a real capture the corner and shadow
+assertions all pass (corner `#dcb95a` clipped away from the terminal fill, interior `#050505`, shadow
+44 lum darker 4px out and falling off), so there is no engine defect in corner clipping or drop
+shadow. And its header comment describing the capture as an "in-service CGWindowList readback" is
+stale: `host.capture` copies the frame the service writes to `RNGPUI_CAPTURE_PNG`.
+
+### 5. The input color check scaled the node box by a stale window height — `3cfab6c`
+
+`assertNodeContainsColor` divided node bounds by a hardcoded logical `780x520` while the gate
+launches at `780x620`, so `scaleY` was 2.385 instead of 2.0 and every sampled band sat ~19% low. The
+placeholder box (`y` 192..248) was read at rows 457..592, below its glyphs, and a painted `#ff4fa3`
+was reported absent as `nearest RGB distance 189.9`.
+
+TESTED: replaying both scales over the gate's own capture reproduces its exact number (old scale
+rows 457..592, nearest 189.9, zero pixels within tolerance; corrected scale rows 384..496, nearest
+23, 1878 pixels). RAN: a probe of the live fixture shows the node carries `text: "COLOR_SENTINEL"`
+and its box paints 1447 pixels of `#eb5fa0`, and `rust/src/elements/input.rs:83` applies
+`placeholder_text_color` unconditionally. The defect was the gate's arithmetic, not the engine's
+color plumbing.
+
 ## Local validation on this tip
 
 RAN, `bun run test` (`ts/scripts/test-suite.mjs`): `TEST_SUITE_TOTAL seconds=24.755`,
@@ -77,6 +120,24 @@ applyTree=4 ramp=PASS fastPath=PASS`.
 RAN, `conformance:dialog-reanimated`: still FAIL, `opacitySamples=1 opacities=[1] ySamples=0
 setNodeStyle=3 applyTree=6 lateBg=#ffffff exitOpacities=[1] ramp=FAIL fastPath=FAIL bgPaints=PASS
 exitRamp=FAIL exitUnmount=PASS`. That finding is open, not fixed.
+
+RAN again after `06ac787` and `3cfab6c`: `TEST_SUITE_TOTAL seconds=15.909`, 40 tasks, all PASS. An
+earlier run of the same suite failed only `scroll-settle-retained`, on
+`fixture stole focus from pid 41055 to 51022`; the suite's own closing line identifies pid 41055 as
+Ghostty and the new frontmost as Safari, which no fixture can be, and the gate then passed 3/3 with
+Safari frontmost throughout, so that was an external activation rather than the fixture.
+
+RAN, gates outside the suite that I had not triaged before this session. PASS: `anim-overlay`
+(`distinctWidths=8 setNodeStyle=117 applyTree=4 ramp=PASS fastPath=PASS`), `card-corner-shadow` 3/3,
+`check-transform`, `context-menu`, `describe`, `webview-overlay` (`webviewPainted=true`), `drive`,
+`reanimated-scroll` (`host=446 target=180 offset=7000 elapsed=60.1ms`).
+
+Load-bound failures, each needing a clean-machine run rather than a code change, with the
+observation that says so: `startup-conformance`, a hard 200ms internal cap, measured
+157/245/182/212/193/268ms at load 22, where the best run is well inside the cap;
+`input-runtime`'s `click-to-painted-focus`, a 16.67ms budget, median 18.19/p95 21.71ms at load 22
+with individual samples at 11.06ms. The machine was running a SootSim simulator conformance app, an
+`xcodebuildmcp` build, a codex session, `agy` and three `bun` runs.
 
 ## The Team Machine feed gate is load-bound, not a regression from `8edbfb9`
 
@@ -281,10 +342,18 @@ No app gate failed in a way I could attribute to the engine.
   during wave 1 and rose to 38.91 later, against the app's own requirement of a clean load under 9.0.
   The checks above are evidence that the surfaces work; they are not evidence of any latency number.
   These need a clean-load re-run: `session-drag`, `session-pingpong`, `session-scrub`, `tab-switch`,
-  `native-timeline-scroll`, `desktop-interaction-perf`, `controlroom-terminal-pingpong`.
-- Untriaged engine gates from the initial sweep, each needing a negative control before any claim:
-  `conformance:box-model`, `conformance:card-corner-shadow`, `conformance:input-runtime`. The
-  `AGENTS.md` Display P3 caveat applies to any color assertion in these.
+  `native-timeline-scroll`, `desktop-interaction-perf`, `controlroom-terminal-pingpong`,
+  `startup-conformance` (200ms cap) and `input-runtime`'s focus latency (16.67ms budget).
+- Triage sweep status. PASS: `anim-overlay`, `card-corner-shadow`, `check-transform`, `context-menu`,
+  `describe`, `webview-overlay`, `drive`, `reanimated-scroll`, `reanimated`, `sustained-reanimated`.
+  FAIL and fixed: `card-corner-shadow` (blank capture, `06ac787`), `input-runtime` (stale scale,
+  `3cfab6c`). FAIL and open in another lane: `dialog-reanimated`. Not yet run: `legend-list-100k`,
+  `native-scroll-react-stall`, `scroll-performance`, `presentation-pacing`. `conformance-utils.mjs`
+  is a helper, not a gate. The `AGENTS.md` Display P3 caveat applies to any color assertion; measured
+  drift was `#f2c84b` rendering as `#ebc864` and `#ff4fa3` as `#eb5fa0`, 23-29 per channel.
+- The gate names in the earlier note (`conformance:box-model` and friends) do not exist: this repo
+  defines no `conformance:` npm scripts, and no box-model gate at all. The real files are
+  `ts/scripts/*-conformance.mjs`. Two of the three names in that note were the two defects above.
 - `plans/HANDOFF.md` still describes the single-process Hermes design and is stale after the
   JavaScriptCore swap. Left alone: another lane's document.
 

@@ -169,10 +169,28 @@ app's `node_modules/@tamagui`. `git log -S` shows the only commit that ever cont
 which installs the host fn. A `transition`-prop animation therefore cannot reach the native tween
 engine in this stack, whatever the driver emits.
 
-Next probe, named: instrument the driver's first mapper frame in a fixture this repo owns
-(`RNGPUI_DIALOG_FIXTURE` redirects the gate, so an `ts/examples/` copy keeps it in engine scope) and
-log `snapshot.seeds.opacity`, `animatedValues.opacity` and `isCompletingEnterRef.value` at that
-frame. That distinguishes "core painted no enter value" from "the enter cycle never started".
+Next probe, named, and attempted: instrument the driver's first mapper frame
+(`tamagui_createAnimationsNativeJs23`) and log `snapshot.seeds`, `animatedValues`, `snapshot.gatedKeys`
+and the three cycle flags at that frame. That distinguishes "core painted no enter value" from "the
+enter cycle never started". The attempt did not produce a valid observation, so the fork is still
+open, and the reason is worth recording because it invalidates an easy conclusion:
+
+- The mapper exists in two forms in the prebuilt chunk: a source closure and the serialized
+  `__initData.code` string that a worklet is materialized from. I patched both, ran the gate with the
+  chunk's own `RNGPUI_SKIP_PREBUILD=1` debug hook, and got no probe output.
+- That silence is **not** evidence about the mapper. RAN, the control: the bundled app
+  (`/tmp/rngpui-dialog-reanimated-conformance/app.js`) contains `tamagui_createAnimationsNativeJs23`
+  10 times and `animateSnapshotValue` 8 times, and contains **zero** occurrences of my probe strings.
+  The gate resolves `@tamagui/animations-reanimated` from the app's `gui/node_modules` and does not
+  use the prebuilt chunk it stages in `/tmp` after all, despite passing `prebuiltDir` to the bundler
+  plugin. So all three probe runs measured an uninstrumented driver.
+- Instrumenting the file the gate actually bundles means editing a package in `~/team-machine/gui/node_modules`.
+  That tree is app-owned and shared with a lane that runs its gates concurrently, so it is off limits.
+  The fork therefore cannot be closed from this side without either that permission or a fixture that
+  does not import the app's Tamagui stack.
+
+Two negatives I nearly reported and am not reporting: "the source variant never runs" and "the mapper
+never runs". Neither is supported by a channel that was shown to work.
 
 ## Read and deliberately not landed: `_WORKLET`
 
@@ -195,6 +213,33 @@ reports `setNodeStyle=0 applyTree=4 exitUnmount=FAIL`, and the two runs without 
 run against two is a thin arm, but `exitUnmount` flips categorically rather than drifting, so the
 line does something I have not explained, and landing an unexplained change to a global that
 third-party worklet code branches on is worse than leaving a documented inconsistency.
+
+## The dialog gate does not re-stage the UI runtime, so it can test stale engine source
+
+RAN, proven with a positive control. The service does not evaluate `ts/src`. It evaluates a built
+bundle staged beside the binary: `rust/src/service.rs:2864-2871` resolves `ui-runtime.js` next to the
+executable (or from `RNGPUI_UI_BUNDLE`), produced by `ts/scripts/build-ui-runtime.mjs` from
+`src/reanimated/ui-entry.ts`. That builder is mtime-gated over `src/reanimated/` and `src/raf.ts`,
+and it is invoked from exactly two places: `scripts/build-native.mjs`, which is part of
+`npm run build`, and `scripts/bundle-app.mjs`, after every app bundle. No gate invokes it: grep
+finds no reference to `build-ui-runtime` in `scripts/dialog-reanimated-conformance.mjs` or in
+`scripts/reanimated-bun-plugin.mjs`.
+
+The consequence, RAN: I appended one log line to `src/reanimated/ui-entry.ts` and ran the dialog
+gate, and it never appeared. I then ran `bun scripts/build-ui-runtime.mjs`, which rebuilt and
+re-staged the bundle, and re-ran the same gate unchanged: the line appeared. The first run had been
+reading a bundle built before the edit. That bundle is also what carries the engine's own
+`[anim-trace]` lines, so a gate can report an older revision of the UI runtime while appearing to
+test current engine behaviour.
+
+This is why the `_WORKLET` arm above is recorded as acting on the React runtime only: the seam is
+installed on both runtimes, and the UI runtime bundle was not re-staged during those runs, so an edit
+to `ts/src/reanimated/seam.ts` could only have reached the React runtime, which the gate bundles
+fresh on every run.
+
+Operationally: after changing anything under `ts/src/reanimated/` or `ts/src/raf.ts`, run
+`bun scripts/build-ui-runtime.mjs` before trusting a gate result, and rebuild and re-sign
+`rngpui-service` after changing `rust/`.
 
 ## App integration
 

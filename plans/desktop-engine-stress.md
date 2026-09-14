@@ -267,7 +267,11 @@ Two methodology traps cost real time here and are worth carrying forward:
   `dyld: Library not loaded: @libghostty-vt.dylib`, and a dead service presents as "timed out waiting
   for the tree", which I first misread as a load failure. Both arms of A/B #1 were dead binaries.
   Stage A/B binaries as siblings of the dylib and re-sign after any `cargo build`:
-  `codesign --force --sign - --entitlements rust/jsc.entitlements <binary>`.
+  `codesign --force --sign - --entitlements rust/jsc.entitlements <binary>`. `npm run build:rust` is
+  cargo alone, so it invalidates the signature in place and every launch then fails as
+  `[jsc] fatal: JIT liveness probe took 331.8ms (limit 100.0ms); the process is interpreter-shaped`
+  followed by the host's `window did not appear`, which reads like a fixture bug rather than an
+  unsigned binary. `npm run build:native` is the step that re-signs both entry points.
 - An A/B needs the arms interleaved in both orders, and a null result needs a control that can fail.
   A pass/fail gate under variable external load cannot separate a 2ms layout difference at all.
 
@@ -431,40 +435,69 @@ Triage of the four:
 
 No app gate failed in a way I could attribute to the engine.
 
-## Open finding: `legend-list-100k` exceeds its memory budgets while the native tree stays flat
+## Resolved: `legend-list-100k` footprint budgets are decided by when they sample, not by what the engine holds
 
-RAN, `conformance:legend-100k`, twice. Both runs fail the same assertion and nothing else in the
-memory block is close: settled footprint delta 74MB and 88MB against a 64MB budget, max delta 141MB
-and 155MB against 110MB, RSS load delta 76.5MB and 80.6MB. The structural assertions pass in both,
-`maxNativeNodes` 126 and 136 against a budget of 250, and mounted rows stay under 80.
+RAN, `conformance:legend-100k`, three times with numbers and once more failing before any
+measurement. Every run with numbers fails the same assertion and nothing else in the memory block is
+close: settled footprint delta 79MB, 74MB and 88MB against a 64MB budget, max delta 147MB, 141MB and
+155MB against 110MB, RSS load delta 76.5MB and 80.6MB. The structural assertions pass in every run,
+`maxNativeNodes` 126-141 against a budget of 250, and mounted rows stay under 80. The most recent
+report is the one the rest of this section measures against: reference 302MB at paint, afterLoad
+381MB, afterFarJumps 446MB, afterScroll 449MB.
 
-RAN, a third invocation failed before any measurement with `window did not appear`. Its service log
+One invocation failed before any measurement with `window did not appear`. Its service log
 stops at `[startup] pre open_window +137.9ms` and never advances, so the window was never created.
-One occurrence, not reproduced in the two runs after it; `cli/host.ts:361` deliberately keeps that
+One occurrence, not reproduced in the runs after it; `cli/host.ts:361` deliberately keeps that
 workdir for exactly this, and the log is the only evidence there is.
 
-The growth is a function of item count, not of anything the engine retains. The fixture hands
-LegendList one shared sentinel for all 100,000 items (`examples/legend-list-100k.tsx:23`), so its
-own data array is ~0.8MB, while the reference process that produces the baseline runs the same
-fixture with 0 items. That is 740-880 bytes per item, and the engine's per-item surface cannot carry
-it: the native tree holds 126 to 136 nodes at every sample, and the nine far jumps between 0, 50,000
-and 99,999 add only the ~15 rows mounted at each landing (memory does grow there, 47MB and 71MB, but
-135-odd distinct rows cannot account for it either).
-
-INFERRED from those three numbers, the cost is on the JS side of the seam in the fixture's process.
-I did not attribute it between LegendList's own per-item metadata and JSC heap pages that have not
-been returned, because nothing available can separate them: the control socket exposes no heap
-readout, the inspector reports none, and `rust/src` contains no garbage-collection trigger and no
-memory-pressure response (`grep -rnE "JSGarbageCollect|garbage_collect|memory_pressure" rust/src` is
-empty). The gate's most recent upstream change is `57db024 feat(runtime): replace Hermes with
+The fixture hands LegendList one shared sentinel for all 100,000 items
+(`examples/legend-list-100k.tsx:23`), so its own data array is ~0.8MB at any count, while the
+reference process that produces the baseline runs the same fixture with 0 items. The engine's
+per-item surface cannot carry the difference either: the native tree holds 126 to 136 nodes at every
+sample, and the nine far jumps between 0, 50,000 and 99,999 add only the ~15 rows mounted at each
+landing. The gate's most recent upstream change is `57db024 feat(runtime): replace Hermes with
 JavaScriptCore`, so its 64MB budget was last set before the runtime's heap model changed.
 
-Not fixed, and I did not touch the budget: I have no evidence of an engine defect here, and relaxing
-a budget to get green is the one thing that would make this finding permanent. The next measurement
-is a per-item scaling run (patch `ITEM_COUNT` and the gate's three index literals, then compare 10k
-against 100k) with a forced collection as the control, which needs either a GC hook in the engine or
-a JS-side heap readout. Deciding between re-calibrating the budget and investigating the JS-side
-per-item cost belongs to whoever owns this gate's intent.
+RAN, a scaling run across item counts. A scratch copy of the fixture with `ITEM_COUNT` read
+from the environment, settled footprint against the same empty reference: 10,000 items 163MB (+19MB),
+25,000 171MB (+27MB), 50,000 174MB (+30MB), 100,000 214MB (+70MB), reference 144MB. The cost is not
+proportional to item count, and three of the four counts are inside the 64MB budget: the excess
+appears between 50,000 and 100,000. Native nodes are 126 at every count.
+
+RAN, the forced collection, now that the engine has one (`df733e4`). It frees 0.0MB of footprint at
+every settled point: after the 100k load (215MB), and after the gate's own workload of twelve far
+jumps and 160 paced wheel events (289-293MB). Two consecutive collections free nothing. There is
+still no JS-side heap readout, so the settled 72MB cannot be split between LegendList's own metadata
+and JSC heap pages; the control socket can now force a collection but cannot report heap size.
+
+TESTED, and this is the part that decides the finding: a forced collection cannot make physical
+footprint able to tell live memory from freed memory. 190MB of JS doubles were allocated through
+`evalJs`, both references dropped, and the collection called: footprint went 483MB to 480MB. Freed JS
+pages are not returned to the OS, so the 0.0MB freed above is not evidence that the memory is live,
+and the same reading disqualifies the settled delta itself. That delta is 79MB at paint and 70-72MB
+after both processes settle, because each sheds about 160MB on its own with no intervention (target
+376MB to 215MB, reference 302MB to 143MB). The budget is red either way; roughly 160MB of each
+sample is transient. The reference is exposed to this too, which is why its paint reading moved
+between 208MB and 302MB across runs while its settled reading held at 143-144MB.
+
+RAN, a leak test, because a plateau and a leak are different verdicts. Five identical 160-wheel
+bursts, settled footprint after each: 274, 302, 320, 320, 319MB. Growth stops at the third burst, RSS
+plateaus with it (389MB), and native nodes hold at 141 through all 800 wheel events. That is a
+bounded warm-up.
+
+VERDICT: no engine defect is proven, and the budget cannot support one. The engine's native retention
+is constant at 126-141 nodes across 100,000 items, twelve far jumps and 800 wheel events, and the
+footprint shows a bounded warm-up rather than a leak. What the assertion measures is the difference
+between two transients sampled at the instant `loaded:` paints, on a metric that does not fall when
+JS memory is freed (measured above). The change that follows, not made here: sample the settled state
+after the footprint stops changing and assert on something that responds to freeing, keeping 64MB if
+that is the product budget. That re-specifies a gate's verdict semantics and the budget's intent is
+not mine to decide, so the gate is untouched and still red, now for a measured reason rather than an
+unattributed 79MB.
+
+The engine capability landed anyway (`df733e4`): `collectGarbage` over the control socket, collecting
+both runtimes, with a selftest that proves it collects through `WeakRef.deref()` and a negative
+control that fails when the collect is replaced by `return 0`.
 
 ## Remaining gaps
 
@@ -489,9 +522,10 @@ per-item cost belongs to whoever owns this gate's intent.
   (`paintP50=8.32ms paintP95=9.23ms presentOver12.5=1`), `native-scroll-react-stall` (3/3 after
   `28da8b4`). FAIL and fixed: `card-corner-shadow` (blank capture, `06ac787`), `input-runtime` (stale
   scale, `3cfab6c`), `native-scroll-react-stall` (window race, `28da8b4`). FAIL and open in another
-  lane: `dialog-reanimated`. FAIL and open here, characterized rather than fixed: `legend-list-100k`,
-  in its own section above (memory budgets, not an engine defect I can prove). Nothing is now
-  untriaged. `conformance-utils.mjs` is a helper, not
+  lane: `dialog-reanimated`. FAIL and open here, resolved rather than fixed: `legend-list-100k`, in
+  its own section above (no engine defect proven; the footprint budget's metric cannot decide
+  liveness, and its sample instant is a transient). Nothing is now untriaged. `conformance-utils.mjs`
+  is a helper, not
   a gate. The `AGENTS.md` Display P3 caveat applies to any color assertion; measured drift was
   `#f2c84b` rendering as `#ebc864` and `#ff4fa3` as `#eb5fa0`, 23-29 per channel.
 - `RNGPUI_DRAW_PROBE` and `RNGPUI_SCROLL_LATENCY_PROBE` are live, not stale: the vendored GPUI reads

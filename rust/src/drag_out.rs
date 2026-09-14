@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::Duration;
 
+use block::Block;
 use cocoa::base::{id, nil};
 use cocoa::foundation::{
     NSArray, NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString, NSUInteger,
@@ -152,21 +153,12 @@ unsafe fn dragging_frame(view: id, bounds: Bounds<Pixels>) -> NSRect {
     }
 }
 
-#[repr(C)]
-struct ErrorBlock {
-    isa: *const std::ffi::c_void,
-    flags: i32,
-    reserved: i32,
-    invoke: unsafe extern "C" fn(*mut ErrorBlock, id),
-}
-
 #[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn call_error_block(block: id, err: id) {
-    if block == nil {
+unsafe fn call_error_block(completion: id, err: id) {
+    if completion == nil {
         return;
     }
-    let block = block as *mut ErrorBlock;
-    ((*block).invoke)(block, err);
+    (*(completion as *const Block<(id,), ()>)).call((err,));
 }
 
 fn sniff_image(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
@@ -286,23 +278,18 @@ fn local_path(src: &str) -> Option<PathBuf> {
     }
 }
 
-fn fetch_bytes(url: &str) -> Option<(Vec<u8>, Option<String>)> {
+fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
     let response = ureq::get(url)
         .timeout(Duration::from_secs(15))
         .call()
         .ok()?;
-    let content_type = response.header("content-type").map(str::to_string);
     let mut bytes = Vec::new();
     response
         .into_reader()
         .take(32 * 1024 * 1024)
         .read_to_end(&mut bytes)
         .ok()?;
-    if bytes.is_empty() {
-        None
-    } else {
-        Some((bytes, content_type))
-    }
+    if bytes.is_empty() { None } else { Some(bytes) }
 }
 
 fn write_promised_file(op: &PromiseOp, dest: &Path) -> Result<(), String> {
@@ -321,12 +308,7 @@ fn write_promised_file(op: &PromiseOp, dest: &Path) -> Result<(), String> {
         }
     }
     if op.src.starts_with("http://") || op.src.starts_with("https://") {
-        let (bytes, content_type) =
-            fetch_bytes(&op.src).ok_or_else(|| format!("failed to fetch {}", op.src))?;
-        let _ = content_type
-            .as_deref()
-            .and_then(uti_from_content_type)
-            .or_else(|| sniff_image(&bytes));
+        let bytes = fetch_bytes(&op.src).ok_or_else(|| format!("failed to fetch {}", op.src))?;
         fs::write(dest, bytes).map_err(|err| err.to_string())?;
         return Ok(());
     }
@@ -399,7 +381,10 @@ extern "C" fn promise_file_name(this: &Object, _: Sel, _provider: id, _file_type
         .get(&id)
         .map(|op| op.filename.clone())
         .unwrap_or_else(|| "image.png".into());
-    ns_str(&name)
+    unsafe {
+        let s = ns_str(&name);
+        msg_send![s, autorelease]
+    }
 }
 
 extern "C" fn promise_queue_for(_this: &Object, _: Sel, _provider: id) -> id {
@@ -667,4 +652,91 @@ pub fn wire_image_drag_out(
             });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use block::ConcreteBlock;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    const JPEG: &[u8] = b"\xFF\xD8\xFF\xE0\x00\x10JFIF\x00rngpui-promise-jpeg\xFF\xD9";
+
+    fn serve_jpeg() -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                JPEG.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(JPEG);
+        });
+        (format!("http://{addr}/view"), handle)
+    }
+
+    #[test]
+    fn file_promise_delegate_writes_http_jpeg() {
+        let (src, server) = serve_jpeg();
+        let dest =
+            std::env::temp_dir().join(format!("rngpui-promise-test-{}.jpg", std::process::id()));
+        let _ = fs::remove_file(&dest);
+
+        let op_id = NEXT_OP.fetch_add(1, Ordering::Relaxed);
+        OPS.lock().unwrap().insert(
+            op_id,
+            PromiseOp {
+                src,
+                filename: "vacation.jpg".into(),
+                uti: "public.jpeg",
+                bytes: None,
+            },
+        );
+
+        unsafe {
+            let pool = NSAutoreleasePool::new(nil);
+            let delegate: id = msg_send![promise_delegate_class(), new];
+            (&mut *delegate).set_ivar("opId", op_id);
+
+            let name: id = msg_send![
+                delegate,
+                filePromiseProvider: nil
+                fileNameForType: ns_str("public.jpeg")
+            ];
+            assert_eq!(ns_string_to_rust(name), "vacation.jpg");
+
+            let ns_path = ns_str(&dest.to_string_lossy());
+            let file_url: id = msg_send![class!(NSURL), fileURLWithPath: ns_path];
+            let done = Arc::new(Mutex::new(None::<usize>));
+            let done_c = done.clone();
+            let handler = ConcreteBlock::new(move |err: id| {
+                *done_c.lock().unwrap() = Some(err as usize);
+            })
+            .copy();
+
+            let _: () = msg_send![
+                delegate,
+                filePromiseProvider: nil
+                writePromiseToURL: file_url
+                completionHandler: &*handler
+            ];
+
+            let err = done.lock().unwrap().expect("completion block did not run");
+            assert_eq!(err, 0, "completion should be called with nil");
+            let _: () = msg_send![delegate, release];
+            let _: () = msg_send![pool, drain];
+        }
+
+        let written = fs::read(&dest).expect("promised file");
+        assert_eq!(written.as_slice(), JPEG);
+        let _ = fs::remove_file(&dest);
+        let _ = server.join();
+    }
 }

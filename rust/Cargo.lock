@@ -5559,6 +5559,7 @@ version = "0.1.38"
 dependencies = [
  "anyhow",
  "base64",
+ "block",
  "cc",
  "cocoa 0.26.0",
  "core-foundation 0.10.0",

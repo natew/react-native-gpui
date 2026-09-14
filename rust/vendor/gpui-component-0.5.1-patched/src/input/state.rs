@@ -1803,8 +1803,13 @@ impl InputState {
 
     /// PATCHED (react-native-gpui): public wrapper so the host's "type" debug command can
     /// reproduce real typing's caret behavior — typing pauses the blink and shows a solid
-    /// caret. The silent IME `insert` path intentionally doesn't pause, so the host calls
-    /// this after a programmatic insert to match what an OS keystroke does.
+    /// caret.
+    ///
+    /// It re-arms a pause the insert already set: `replace` and `insert` both funnel
+    /// through `replace_text_in_range`, which pauses unconditionally (see its first line),
+    /// so the host's call is not what makes a programmatic insert pause. Measured: with the
+    /// host's call removed the caret still holds solid across a burst of `type` commands,
+    /// which is what the `input-visual` gate now asserts.
     pub fn pause_blink(&mut self, cx: &mut Context<Self>) {
         self.pause_blink_cursor(cx);
     }

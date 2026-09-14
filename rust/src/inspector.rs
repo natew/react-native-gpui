@@ -1,11 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, ClipboardItem, Div, FontWeight, IntoElement, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Position, Styled,
-    div, point, px,
+    AnyElement, App, ClipboardItem, Div, FontWeight, IntoElement, KeyDownEvent, Modifiers,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
+    Position, ScrollDelta, ScrollWheelEvent, Styled, div, point, px,
 };
 use once_cell::sync::Lazy;
 
@@ -18,7 +18,7 @@ pub const WEBVIEW_INSPECTOR_SCRIPT: &str = r#"
   window.__rngpuiInspectorInstalled = true;
 
   const message = '{"__rngpuiInspector":true,"event":"copy"}';
-  const holdMs = 500;
+  const holdMs = 250;
   let active = false;
   let altDown = false;
   let timer = 0;
@@ -101,7 +101,7 @@ pub const WEBVIEW_INSPECTOR_SCRIPT: &str = r#"
 "#;
 
 const WEBVIEW_INSPECTOR_FLAG: &str = "__rngpuiInspector";
-pub const INSPECTOR_ACTIVATION_HOLD: Duration = Duration::from_millis(500);
+pub const INSPECTOR_ACTIVATION_HOLD: Duration = Duration::from_millis(250);
 /// How long the menu's Copy button shows "Copied" before the menu closes itself
 /// (parity with the ~/one devtool's copy-then-dismiss beat).
 pub const INSPECTOR_COPY_CLOSE_DELAY: Duration = Duration::from_millis(800);
@@ -749,6 +749,8 @@ pub struct InspectorState {
     last_position: Option<Point<Pixels>>,
     suppress_mouse_up: bool,
     hover: Option<InspectorHit>,
+    /// 0 = innermost hover; each parent walk steps toward path[0].
+    walk_offset: usize,
     copied_id: Option<u64>,
     /// when Some, the popup menu is open and owns all mouse input until dismissed.
     menu: Option<InspectorMenu>,
@@ -767,6 +769,7 @@ impl InspectorState {
             last_position: None,
             suppress_mouse_up: false,
             hover: None,
+            walk_offset: 0,
             copied_id: None,
             menu: None,
             menu_close_token: 0,
@@ -831,7 +834,7 @@ impl InspectorState {
     /// suspended (`hit_passthrough::set_input_grab`) — otherwise the overlay paints
     /// above a webview but every click lands in the page and the menu is unclickable.
     pub fn wants_input_grab(&self) -> bool {
-        self.enabled && (self.active || self.menu.is_some())
+        self.enabled && (self.alt_down || self.active || self.menu.is_some())
     }
 
     /// Returns (handled, copy_close_token). When the Copy menu item was clicked the
@@ -859,14 +862,19 @@ impl InspectorState {
             };
             return (true, close_token);
         }
-        // option+click on an active hover opens the menu (replacing the old straight-to-
-        // clipboard copy — copy is now a menu action).
-        if event.button != MouseButton::Left || !event.modifiers.alt || !self.active {
+        if !event.modifiers.alt || !self.active {
             return (false, None);
         }
         self.suppress_mouse_up = true;
-        self.open_menu(root, event.position, viewport);
-        (true, None)
+        if event.button == MouseButton::Right {
+            self.open_menu(root, event.position, viewport);
+            return (true, None);
+        }
+        if event.button != MouseButton::Left {
+            return (false, None);
+        }
+        let copied = self.copy_current(cx);
+        (copied, None)
     }
 
     /// Close the menu if it's still showing the "Copied" state from the Copy click that
@@ -894,12 +902,74 @@ impl InspectorState {
         }
         let previous_target = self.hover.as_ref().map(hit_key);
         self.last_position = Some(position);
+        self.walk_offset = 0;
         self.hover = hit_test(root, position);
-        if let Some(hit) = self.hover.as_ref() {
-            cx.write_to_clipboard(ClipboardItem::new_string(snapshot(hit)));
-            self.copied_id = Some(hit.target.id);
-        }
+        self.copy_current(cx);
         previous_target != self.hover.as_ref().map(hit_key) || self.hover.is_some()
+    }
+
+    fn copy_current(&mut self, cx: &mut App) -> bool {
+        let Some(hit) = self.hover.as_ref() else {
+            return false;
+        };
+        let text = snapshot_at_offset(hit, self.walk_offset);
+        let id = selected_summary(hit, self.walk_offset)
+            .map(|node| node.id)
+            .unwrap_or(hit.target.id);
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.copied_id = Some(id);
+        true
+    }
+
+    pub fn handle_scroll_wheel(&mut self, event: &ScrollWheelEvent) -> bool {
+        if !self.enabled || !self.active || self.menu.is_some() || self.hover.is_none() {
+            return false;
+        }
+        let y = match event.delta {
+            ScrollDelta::Pixels(delta) => f32::from(delta.y),
+            ScrollDelta::Lines(delta) => delta.y,
+        };
+        if y.abs() < 0.01 {
+            return false;
+        }
+        if y < 0.0 {
+            self.walk_parent()
+        } else {
+            self.walk_child()
+        }
+    }
+
+    pub fn handle_key_down(&mut self, event: &KeyDownEvent) -> bool {
+        if !self.enabled || !self.active || self.menu.is_some() || !event.keystroke.modifiers.alt {
+            return false;
+        }
+        match event.keystroke.key.as_str() {
+            "up" => self.walk_parent(),
+            "down" => self.walk_child(),
+            _ => false,
+        }
+    }
+
+    fn walk_parent(&mut self) -> bool {
+        let Some(hit) = self.hover.as_ref() else {
+            return false;
+        };
+        let max = hit.path.len().saturating_sub(1);
+        if self.walk_offset >= max {
+            return false;
+        }
+        self.walk_offset += 1;
+        self.copied_id = None;
+        true
+    }
+
+    fn walk_child(&mut self) -> bool {
+        if self.walk_offset == 0 {
+            return false;
+        }
+        self.walk_offset -= 1;
+        self.copied_id = None;
+        true
     }
 
     pub fn handle_mouse_up(&mut self, event: &MouseUpEvent) -> bool {
@@ -937,6 +1007,7 @@ impl InspectorState {
         self.active = false;
         self.alt_down = false;
         self.hover = None;
+        self.walk_offset = 0;
         self.copied_id = None;
         self.last_position = None;
         if had_hold || previous_active {
@@ -956,13 +1027,16 @@ impl InspectorState {
             return None;
         }
         let hit = self.hover.as_ref()?;
+        let summary = selected_summary(hit, self.walk_offset)?;
+        let bounds = selected_bounds(hit, self.walk_offset)?;
+        let copied = self.copied_id == Some(summary.id);
         let accent = crate::style::u32_to_hsla(0x0a84ff);
         let white = crate::style::u32_to_hsla(0xffffff);
         let mut label = div()
             .bg(accent)
             .text_color(white)
             .text_size(px(11.0))
-            .child(overlay_label(hit, self.copied_id == Some(hit.target.id)));
+            .child(overlay_label(summary, copied));
         {
             let style = label.style();
             style.position = Some(Position::Absolute);
@@ -982,10 +1056,10 @@ impl InspectorState {
         {
             let style = outline.style();
             style.position = Some(Position::Absolute);
-            style.inset.left = Some(px(hit.bounds.x).into());
-            style.inset.top = Some(px(hit.bounds.y).into());
-            style.size.width = Some(px(hit.bounds.width).into());
-            style.size.height = Some(px(hit.bounds.height).into());
+            style.inset.left = Some(px(bounds.x).into());
+            style.inset.top = Some(px(bounds.y).into());
+            style.size.width = Some(px(bounds.width).into());
+            style.size.height = Some(px(bounds.height).into());
         }
         Some(outline.into_any_element())
     }
@@ -1000,9 +1074,11 @@ impl InspectorState {
         let previous_target = self.hover.as_ref().map(hit_key);
         self.active = active;
         if active {
+            self.walk_offset = 0;
             self.hover = hit_test(root, position);
         } else {
             self.hover = None;
+            self.walk_offset = 0;
             self.copied_id = None;
         }
         previous_active != self.active || previous_target != self.hover.as_ref().map(hit_key)
@@ -1018,6 +1094,7 @@ impl InspectorState {
             return (self.deactivate(), None);
         }
         self.last_position = Some(position);
+        let started_hold = !self.alt_down;
         let activation_token = if self.alt_down {
             None
         } else {
@@ -1028,7 +1105,7 @@ impl InspectorState {
         let changed = if self.active {
             self.set_hover(root, position, true)
         } else {
-            false
+            started_hold
         };
         (changed, activation_token)
     }
@@ -1307,21 +1384,48 @@ fn hit_key(hit: &InspectorHit) -> (u64, Rect) {
     (hit.target.id, hit.bounds)
 }
 
-/// The element a click at `position` lands on. `collect_hits` yields hits in reverse
-/// paint order, so `hits[0]` is the top-most painted node at the point — the one gpui's
-/// own dispatch reaches first. From there we walk up that node's ancestor chain and pick
-/// the most meaningful node on it (the Pressable around a text label, say), which is what
-/// makes the inspector select a row instead of the glyph inside it. Candidates are
-/// restricted to that chain so nothing an overlay paints over can win: reaching a node in
-/// a different stack is exactly the occlusion bug that made `do tap` unusable over menus.
+/// The innermost painted node under `position`, like browser devtools.
+///
+/// `collect_hits` yields reverse paint order, so `hits[0]` is the top-most node at the
+/// point. Empty absolute hosts (command-palette staging, portal roots) cover the whole
+/// window without drawing, so they are skipped; a node that actually paints, or carries
+/// text/label, wins. Walk up from that node with the scroll wheel / ⌥↑.
 fn hit_test(root: &Arc<ReactElement>, position: Point<Pixels>) -> Option<InspectorHit> {
     let mut path = Vec::new();
     let mut hits = Vec::new();
     collect_hits(root, position, &mut path, &mut hits);
-    let chain: HashSet<u64> = hits.first()?.path.iter().map(|node| node.id).collect();
-    hits.into_iter()
-        .filter(|hit| chain.contains(&hit.target.id))
-        .max_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.depth.cmp(&b.depth)))
+    if hits.is_empty() {
+        return None;
+    }
+    let index = hits
+        .iter()
+        .position(|hit| !is_transparent_cover(hit))
+        .unwrap_or(0);
+    Some(hits.swap_remove(index))
+}
+
+fn is_transparent_cover(hit: &InspectorHit) -> bool {
+    if paints_over(hit) {
+        return false;
+    }
+    if hit
+        .target
+        .text
+        .as_deref()
+        .is_some_and(|text| !text.trim().is_empty())
+        || hit
+            .target
+            .label
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+        || hit
+            .value
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+    {
+        return false;
+    }
+    matches!(hit.target.element_type.as_str(), "view" | "div")
 }
 
 /// The innermost scroll container (overflow: scroll/auto) whose painted bounds contain
@@ -1422,6 +1526,16 @@ fn paints_over(hit: &InspectorHit) -> bool {
 /// yields hits in reverse paint order for exactly this reason, so the first hit that
 /// registers a pointer-down listener is the node the real dispatch picks. Nothing else in
 /// the tree can outrank it — not greater nesting depth, not a smaller box.
+pub fn drop_target_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<u64> {
+    let position = point(px(x), px(y));
+    let mut path = Vec::new();
+    let mut hits = Vec::new();
+    collect_hits(root, position, &mut path, &mut hits);
+    hits.iter()
+        .find(|hit| hit.events.iter().any(|event| event == "drop"))
+        .map(|hit| hit.target.id)
+}
+
 pub fn tap_target_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<TapTarget> {
     let position = point(px(x), px(y));
     let mut path = Vec::new();
@@ -1617,57 +1731,108 @@ fn style_facts(element: &ReactElement) -> Vec<String> {
     facts
 }
 
-fn overlay_label(hit: &InspectorHit, copied: bool) -> String {
-    let mut base = format!("{}#{}", hit.target.element_type, hit.target.id);
-    if let Some(test_id) = hit.target.test_id.as_ref() {
-        base.push_str(&format!(" testID={test_id}"));
-    } else if let Some(native_id) = hit.target.native_id.as_ref() {
-        base.push_str(&format!(" nativeID={native_id}"));
-    } else if let Some(identifier) = hit.target.identifier.as_ref() {
-        base.push_str(&format!(" identifier={identifier}"));
+fn selected_index(hit: &InspectorHit, walk_offset: usize) -> usize {
+    hit.path
+        .len()
+        .saturating_sub(1 + walk_offset.min(hit.path.len().saturating_sub(1)))
+}
+
+fn selected_summary(hit: &InspectorHit, walk_offset: usize) -> Option<&NodeSummary> {
+    hit.path.get(selected_index(hit, walk_offset))
+}
+
+fn selected_bounds(hit: &InspectorHit, walk_offset: usize) -> Option<Rect> {
+    if walk_offset == 0 {
+        return Some(hit.bounds);
     }
-    if let Some(label) = hit.target.label.as_ref().or(hit.target.text.as_ref()) {
-        base.push_str(&format!(" {label}"));
+    let summary = selected_summary(hit, walk_offset)?;
+    bridge::cached_layout(summary.id)
+        .map(Rect::from)
+        .filter(|bounds| bounds.is_visible())
+        .or(Some(hit.bounds))
+}
+
+fn component_name(node: &NodeSummary) -> String {
+    if let Some(source) = node.source.as_deref() {
+        let (path, _, _) = parse_source(source);
+        let base = path.rsplit('/').next().unwrap_or(&path);
+        let stem = base.rsplit_once('.').map(|(name, _)| name).unwrap_or(base);
+        if !stem.is_empty() {
+            return stem.to_string();
+        }
     }
+    node.identifier
+        .as_deref()
+        .or(node.test_id.as_deref())
+        .or(node.label.as_deref())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(node.element_type.as_str())
+        .to_string()
+}
+
+fn overlay_label(node: &NodeSummary, copied: bool) -> String {
+    let name = component_name(node);
+    let loc = node.source.as_deref().map(source_label).unwrap_or_default();
+    let base = if loc.is_empty() {
+        name
+    } else {
+        format!("{name}  {loc}")
+    };
     if copied {
-        format!("copied {base}")
+        format!("Copied  {base}")
     } else {
         base
     }
 }
 
 fn snapshot(hit: &InspectorHit) -> String {
+    snapshot_at_offset(hit, 0)
+}
+
+fn snapshot_at_offset(hit: &InspectorHit, walk_offset: usize) -> String {
+    let index = selected_index(hit, walk_offset);
+    let summary = hit.path.get(index).unwrap_or(&hit.target);
+    let bounds = if walk_offset == 0 {
+        hit.bounds
+    } else {
+        bridge::cached_layout(summary.id)
+            .map(Rect::from)
+            .filter(|bounds| bounds.is_visible())
+            .unwrap_or(hit.bounds)
+    };
     let mut lines = Vec::new();
-    lines.push("# react-native-gpui inspector snapshot".to_string());
-    lines.push(format!("id: {}", hit.target.id));
-    lines.push(format!("type: {}", hit.target.element_type));
+    push_optional(&mut lines, "source", summary.source.as_deref());
+    lines.push(format!("component: {}", component_name(summary)));
+    lines.push(format!("id: {}", summary.id));
+    lines.push(format!("type: {}", summary.element_type));
     lines.push(format!(
         "rect: {:.0},{:.0} {:.0}x{:.0}",
-        hit.bounds.x, hit.bounds.y, hit.bounds.width, hit.bounds.height
+        bounds.x, bounds.y, bounds.width, bounds.height
     ));
-    push_optional(&mut lines, "role", hit.target.role.as_deref());
-    push_optional(&mut lines, "label", hit.target.label.as_deref());
-    push_optional(&mut lines, "identifier", hit.target.identifier.as_deref());
+    push_optional(&mut lines, "role", summary.role.as_deref());
+    push_optional(&mut lines, "label", summary.label.as_deref());
+    push_optional(&mut lines, "identifier", summary.identifier.as_deref());
     push_optional(
         &mut lines,
         "identifierSource",
-        hit.target.identifier_source.as_deref(),
+        summary.identifier_source.as_deref(),
     );
-    push_optional(&mut lines, "testID", hit.target.test_id.as_deref());
-    push_optional(&mut lines, "nativeID", hit.target.native_id.as_deref());
-    push_optional(&mut lines, "propID", hit.target.prop_id.as_deref());
-    push_optional(&mut lines, "text", hit.target.text.as_deref());
-    push_optional(&mut lines, "source", hit.target.source.as_deref());
-    push_optional(&mut lines, "value", hit.value.as_deref());
-    if !hit.events.is_empty() {
-        lines.push(format!("events: {}", hit.events.join(", ")));
-    }
-    if !hit.style.is_empty() {
-        lines.push(format!("style: {}", hit.style.join(", ")));
+    push_optional(&mut lines, "testID", summary.test_id.as_deref());
+    push_optional(&mut lines, "nativeID", summary.native_id.as_deref());
+    push_optional(&mut lines, "propID", summary.prop_id.as_deref());
+    push_optional(&mut lines, "text", summary.text.as_deref());
+    if walk_offset == 0 {
+        push_optional(&mut lines, "value", hit.value.as_deref());
+        if !hit.events.is_empty() {
+            lines.push(format!("events: {}", hit.events.join(", ")));
+        }
+        if !hit.style.is_empty() {
+            lines.push(format!("style: {}", hit.style.join(", ")));
+        }
     }
     lines.push(format!(
         "path: {}",
-        hit.path
+        hit.path[..=index]
             .iter()
             .map(path_label)
             .collect::<Vec<_>>()
@@ -1802,8 +1967,12 @@ mod tests {
 
         let hit = hit_test(&root, point(px(35.0), px(30.0))).expect("expected hit");
 
-        assert_eq!(hit.target.id, 3002);
-        assert_eq!(hit.events, vec!["press"]);
+        assert_eq!(hit.target.id, 3003);
+        assert_eq!(hit.path.last().map(|node| node.id), Some(3003));
+        assert!(
+            hit.path.iter().any(|node| node.id == 3002),
+            "walk-up still reaches the pressable parent"
+        );
         bridge::retain_layout(&HashSet::new());
     }
 
@@ -1893,7 +2062,9 @@ mod tests {
         let mut button = (*node(6202, "view", Vec::new())).clone();
         button.events = Arc::from(["press".to_string()]);
         button.accessibility.label = Some("Behind".to_string());
-        let overlay = node(6203, "view", Vec::new());
+        let mut overlay = (*node(6203, "view", Vec::new())).clone();
+        overlay.style.background_color = Some(gpui::rgb(0x101010).into());
+        let overlay = Arc::new(overlay);
         let root = node(6201, "view", vec![Arc::new(button), overlay]);
         bridge::remember_layout(6201, 0.0, 0.0, 400.0, 300.0);
         bridge::remember_layout(6202, 20.0, 20.0, 200.0, 60.0);
@@ -1902,6 +2073,82 @@ mod tests {
         let hit = hit_test(&root, point(px(60.0), px(40.0))).expect("expected hit");
 
         assert_eq!(hit.target.id, 6203);
+        bridge::retain_layout(&HashSet::new());
+    }
+
+    #[test]
+    fn hit_test_selects_innermost_in_a_full_pane_tree() {
+        let _guard = inspector_test_guard();
+        bridge::retain_layout(&HashSet::new());
+        let mut label = (*node(8004, "text", Vec::new())).clone();
+        label.text = Some("see-react-lite-work-over".to_string());
+        let label = Arc::new(label);
+        let mut row = (*node(8003, "view", vec![label])).clone();
+        row.events = Arc::from([
+            "layout".to_string(),
+            "mouseEnter".to_string(),
+            "responderRelease".to_string(),
+        ]);
+        let mut pane = (*node(8002, "view", vec![Arc::new(row)])).clone();
+        pane.events = Arc::from([
+            "layout".to_string(),
+            "scroll".to_string(),
+            "mouseEnter".to_string(),
+            "responderRelease".to_string(),
+        ]);
+        pane.style.overflow = Some("scroll".to_string());
+        let mut sidebar_row = (*node(8013, "view", Vec::new())).clone();
+        sidebar_row.events = Arc::from(["layout".to_string(), "responderRelease".to_string()]);
+        sidebar_row.accessibility.label = Some("air-32".to_string());
+        let mut sidebar = (*node(8012, "view", vec![Arc::new(sidebar_row)])).clone();
+        sidebar.events = Arc::from(["layout".to_string()]);
+        sidebar.style.z_index = Some(1);
+        let mut portal = (*node(8099, "view", Vec::new())).clone();
+        portal.style.position = Some("absolute".to_string());
+        let root = node(
+            8001,
+            "view",
+            vec![Arc::new(sidebar), Arc::new(pane), Arc::new(portal)],
+        );
+        bridge::remember_layout(8001, 0.0, 0.0, 800.0, 600.0);
+        bridge::remember_layout(8012, 0.0, 0.0, 256.0, 600.0);
+        bridge::remember_layout(8013, 8.0, 80.0, 240.0, 47.0);
+        bridge::remember_layout(8002, 256.0, 0.0, 544.0, 600.0);
+        bridge::remember_layout(8003, 264.0, 120.0, 520.0, 26.0);
+        bridge::remember_layout(8004, 280.0, 124.0, 200.0, 16.0);
+        bridge::remember_layout(8099, 0.0, 0.0, 800.0, 600.0);
+
+        let pane_hit = hit_test(&root, point(px(300.0), px(130.0))).expect("expected pane hit");
+        assert_eq!(
+            pane_hit.target.id, 8004,
+            "innermost text under the pointer, not the full-pane scroller"
+        );
+
+        let sidebar_hit =
+            hit_test(&root, point(px(40.0), px(100.0))).expect("expected sidebar hit");
+        assert_eq!(
+            sidebar_hit.target.id, 8013,
+            "sidebar row under the pointer, not the z-indexed rail"
+        );
+
+        let mut inspector = InspectorState::new(true);
+        inspector.active = true;
+        inspector.hover = Some(pane_hit);
+        assert!(inspector.walk_parent());
+        assert_eq!(
+            super::selected_summary(inspector.hover.as_ref().unwrap(), inspector.walk_offset)
+                .map(|node| node.id),
+            Some(8003),
+            "first walk-up is the row"
+        );
+        assert!(inspector.walk_parent());
+        assert_eq!(
+            super::selected_summary(inspector.hover.as_ref().unwrap(), inspector.walk_offset)
+                .map(|node| node.id),
+            Some(8002),
+            "next walk-up reaches the pane"
+        );
+
         bridge::retain_layout(&HashSet::new());
     }
 
@@ -1975,6 +2222,11 @@ mod tests {
         let hit = hit_test(&root, point(px(20.0), px(20.0))).expect("expected hit");
         let copied = snapshot(&hit);
 
+        assert!(
+            !copied.contains("# react-native-gpui inspector snapshot"),
+            "header line is trimmed"
+        );
+        assert!(copied.contains("component:"));
         assert!(copied.contains("id: 2002"));
         assert!(copied.contains("role: button"));
         assert!(copied.contains("identifier: run-task-button"));
@@ -2009,7 +2261,10 @@ mod tests {
         );
         let token = token.expect("alt hold should schedule activation");
 
-        assert!(!changed);
+        assert!(
+            changed,
+            "option-down must refresh so native lists yield the pointer"
+        );
         assert!(!inspector.active);
         assert!(inspector.hover.is_none());
         assert!(!inspector.activate_after_hold(&root, token + 1, true));
@@ -2451,6 +2706,10 @@ mod tests {
         bridge::retain_layout(&HashSet::new());
         let mut inspector = InspectorState::new(true);
         assert!(!inspector.wants_input_grab());
+
+        inspector.alt_down = true;
+        assert!(inspector.wants_input_grab(), "option hold grabs input");
+        inspector.alt_down = false;
 
         inspector.active = true;
         assert!(inspector.wants_input_grab(), "active hover grabs input");

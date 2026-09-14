@@ -2142,7 +2142,7 @@ impl Render for ServiceApp {
                         }
                     },
                 ))
-                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                .capture_any_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                     let root = this.root.clone();
                     let (changed, activation_token) =
                         this.inspector.handle_mouse_move(&root, event);
@@ -2150,6 +2150,22 @@ impl Render for ServiceApp {
                         schedule_inspector_activation(cx, token);
                     }
                     if changed {
+                        cx.notify();
+                        window.refresh();
+                    }
+                }))
+                .on_scroll_wheel(
+                    cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
+                        if this.inspector.handle_scroll_wheel(event) {
+                            cx.stop_propagation();
+                            cx.notify();
+                            window.refresh();
+                        }
+                    }),
+                )
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                    if this.inspector.handle_key_down(event) {
+                        cx.stop_propagation();
                         cx.notify();
                         window.refresh();
                     }
@@ -2376,6 +2392,12 @@ pub(crate) enum Incoming {
     DebugTap {
         x: f32,
         y: f32,
+        reply: flume::Sender<serde_json::Value>,
+    },
+    DebugDropFiles {
+        x: f32,
+        y: f32,
+        paths: Vec<String>,
         reply: flume::Sender<serde_json::Value>,
     },
     /// dispatch a REAL gpui pointer event (MouseDown+MouseUp) through the window's actual
@@ -4905,6 +4927,31 @@ fn main() {
                             break;
                         }
                     }
+                    Incoming::DebugDropFiles { x, y, paths, reply } => {
+                        let applied = window_handle.update(cx, |_root, _window, cx| {
+                            pump.update(cx, |this, _cx| {
+                                if let Some(id) = inspector::drop_target_at(&this.root, x, y) {
+                                    let paths: Vec<std::path::PathBuf> =
+                                        paths.into_iter().map(std::path::PathBuf::from).collect();
+                                    crate::bridge::files_dropped(id, &paths);
+                                    let _ = reply.send(serde_json::json!({
+                                        "ok": true,
+                                        "type": "dropFiles",
+                                        "targetId": id,
+                                    }));
+                                } else {
+                                    let _ = reply.send(serde_json::json!({
+                                        "ok": false,
+                                        "type": "dropFiles",
+                                        "error": "no drop target at point",
+                                    }));
+                                }
+                            })
+                        });
+                        if applied.is_err() {
+                            break;
+                        }
+                    }
                     Incoming::DebugTap { x, y, reply } => {
                         let applied = window_handle.update(cx, |_root, window, cx| {
                             pump.update(cx, |this, cx| {
@@ -5152,6 +5199,9 @@ fn main() {
                             }
                             Incoming::DebugTap { .. } => {
                                 unreachable!("debug tap is handled with window access")
+                            }
+                            Incoming::DebugDropFiles { .. } => {
+                                unreachable!("debug dropFiles is handled with window access")
                             }
                             Incoming::DebugDragAt { phase, x, y, reply } => {
                                 let target = inspector::tap_target_at(&this.root, x, y);

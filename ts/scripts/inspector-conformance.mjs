@@ -37,7 +37,7 @@ try {
     });
 
     const snapshot = await waitForClipboardSnapshot();
-    assert(snapshot.includes("# react-native-gpui inspector snapshot"), "clipboard should contain an inspector snapshot");
+    assert(/^component:/m.test(snapshot), `snapshot should start with a component line, got:\n${snapshot}`);
     assert(/^type: text$/m.test(snapshot), `snapshot should target a text node, got:\n${snapshot}`);
     assert(/^label: Inspector$/m.test(snapshot), `snapshot should include the hovered node label, got:\n${snapshot}`);
     assert(/^testID: inspector-title$/m.test(snapshot), `snapshot should include testID, got:\n${snapshot}`);

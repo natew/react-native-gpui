@@ -43,6 +43,8 @@ mod build_identity;
 mod capture_png;
 mod debug_control;
 mod dock;
+#[cfg(target_os = "macos")]
+mod drag_out;
 mod dump;
 mod elements;
 mod frame_clock;

@@ -2,11 +2,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Bounds, Display, Element, ElementId, GlobalElementId, ImageSource,
-    IntoElement, LayoutId, Pixels, Styled, StyledImage, Window, img, px,
+    img, px, AnyElement, App, Bounds, Display, Element, ElementId, GlobalElementId, ImageSource,
+    IntoElement, LayoutId, Pixels, Styled, StyledImage, Window,
 };
 
-use crate::elements::{ReactElement, report_layout};
+use crate::elements::{report_layout, ReactElement};
 
 /// `<Image source={{ uri }} />` → a GPUI `img`. `http(s)` uris load over the
 /// network via GPUI's image cache; anything else is treated as a local file path.
@@ -59,7 +59,7 @@ impl ReactImageElement {
 
 impl Element for ReactImageElement {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    type PrepaintState = Option<gpui::Hitbox>;
 
     fn id(&self) -> Option<ElementId> {
         Some(ElementId::Integer(self.element.global_id))
@@ -96,9 +96,9 @@ impl Element for ReactImageElement {
         _: &mut (),
         window: &mut Window,
         cx: &mut App,
-    ) {
+    ) -> Self::PrepaintState {
         if self.element.style.is_display_none() {
-            return;
+            return None;
         }
 
         #[cfg(target_os = "macos")]
@@ -108,15 +108,27 @@ impl Element for ReactImageElement {
         if let Some(child) = self.child.as_mut() {
             child.prepaint(window, cx);
         }
+
+        // insert_hitbox must run in prepaint. Normal so this does not occlude a
+        // parent pressable; we also skip pointer spans so the parent still wins
+        // JS onPress. Clicks without an 8px move never start a drag.
+        #[cfg(target_os = "macos")]
+        {
+            let src = self.element.src().unwrap_or("");
+            if !src.is_empty() && bounds.size.width > px(0.0) && bounds.size.height > px(0.0) {
+                return Some(window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal));
+            }
+        }
+        None
     }
 
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
-        _: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _: &mut (),
-        _: &mut (),
+        prepaint: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -130,6 +142,10 @@ impl Element for ReactImageElement {
             window.with_element_opacity(self.element.style.opacity, |window| {
                 child.paint(window, cx);
             });
+        }
+        #[cfg(target_os = "macos")]
+        if let (Some(src), Some(hitbox)) = (self.element.src(), prepaint.as_ref()) {
+            crate::drag_out::wire_image_drag_out(src, bounds, hitbox, window);
         }
     }
 }

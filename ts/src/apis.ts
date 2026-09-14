@@ -2,6 +2,7 @@
  * Non-component RN APIs: Platform, PixelRatio, useWindowDimensions.
  */
 import { useEffect, useState } from "react";
+import { sendCommand } from "./commands";
 import { Dimensions, type ScaledSize } from "./Dimensions";
 import {
     findHostNodeId,
@@ -110,11 +111,25 @@ export const AppState = {
     removeEventListener(): void {},
 };
 
+function isAllowedExternalUrl(url: string): boolean {
+    try {
+        const parsed = new URL(url);
+        return parsed.protocol === "http:" || parsed.protocol === "https:" || parsed.protocol === "mailto:";
+    } catch {
+        return false;
+    }
+}
+
 export const Linking = {
     addEventListener: noopSub,
-    async openURL(_url: string): Promise<void> {},
-    async canOpenURL(_url: string): Promise<boolean> {
-        return false;
+    async canOpenURL(url: string): Promise<boolean> {
+        return isAllowedExternalUrl(url);
+    },
+    async openURL(url: string): Promise<void> {
+        if (!isAllowedExternalUrl(url)) {
+            throw new Error(`Linking.openURL: unsupported URL ${url}`);
+        }
+        sendCommand({ $cmd: "openURL", url });
     },
     async getInitialURL(): Promise<string | null> {
         return null;

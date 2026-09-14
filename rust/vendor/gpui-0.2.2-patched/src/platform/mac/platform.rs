@@ -348,6 +348,15 @@ impl MacPlatform {
                         // we don't have a NSTextView/NSTextField to enable them on.
                         Some(crate::OsAction::Undo) => selector("handleGPUIMenuItem:"),
                         Some(crate::OsAction::Redo) => selector("handleGPUIMenuItem:"),
+                        Some(crate::OsAction::Hide) => selector("hide:"),
+                        Some(crate::OsAction::HideOthers) => selector("hideOtherApplications:"),
+                        Some(crate::OsAction::ShowAll) => selector("unhideAllApplications:"),
+                        Some(crate::OsAction::Minimize) => selector("performMiniaturize:"),
+                        Some(crate::OsAction::Zoom) => selector("performZoom:"),
+                        Some(crate::OsAction::BringAllToFront) => selector("arrangeInFront:"),
+                        Some(crate::OsAction::ShowAbout) => {
+                            selector("orderFrontStandardAboutPanel:")
+                        }
                         None => selector("handleGPUIMenuItem:"),
                     };
 

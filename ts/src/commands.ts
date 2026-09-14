@@ -67,6 +67,7 @@ export type Command =
     | { $cmd: "dockBadge"; label: string }
     | { $cmd: "requestAttention"; critical?: boolean }
     | { $cmd: "openWindow" }
+    | { $cmd: "openURL"; url: string }
     | { $cmd: "appTint"; color: string | null }
     | {
           $cmd: "nativeContextMenu";

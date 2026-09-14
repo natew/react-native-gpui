@@ -20,7 +20,19 @@ use gpui_component::theme::{Theme, ThemeMode};
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 
-actions!(rngpui, [Quit]);
+actions!(
+    rngpui,
+    [
+        Quit,
+        Hide,
+        HideOthers,
+        ShowAll,
+        Minimize,
+        Zoom,
+        BringAllToFront,
+        ShowAbout
+    ]
+);
 
 #[derive(Clone, PartialEq, Eq, Deserialize, gpui::Action)]
 #[action(namespace = rngpui, no_json)]
@@ -2350,6 +2362,10 @@ pub(crate) enum Incoming {
     },
     /// open a new native window by spawning a new process of the same binary.
     OpenWindow,
+    /// open http/https/mailto in the system default handler.
+    OpenUrl {
+        url: String,
+    },
     DebugDump {
         reply: flume::Sender<serde_json::Value>,
     },
@@ -2699,6 +2715,12 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
                 critical: v.get("critical").and_then(|x| x.as_bool()).unwrap_or(false),
             }),
             "openWindow" => Some(Incoming::OpenWindow),
+            "openURL" => {
+                let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("");
+                Some(Incoming::OpenUrl {
+                    url: url.to_string(),
+                })
+            }
             // An absent/unparseable color clears the tint back to raw glass, which is
             // also what the app wants when it has no opinion — so this deliberately
             // does NOT reject the command on a bad color.
@@ -2742,13 +2764,94 @@ fn install_app_commands(config: AppCommandConfig, cx: &mut App) {
     };
     cx.bind_keys(bindings);
 
-    let mut menus = vec![Menu {
-        name: "react-native-gpui".into(),
-        items: vec![MenuItem::action("Quit", Quit)],
-    }];
-    menus.extend(standard_edit_menus());
+    let mut menus = mac_chrome_menus();
     menus.extend(config.menus.into_iter().map(build_app_menu));
     cx.set_menus(menus);
+}
+
+fn app_menu_name() -> String {
+    #[cfg(target_os = "macos")]
+    if let Some(name) = macos_bundle_display_name() {
+        return name;
+    }
+    std::env::var("RNGPUI_DISPLAY_NAME")
+        .ok()
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            std::env::var("RNGPUI_APP_NAME")
+                .ok()
+                .filter(|name| !name.is_empty())
+        })
+        .unwrap_or_else(|| "Team Machine".into())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_bundle_display_name() -> Option<String> {
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSString;
+    use objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        let bundle: id = msg_send![class!(NSBundle), mainBundle];
+        if bundle == nil {
+            return None;
+        }
+        for key in ["CFBundleDisplayName", "CFBundleName"] {
+            let ns_key = NSString::alloc(nil).init_str(key);
+            let value: id = msg_send![bundle, objectForInfoDictionaryKey: ns_key];
+            if value == nil {
+                continue;
+            }
+            let ptr: *const std::os::raw::c_char = msg_send![value, UTF8String];
+            if ptr.is_null() {
+                continue;
+            }
+            let name = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+fn mac_chrome_menus() -> Vec<Menu> {
+    use gpui::OsAction;
+    let name = app_menu_name();
+    vec![
+        Menu {
+            name: name.clone().into(),
+            items: vec![
+                MenuItem::os_action(format!("About {name}"), ShowAbout, OsAction::ShowAbout),
+                MenuItem::separator(),
+                MenuItem::action(
+                    "Settings…",
+                    InvokeCommand {
+                        id: "settings.open".into(),
+                    },
+                ),
+                MenuItem::separator(),
+                MenuItem::os_action(format!("Hide {name}"), Hide, OsAction::Hide),
+                MenuItem::os_action("Hide Others", HideOthers, OsAction::HideOthers),
+                MenuItem::os_action("Show All", ShowAll, OsAction::ShowAll),
+                MenuItem::separator(),
+                MenuItem::action(format!("Quit {name}"), Quit),
+            ],
+        },
+        standard_edit_menu(),
+        Menu {
+            name: "Window".into(),
+            items: vec![
+                MenuItem::os_action("Minimize", Minimize, OsAction::Minimize),
+                MenuItem::os_action("Zoom", Zoom, OsAction::Zoom),
+                MenuItem::separator(),
+                MenuItem::os_action(
+                    "Bring All to Front",
+                    BringAllToFront,
+                    OsAction::BringAllToFront,
+                ),
+            ],
+        },
+    ]
 }
 
 // The standard macOS Edit menu (+ Select All). Without it the app has no
@@ -2765,10 +2868,10 @@ fn install_app_commands(config: AppCommandConfig, cx: &mut App) {
 // selector down the responder chain to the first responder — the focused
 // WKWebView — which copies the page selection natively. Composer TextInput copy
 // stays unchanged: when it's focused the context-scoped keymap binding wins.
-fn standard_edit_menus() -> Vec<Menu> {
+fn standard_edit_menu() -> Menu {
     use gpui::OsAction;
     use gpui_component::input::{Copy, Cut, Paste, SelectAll};
-    vec![Menu {
+    Menu {
         name: "Edit".into(),
         items: vec![
             MenuItem::os_action("Cut", Cut, OsAction::Cut),
@@ -2777,7 +2880,14 @@ fn standard_edit_menus() -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
         ],
-    }]
+    }
+}
+
+fn allowed_external_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    matches!(parsed.scheme(), "http" | "https" | "mailto")
 }
 
 fn app_command_key_bindings(
@@ -3197,16 +3307,29 @@ fn main() {
 
         // quit on ⌘Q and when the last window closes (X button).
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+        cx.on_action(|_: &Hide, cx: &mut App| cx.hide());
+        cx.on_action(|_: &HideOthers, cx: &mut App| cx.hide_other_apps());
+        cx.on_action(|_: &ShowAll, cx: &mut App| cx.unhide_other_apps());
+        cx.on_action(|_: &Minimize, cx: &mut App| {
+            if let Some(handle) = cx.active_window() {
+                let _ = handle.update(cx, |_, window, _| window.minimize_window());
+            }
+        });
+        cx.on_action(|_: &Zoom, cx: &mut App| {
+            if let Some(handle) = cx.active_window() {
+                let _ = handle.update(cx, |_, window, _| window.zoom_window());
+            }
+        });
         cx.on_action(|action: &InvokeCommand, _cx: &mut App| {
             bridge::command(&action.id);
         });
-        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-        let mut initial_menus = vec![Menu {
-            name: "react-native-gpui".into(),
-            items: vec![MenuItem::action("Quit", Quit)],
-        }];
-        initial_menus.extend(standard_edit_menus());
-        cx.set_menus(initial_menus);
+        cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-h", Hide, None),
+            KeyBinding::new("alt-cmd-h", HideOthers, None),
+            KeyBinding::new("cmd-m", Minimize, None),
+        ]);
+        cx.set_menus(mac_chrome_menus());
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -4745,6 +4868,15 @@ fn main() {
                             }
                         }
                     }
+                    Incoming::OpenUrl { url } => {
+                        if !allowed_external_url(&url) {
+                            eprintln!("[rngpui] openURL refused {url}");
+                        } else if std::env::var_os("RNGPUI_TEST_MODE").is_some() {
+                            eprintln!("[rngpui] openURL {url}");
+                        } else if cx.update(|cx| cx.open_url(&url)).is_err() {
+                            break;
+                        }
+                    }
                     Incoming::DebugTap { x, y, reply } => {
                         let applied = window_handle.update(cx, |_root, window, cx| {
                             pump.update(cx, |this, cx| {
@@ -5107,7 +5239,8 @@ fn main() {
                             | Incoming::AppCommands(_)
                             | Incoming::DockBadge { .. }
                             | Incoming::RequestAttention { .. }
-                            | Incoming::OpenWindow => unreachable!(),
+                            | Incoming::OpenWindow
+                            | Incoming::OpenUrl { .. } => unreachable!(),
                         });
                         if applied.is_err() {
                             break; // view dropped
@@ -5532,6 +5665,25 @@ mod tests {
         match parse_incoming(&json!({ "$cmd": "clipboardWrite", "text": "ab-session" })) {
             Some(Incoming::ClipboardWrite { text }) => assert_eq!(text, "ab-session"),
             _ => panic!("expected clipboardWrite command"),
+        }
+    }
+
+    #[test]
+    fn allowed_external_url_accepts_http_https_mailto() {
+        assert!(super::allowed_external_url("https://example.com/a"));
+        assert!(super::allowed_external_url("http://127.0.0.1:4280"));
+        assert!(super::allowed_external_url("mailto:nate@example.com"));
+        assert!(!super::allowed_external_url("file:///tmp/secret"));
+        assert!(!super::allowed_external_url("javascript:alert(1)"));
+        assert!(!super::allowed_external_url("ftp://example.com/a"));
+        assert!(!super::allowed_external_url("not a url"));
+    }
+
+    #[test]
+    fn parses_open_url_command() {
+        match parse_incoming(&json!({ "$cmd": "openURL", "url": "https://example.com" })) {
+            Some(Incoming::OpenUrl { url }) => assert_eq!(url, "https://example.com"),
+            _ => panic!("expected openURL command"),
         }
     }
 

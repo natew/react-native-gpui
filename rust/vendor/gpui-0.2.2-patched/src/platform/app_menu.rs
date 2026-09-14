@@ -225,6 +225,27 @@ pub enum OsAction {
 
     /// The 'redo' action
     Redo,
+
+    /// Hide the application (`hide:`)
+    Hide,
+
+    /// Hide other applications (`hideOtherApplications:`)
+    HideOthers,
+
+    /// Show all applications (`unhideAllApplications:`)
+    ShowAll,
+
+    /// Minimize the key window (`performMiniaturize:`)
+    Minimize,
+
+    /// Zoom the key window (`performZoom:`)
+    Zoom,
+
+    /// Bring all windows of this app forward (`arrangeInFront:`)
+    BringAllToFront,
+
+    /// The standard About panel (`orderFrontStandardAboutPanel:`)
+    ShowAbout,
 }
 
 pub(crate) fn init_app_menus(platform: &dyn Platform, cx: &App) {

@@ -29,6 +29,10 @@ import {
     type TextInputHandle,
 } from "../src/index";
 
+// every terminal line carries this, so a failure says how long the drive had been running
+// rather than leaving it to be inferred from the driver's own budget.
+const startedAt = Date.now();
+
 const C = {
     bg: "#f3f5f8",
     panel: "#ffffff",
@@ -54,27 +58,51 @@ function App() {
     const changeCountRef = useRef(0);
     const keyPressCountRef = useRef(0);
     const inputRef = useRef<TextInputHandle | null>(null);
+    const focusedRef = useRef(false);
+    const submittedRef = useRef("");
+    const stallTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
     const expected = process.env.RNGPUI_INPUT_EXPECT;
 
+    // The driver owns the budget for the whole run; this bounds SILENCE. A deadline measured
+    // from mount is a claim about how fast the machine runs four CUA commands plus the window
+    // and AX readiness wait, and it is wrong on a busy one: measured, the drive's submit lands
+    // at ~4.9s against a 5s clock, so 7 of 25 runs lost the submit to the deadline rather than
+    // to the engine, every one of them expiring at 5007-5011ms. Re-arming on every observed
+    // event means a fixture that is being driven never times out, while one that is wedged
+    // mid-drive still dies.
+    //
+    // 10s of silence, deliberately longer than the driver's 8s per-step wait and shorter than
+    // its 20s bound for the run: a gap between two of the fixture's own events contains a
+    // whole cua-driver process spawn, so the fixture must not give up before the driver does.
+    // The step this really covers is the last one, a plain Return, which is the only action
+    // the driver sends without a wait of its own.
+    function armStall() {
+        if (!expected) return;
+        if (stallTimerRef.current) clearTimeout(stallTimerRef.current);
+        stallTimerRef.current = setTimeout(() => {
+            console.error(
+                `CONFORMANCE input FAIL stall elapsedMs=${Date.now() - startedAt} focused=${focusedRef.current} draft=${JSON.stringify(draftRef.current)} submitted=${JSON.stringify(submittedRef.current)}`,
+            );
+            process.exit(1);
+        }, 10_000);
+    }
+
     useEffect(() => {
-        let focusAttempts = 0;
+        // keep asking until the input reports focus. a fixed ten attempts at 50ms can all
+        // land before the engine will accept one, which leaves nothing focused and makes the
+        // driver's first keystroke go nowhere. the driver waits for the "focused" line before
+        // typing, so this must not stop early.
         const focusTimer = setInterval(() => {
-            focusAttempts += 1;
+            if (focusedRef.current) {
+                clearInterval(focusTimer);
+                return;
+            }
             inputRef.current?.focus();
-            if (focusAttempts >= 10) clearInterval(focusTimer);
         }, 50);
-        let failTimer: ReturnType<typeof setTimeout> | undefined;
-        if (expected) {
-            failTimer = setTimeout(() => {
-                console.error(
-                    `CONFORMANCE input FAIL timeout draft=${JSON.stringify(draftRef.current)} submitted=${JSON.stringify(submitted)}`,
-                );
-                process.exit(1);
-            }, 5000);
-        }
+        armStall();
         return () => {
             clearInterval(focusTimer);
-            if (failTimer) clearTimeout(failTimer);
+            if (stallTimerRef.current) clearTimeout(stallTimerRef.current);
         };
     }, []);
 
@@ -83,6 +111,7 @@ function App() {
         changeCountRef.current += 1;
         setDraft(text);
         setChangeCount((count) => count + 1);
+        armStall();
         console.log(`CONFORMANCE input change value=${JSON.stringify(text)}`);
     }
 
@@ -91,7 +120,8 @@ function App() {
         if (!text.trim()) return;
         submitCountRef.current += 1;
         setSubmitEventText(eventText ?? "");
-        setSubmitted(`${source}:${text}`);
+        submittedRef.current = `${source}:${text}`;
+        setSubmitted(submittedRef.current);
         setSubmitCount((count) => count + 1);
         updateDraft("");
         console.log(`CONFORMANCE input enter-submit PASS source=${source} text=${JSON.stringify(text)}`);
@@ -104,7 +134,7 @@ function App() {
                 keyPressCountRef.current >= enterKeyCountRef.current &&
                 changeCountRef.current > 0
             ) {
-                console.log("CONFORMANCE input all PASS");
+                console.log(`CONFORMANCE input all PASS elapsedMs=${Date.now() - startedAt}`);
                 setTimeout(() => process.exit(0), 50);
             } else {
                 console.error(
@@ -123,6 +153,7 @@ function App() {
         const key = typed.nativeEvent?.key;
         if (typed.nativeEvent?.isComposing) return;
         keyPressCountRef.current += 1;
+        armStall();
         console.log(`CONFORMANCE input keyPress key=${JSON.stringify(key)}`);
         if (key !== "Enter") return;
         enterKeyCountRef.current += 1;
@@ -140,6 +171,20 @@ function App() {
                         ref={inputRef}
                         value={draft}
                         onChangeText={updateDraft}
+                        onFocus={() => {
+                            armStall();
+                            if (focusedRef.current) return;
+                            focusedRef.current = true;
+                            console.log("CONFORMANCE input focused");
+                        }}
+                        onBlur={() => {
+                            // a posted keystroke can be dispatched nowhere, and "the engine had
+                            // already taken focus off the input" is the one explanation that
+                            // puts that in the engine rather than in the harness. logging it
+                            // is what makes a failing run answer that question by itself.
+                            focusedRef.current = false;
+                            console.log(`CONFORMANCE input blur elapsedMs=${Date.now() - startedAt}`);
+                        }}
                         onKeyPress={onKeyPress}
                         onSubmitEditing={(event) => submit("submitEditing", event.nativeEvent.text)}
                         multiline

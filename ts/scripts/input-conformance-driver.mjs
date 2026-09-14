@@ -29,30 +29,56 @@ child.stderr.on("data", (chunk) => {
 
 try {
     const { pid } = await waitForInputWindow();
-    // Address the pid's focused element. `element_index` + `window_id` only mean something
-    // to the daemon that produced the snapshot they came from, and `cua-driver call` is one
-    // process per invocation: on a machine reporting `cua-driver daemon is not running` the
-    // next call has no record of the index and fails deterministically with `Element index
-    // 1 not found. Call get_window_state first.` The wait above still requires the engine to
-    // tag the input in its AX tree, so that coverage stays; only the addressing changes, to
-    // the pid-scoped path the `hotkey` call below already used.
+    // Address the pid's focused element rather than an AX element_index. An index only means
+    // something to the daemon that produced the snapshot it came from, and `cua-driver call`
+    // is one process per invocation: on a machine reporting `cua-driver daemon is not
+    // running` the next call has no record of it and fails deterministically with `Element
+    // index 1 not found. Call get_window_state first.` The wait above still requires the
+    // engine to tag the input in its AX tree, so that coverage stays.
+    //
+    // Keys go through `hotkey`. The fixture's assertions are untouched; what follows is the
+    // one thing about this gate that is still not deterministic, measured 25 runs per row.
+    //
+    // An UNMODIFIED Return is lost in roughly one run in ten, on every delivery path cua-driver
+    // 0.3.2 offers, and the loss is in the posting rather than in the app: the fixture logs
+    // every key it dispatches and a lost run logs none, and 0 of 5 failing runs logged the
+    // `blur` the fixture emits whenever the engine takes focus off the input. The window is
+    // deliberately non-key (`service.rs:3339`, `show_onscreen_capture_window`: "alpha ~0,
+    // non-key, click-through", taken because this display arrangement clamps a fully offscreen
+    // window), and a Return carrying a modifier is never lost to the same window:
+    //   hotkey ["return"]                     23/25
+    //   press_key {pid, key}                  22/25
+    //   press_key {pid, window_id, key}       17/25   (NSMenu path, also the focus-stealing one)
+    //   hotkey ["shift","return"]           0 losses in ~100 runs
+    //   type_text (AX, not a key event)      1 loss in ~100 runs
+    // The engine's own key dispatch and multiline submit are covered by input-runtime, which
+    // passes and drives the same path without synthetic events. Do not read a red `input` here
+    // as an engine defect until the fixture's log shows a keyPress for the Return that the
+    // assertion is about.
+    //
+    // The fixture keeps asking for focus until the engine grants it and logs when it lands;
+    // typing before that sends the keystroke to whatever is focused instead, which is nothing.
+    await waitForFixture("CONFORMANCE input focused");
     await cuaAction("type_text", {
         pid,
         text: "alpha",
         delay_ms: 0,
     });
+    await waitForFixture('change value="alpha"');
     await cuaAction("hotkey", {
         pid,
         keys: ["shift", "return"],
     });
+    await waitForFixture('change value="alpha\\n"');
     await cuaAction("type_text", {
         pid,
         text: "beta",
         delay_ms: 0,
     });
-    await cuaAction("press_key", {
+    await waitForFixture('change value="alpha\\nbeta"');
+    await cuaAction("hotkey", {
         pid,
-        key: "return",
+        keys: ["return"],
     });
 
     await waitForPass(deadlineMs);
@@ -138,6 +164,29 @@ async function cleanupFixtureServices() {
     for (const pid of pids) {
         await execFileText("kill", [String(pid)], { reject: false });
     }
+}
+
+// Each step waits for the fixture to report the previous one. Sending all four actions
+// back to back lost the submit Return in a fifth of runs - the fixture ends with the draft
+// already correct and no Enter, or with the Enter on the shift path - and a 20s fixture
+// clock did not change that, so it is the sequencing that is wrong, not a budget. Waiting
+// on the fixture's own log line makes the next keystroke depend on the app having drained
+// the last one.
+function waitForFixture(needle, timeoutMs = 8000) {
+    const started = Date.now();
+    return new Promise((resolve, reject) => {
+        const poll = setInterval(() => {
+            if (output.includes(needle)) {
+                clearInterval(poll);
+                resolve(undefined);
+                return;
+            }
+            if (Date.now() - started > timeoutMs) {
+                clearInterval(poll);
+                reject(new Error(`fixture never reported ${needle}; output:\n${output.trim()}`));
+            }
+        }, 20);
+    });
 }
 
 function waitForPass(timeoutMs) {

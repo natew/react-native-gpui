@@ -60,24 +60,26 @@ function rgbAt(img, x, y) {
     return { r: img.rgba[i], g: img.rgba[i + 1], b: img.rgba[i + 2], a: img.rgba[i + 3] };
 }
 
-// does field A show a keystroke's own result yet? field A is authored empty, so strong
-// ink in its text band that is not the accent caret can only be a typed glyph. This is
-// the freshness signal for the capture: a frame carrying it was composited after the
-// keystroke, which is what makes its caret a statement about typing rather than about
-// the idle blink.
-function fieldHasTypedGlyph(img, scale, fieldLuma) {
+// how much typed text field A shows: the number of glyph pixels in its text band, where a
+// glyph pixel is one that is neither the field bg nor the accent caret. Field A is authored
+// empty with no placeholder, so ink there is typed characters and nothing else. A COUNT
+// rather than a yes/no: every `type` command appends one character at the caret, so the ink
+// is a counter for how much typing this frame has seen, which is what lets the burst tell
+// one keystroke's frame from the next.
+function fieldTypedInk(img, scale, fieldLuma) {
     const y0 = Math.round(L.fieldA.y * scale);
     const h = Math.round(L.fieldA.height * scale);
     const cLo = Math.round((L.fieldA.x + L.padLeft) * scale);
-    const cHi = Math.round((L.fieldA.x + L.padLeft + 40) * scale);
+    const cHi = Math.round((L.fieldA.x + L.fieldA.width - 10) * scale);
+    let ink = 0;
     for (let r = 4; r < h - 4; r++) {
         for (let c = cLo; c < cHi; c++) {
             const p = rgbAt(img, c, y0 + r);
             if (p.a < 150 || isBlueish(p.r, p.g, p.b)) continue;
-            if (Math.abs(luma(p.r, p.g, p.b) - fieldLuma) > 40) return true;
+            if (Math.abs(luma(p.r, p.g, p.b) - fieldLuma) > 40) ink++;
         }
     }
-    return false;
+    return ink;
 }
 
 // vertical ink center: for the given field, scan a horizontal band and find the
@@ -230,9 +232,11 @@ async function runAppearance(appearance) {
     // blanked. The old fixed 3-sample window read that lag as "the caret blanked while
     // typing" and failed a build whose caret behavior was correct.
     //
-    // So the burst types repeatedly and a capture is believed only once it shows the
-    // glyph, with the lagging frames skipped rather than read as a caret state.
+    // So the burst types repeatedly and a capture is believed only once it shows MORE typing
+    // than the last believed one, with the lagging frames skipped rather than read as a
+    // caret state.
     const typeFrames = [];
+    const typeInks = [];
     let typeSkipped = 0;
     if (!exited && baseline && existsSync(socketPath)) {
         // field A is empty, so a clean patch on its right side is its own field bg.
@@ -241,7 +245,20 @@ async function runAppearance(appearance) {
         // launch (RNGPUI_EXAMPLE_TIMEOUT_MS), and a burst killed mid-flight would read as
         // a slow capture timer rather than as the timeout it is.
         const typeDeadline = Date.now() + 4500;
-        while (Date.now() < typeDeadline && typeFrames.length < 8 && !exited) {
+        // Each command appends one character, so the field's ink is a generation counter: a
+        // frame is believed only if it carries strictly more typed ink than the last
+        // believed frame. Copying one post-keystroke PNG eight times therefore believes the
+        // first and rejects the seven copies, which is the point. The old test asked only
+        // whether ANY glyph was present, so eight copies of a single frame — a stalled
+        // capture timer, or one keystroke and seven reads of it — claimed eight solid-caret
+        // observations and proved nothing about a burst. Starting the count at the
+        // pre-typing baseline rather than at zero keeps the comparison honest if anything
+        // static ever paints inside the field's text band.
+        let believedInk = fieldTypedInk(baseline, scale, fieldLumaA);
+        // commands are capped as well as frames: a burst that ran long enough would fill the
+        // field and start pushing the text past its right edge, where further typing stops
+        // adding ink and the counter would stall.
+        for (let sent = 0; sent < 20 && Date.now() < typeDeadline && typeFrames.length < 8 && !exited; sent++) {
             try {
                 await requestSocket(socketPath, { $cmd: "type", text: "x" });
             } catch (e) {
@@ -259,16 +276,23 @@ async function runAppearance(appearance) {
                 copyFileSync(capturePath, snap);
                 frame = readPng(snap);
             } catch {}
-            if (!frame || !fieldHasTypedGlyph(frame, scale, fieldLumaA)) {
+            if (!frame) {
                 typeSkipped += 1;
                 continue;
             }
+            const ink = fieldTypedInk(frame, scale, fieldLumaA);
+            if (ink <= believedInk) {
+                typeSkipped += 1;
+                continue;
+            }
+            believedInk = ink;
             typeFrames.push(frame);
+            typeInks.push(ink);
         }
     }
 
     child.kill("SIGTERM");
-    return { blinkFrames, typeFrames, typeSkipped };
+    return { blinkFrames, typeFrames, typeInks, typeSkipped };
 }
 
 function assertAppearance(appearance, captures) {
@@ -313,15 +337,20 @@ function assertAppearance(appearance, captures) {
         `on=${on.totalBlue} off=${off.totalBlue} bluePx`);
 
     // 1e. caret SOLID WHILE TYPING: each keystroke re-arms the 500ms blink pause, so the
-    //     caret must be present in EVERY frame the burst believes (see runAppearance: a
-    //     frame is only believed once it shows the keystroke's own glyph). Four believed
-    //     frames is the precondition — fewer means the capture could not keep up with the
-    //     burst, which is a fact about the machine and is reported as such rather than
-    //     passed on the strength of one lucky frame.
+    //     caret must be present in EVERY frame the burst believes. Four believed frames is
+    //     the precondition — fewer means the capture could not keep up with the burst, which
+    //     is a fact about the machine and is reported as such rather than passed on the
+    //     strength of one lucky frame.
+    //
+    //     A believed frame is one that shows strictly more typed ink than the frame believed
+    //     before it (see runAppearance), so the ink sequence is strictly increasing by
+    //     construction and the eight caret observations below are eight different amounts of
+    //     typed text, not one PNG read eight times.
     const typeMetrics = typeFrames.map((f) => caretMetrics(f, scale));
     const typeBlanks = typeMetrics.filter((m) => m.totalBlue === 0).length;
     ok(`${appearance} caret stays solid while typing`, typeMetrics.length >= 4 && typeBlanks === 0,
-        `${typeMetrics.length} believed frames (${captures.typeSkipped} skipped as pre-keystroke), ` +
+        `${typeMetrics.length} believed frames (${captures.typeSkipped} skipped as not a later ` +
+            `generation), ink [${captures.typeInks.join(", ")}], ` +
             `bluePx [${typeMetrics.map((m) => m.totalBlue).join(", ")}]`);
 
     // pick the on-frame for the static text/centering checks (any frame works for text,

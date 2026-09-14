@@ -626,7 +626,9 @@ control that fails when the collect is replaced by `return 0`.
   `describe`, `webview-overlay`, `drive`, `reanimated-scroll`, `reanimated`, `sustained-reanimated`,
   `scroll-performance` (`p95=7.83ms latencyP95=13.13ms moved=1530px`), `presentation-pacing`
   (`paintP50=8.32ms paintP95=9.23ms presentOver12.5=1`), `native-scroll-react-stall` (3/3 after
-  `28da8b4`), `input-visual` (112/112 at 16-way after `984d01a`). FAIL and fixed: `card-corner-shadow` (blank capture, `06ac787`), `input-runtime` (stale
+  `28da8b4`), `input-visual` (112/112 at 16-way after `984d01a`; the freshness check was made
+  stricter afterwards, and that revision is 6/6 sequential runs, 12 appearance-runs, not re-measured at
+  16-way). FAIL and fixed: `card-corner-shadow` (blank capture, `06ac787`), `input-runtime` (stale
   scale, `3cfab6c`), `native-scroll-react-stall` (window race, `28da8b4`). FAIL and open in another
   lane: `dialog-reanimated`. FAIL and open here, resolved rather than fixed: `legend-list-100k`, in
   its own section above (no engine defect proven; the footprint budget's metric cannot decide
@@ -637,25 +639,50 @@ control that fails when the collect is replaced by `return 0`.
   them at `rust/vendor/gpui-0.2.2-patched/src/window.rs:2043` and `:2182`. A `rust/src`-only search
   says they have no consumer, which is wrong, so search `rust/vendor` before calling any probe env
   var dead.
-- `npm test` is 42 tasks and now passes all 42. `input` was the last red, and it is fixed: the driver
-  resolved an AX element index from `get_window_state`, then the next `cua-driver call type_text` failed
-  with `Element index 1 not found. Call get_window_state first.` Cause: `cua-driver call` is one process
-  per invocation, and an `element_index` only means something to the daemon that produced the snapshot
-  it came from. This machine reports `cua-driver daemon is not running`, so the index cannot survive to
-  the next invocation and the call fails every time. Fixed by addressing the pid's focused element
-  instead of an index, which `type_text` documents as the default path and which the `hotkey` call in
-  the same sequence already used. The AX coverage is kept: the readiness wait still requires the engine
-  to tag the input `[element_index N]` in its tree, and the fixture's assertions (exact `alpha\nbeta`,
-  two Enter keypresses, exactly one submit, `changeCount > 0`) are untouched.
-  RAN: pre-fix `input` failed in the suite; post-fix 22 of 23 standalone runs pass with no daemon
-  running, and the suite is 42/42. The one failure was a `draft=""` fixture timeout in the batch that
-  ran immediately after `cua-driver stop`, and a stale `cua-driver call press_key` still carrying
-  `element_index` from the pre-fix batch was live at that moment (its argv proves the provenance).
-  INFERRED, not proven, that the stale process is what dropped that run's input. The daemon is not
-  needed: a control run with the daemon deliberately absent and the daemon up both pass, so the
-  addressing was the only broken variable. An earlier version of this bullet claimed the AX tree "reads
-  empty" here, which is wrong, `get_window_state` returns the tagged input, and proposed pixel driving
-  as the route; neither was necessary.
+- `npm test` is 42 tasks. `input` was the last red and is now green in three consecutive full-suite
+  runs, but this bullet used to claim "22 of 23 standalone runs pass, and the suite is 42/42", and that
+  claim was not sound: an independent review measured 7 passes in 12 standalone runs and 41/42 on the
+  suite. Both numbers are retracted. What is actually true:
+  **The AX index was one of three defects, not the defect.** The driver resolved an AX element index
+  from `get_window_state` and the next `cua-driver call type_text` failed with `Element index 1 not
+  found. Call get_window_state first.` Cause: `cua-driver call` is one process per invocation, and an
+  `element_index` only means something to the daemon that produced the snapshot it came from. This
+  machine reports `cua-driver daemon is not running`, so the index cannot survive to the next
+  invocation. Fixed by addressing the pid's focused element, which `type_text` documents as the default
+  path. The AX coverage is kept: the readiness wait still requires the engine to tag the input
+  `[element_index N]` in its tree.
+  **Sequencing was the second.** All four actions were sent back to back, so a keystroke could arrive
+  before the app had drained the previous one. Each step now waits for the fixture's own log line
+  (`change value="alpha"`, then `change value="alpha\n"`, then `change value="alpha\nbeta"`) before the
+  next is sent, and the first keystroke waits for the fixture to report focus. The fixture keeps asking
+  for focus until the engine grants it and logs when it lands, because the old fixed ten attempts at
+  50ms could all expire before the engine accepted one, leaving the first `type_text` with nothing to
+  write into.
+  **The fixture's deadline was the third, and it was the largest.** It was 5000ms measured from mount,
+  which is a claim about how fast the machine runs four CUA commands plus the window and AX readiness
+  wait. Measured with the driver's action timings instrumented: the drive's submit lands at about 4.9s,
+  and 7 of 25 runs lost the submit to that deadline rather than to the engine, every one of them
+  expiring at `elapsedMs=5007-5011`. It now bounds SILENCE: every keypress, change, or focus re-arms a
+  10s timer, deliberately longer than the driver's 8s per-step wait and shorter than its 20s bound for
+  the run, so a fixture that is being driven never times out and a wedged one still dies with
+  `draft` and `submitted` in the message. RAN: 24 of 25 standalone runs pass at this revision.
+  **What is still not deterministic, and why it is not the engine.** An UNMODIFIED Return is lost by
+  the harness in roughly one run in ten, on every delivery path cua-driver 0.3.2 offers, measured 25
+  runs per row: `hotkey ["return"]` 23/25, `press_key {pid,key}` 22/25, `press_key {pid,window_id,key}`
+  17/25 (the NSMenu path, which also steals frontmost). The same window never loses a Return that
+  carries a modifier: `hotkey ["shift","return"]` 0 losses in about 100 runs, and `type_text` (AX, not
+  a key event) 1 loss in about 100. It is the posting, not the app: the fixture logs every key it
+  dispatches, a lost run logs none of them, and 0 of 5 failing runs logged the `blur` the fixture emits
+  whenever the engine takes focus off the input. The window is deliberately non-key
+  (`service.rs:3339`, `show_onscreen_capture_window`: "alpha ~0, non-key, click-through", taken because
+  this display arrangement clamps a fully offscreen window), and the one action with no engine-side
+  alternative is a bare Return. Closing it needs a foreground window, which the conformance suite
+  forbids, or a retry the driver will not carry, because a redelivery loop would also mask the engine
+  regression the gate exists to catch. The engine's own key dispatch and multiline submit are covered
+  by `input-runtime`, which drives the same path without synthetic events and passes.
+  The daemon is not needed: a control run with the daemon deliberately absent and the daemon up both
+  pass. An earlier version of this bullet claimed the AX tree "reads empty" here, which is wrong,
+  `get_window_state` returns the tagged input; neither the daemon nor pixel driving was necessary.
 - `input-visual`: resolved (`984d01a`), and the resolution is a gate defect, not an engine one. The
   earlier note here said it had failed once in six suite runs and I could not characterize it. It
   reproduces at 16-way concurrency (the suite's own profile, eight tasks each opening a GPUI window):
@@ -673,13 +700,31 @@ control that fails when the collect is replaced by `return 0`.
   with the caret blanked, so every blank one was a composite from before the keystroke. Some carried
   an mtime from BEFORE the command was sent.
   **Fix.** Frame content is now the condition instead of the clock. The burst types repeatedly and a
-  capture is believed only once it shows the glyph; each keystroke re-arms the 500ms pause, so the
-  caret cannot legitimately blank inside the burst. That is 8 believed frames instead of 3 fixed
-  samples, each re-checked. Two things the investigation forced: the caret band was a 40px strip at
-  the field origin, and the driver's `type` inserts at the caret, so it walked out of the strip
-  (`replace` appends; measured 18px -> 91px over ten commands) - the band is now the field's text
-  area. And fewer than 4 believed frames reports that the capture could not keep up with the burst
+  capture is believed only once it shows MORE typing than the last believed one; each keystroke re-arms
+  the 500ms pause, so the caret cannot legitimately blank inside the burst. That is 8 believed frames
+  instead of 3 fixed samples, each re-checked. Two things the investigation forced: the caret band was
+  a 40px strip at the field origin, and the driver's `type` inserts at the caret, so it walked out of
+  the strip (`replace` appends; measured 18px -> 91px over ten commands) - the band is now the field's
+  text area. And fewer than 4 believed frames reports that the capture could not keep up with the burst
   rather than passing on one lucky frame.
+  **A review then showed that freshness check was too weak**, which is the second half of the fix. Every
+  command typed the same `x` and the test only asked whether ANY glyph was present, so one
+  post-keystroke PNG copied eight times claimed eight solid-caret observations: a stalled capture timer
+  or a single keystroke read eight times would both have passed. The measure is now the field's typed
+  ink, the count of glyph pixels in field A's text band, and it starts at the pre-typing baseline rather
+  than at zero. Each command appends one character, so a frame is believed only if it carries strictly
+  more ink than the last believed frame and the ink sequence is a generation counter by construction.
+  Typing is capped at 20 commands so the text cannot reach the field's right edge, where further typing
+  would stop adding ink. RAN 6 consecutive runs, 6 passes, 12 appearance-runs. The quiet case, dark:
+  `ink [144, 288, 432, 576, 721, 866, 1011, 1155]`, 8 believed frames, 0 skipped; light: `[117, 234,
+  350, 466, 582, 696, 810, 927]`, 8 believed, 0 skipped, one glyph's worth of pixels per step. The
+  loaded case is the one that shows what the counter is for: one run reported
+  `ink [144, 432, 721, 866, 1155, 1299, 1443, 1733]` with 5 skipped, so a believed frame can carry two
+  or three glyphs when the capture misses a generation, and the sequence is still strictly increasing
+  because it counts typing rather than reads. **Negative control**, one variable, the burst typing `x`
+  on the first command and nothing after: `1 believed frames (19 skipped as not a later generation),
+  ink [144]` (dark) and `ink [117]` (light), gate FAILS. The old code believed all nineteen copies.
+  Control reverted afterwards.
   **Negative control**, one binary and one variable, the pause removed at its single implementation
   site (`blink_cursor.rs:78`): `bluePx [68, 68, 68, 68, 68, 0, 0, 0]` (dark) and
   `[0, 68, 68, 68, 68, 68, 0, 0]` (light), gate FAILS. Switch removed afterwards; `git diff` on

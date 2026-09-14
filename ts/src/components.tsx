@@ -130,6 +130,8 @@ export interface ImageProps extends AccessibilityProps {
     resizeMode?: "cover" | "contain" | "stretch" | "repeat" | "center";
     onLoad?: () => void;
     onLayout?: (event: LayoutChangeEvent) => void;
+    /** macOS: drag this image out to Finder as a file. A string is the dropped filename. */
+    dragOut?: boolean | string;
 }
 export const Image = "Image" as unknown as FC<ImageProps>;
 

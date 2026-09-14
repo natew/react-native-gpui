@@ -49,11 +49,11 @@ mod dump;
 mod elements;
 mod frame_clock;
 mod frame_trace;
-mod jsc;
-mod http;
 mod hit_passthrough;
+mod http;
 mod icons;
 mod inspector;
+mod jsc;
 #[cfg(target_os = "macos")]
 mod liquid_glass;
 mod native_menu;
@@ -542,6 +542,18 @@ fn parse_json_tree(
                 Some("none") => elements::ImageFit::None,
                 // `repeat` has no GPUI equivalent; tiling would need its own paint.
                 _ => elements::ImageFit::Cover,
+            },
+            drag_out: matches!(
+                obj.get("dragOut"),
+                Some(serde_json::Value::Bool(true)) | Some(serde_json::Value::String(_))
+            ),
+            drag_file_name: match obj.get("dragOut") {
+                Some(serde_json::Value::String(name)) if !name.is_empty() => Some(name.clone()),
+                _ => obj
+                    .get("dragFileName")
+                    .and_then(|v| v.as_str())
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string),
             },
         }),
         "svg" => Some(SpecializedElement::Svg {
@@ -3079,8 +3091,7 @@ fn main() {
     // is no flash. A screenshot tool reads the full-opacity backing surface. Used
     // by gui/native-shell/scripts/check-web-parity.ts.
     let capture_onscreen = std::env::var("RNGPUI_CAPTURE_ONSCREEN").is_ok();
-    let offscreen_test_window =
-        test_mode && !test_onscreen && !capture_onscreen;
+    let offscreen_test_window = test_mode && !test_onscreen && !capture_onscreen;
     let window_origin = if offscreen_test_window {
         point(px(-10000.0), px(-10000.0))
     } else {
@@ -3095,7 +3106,9 @@ fn main() {
     // remote `<Image>` (see http.rs).
     // The probe runs on the real UI runtime in parallel with app bundle evaluation. Wait
     // before platform initialization so an interpreter-shaped process cannot open a window.
-    jit_ready.recv().expect("JavaScriptCore JIT probe thread stopped");
+    jit_ready
+        .recv()
+        .expect("JavaScriptCore JIT probe thread stopped");
     let app = gpui::Application::new()
         .with_assets(icons::Assets)
         .with_http_client(std::sync::Arc::new(http::UreqHttpClient));

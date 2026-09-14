@@ -2,11 +2,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    img, px, AnyElement, App, Bounds, Display, Element, ElementId, GlobalElementId, ImageSource,
-    IntoElement, LayoutId, Pixels, Styled, StyledImage, Window,
+    AnyElement, App, Bounds, Display, Element, ElementId, GlobalElementId, ImageSource,
+    IntoElement, LayoutId, Pixels, Styled, StyledImage, Window, img, px,
 };
 
-use crate::elements::{report_layout, ReactElement};
+use crate::elements::{ReactElement, report_layout};
 
 /// `<Image source={{ uri }} />` → a GPUI `img`. `http(s)` uris load over the
 /// network via GPUI's image cache; anything else is treated as a local file path.
@@ -109,13 +109,17 @@ impl Element for ReactImageElement {
             child.prepaint(window, cx);
         }
 
-        // insert_hitbox must run in prepaint. Normal so this does not occlude a
-        // parent pressable; we also skip pointer spans so the parent still wins
-        // JS onPress. Clicks without an 8px move never start a drag.
+        // insert_hitbox must run in prepaint. Only content images that opted in
+        // get a drag hitbox. Normal so this does not occlude a parent pressable;
+        // we also skip pointer spans so the parent still wins JS onPress.
         #[cfg(target_os = "macos")]
         {
             let src = self.element.src().unwrap_or("");
-            if !src.is_empty() && bounds.size.width > px(0.0) && bounds.size.height > px(0.0) {
+            if self.element.image_drag_out()
+                && !src.is_empty()
+                && bounds.size.width > px(0.0)
+                && bounds.size.height > px(0.0)
+            {
                 return Some(window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal));
             }
         }
@@ -144,8 +148,16 @@ impl Element for ReactImageElement {
             });
         }
         #[cfg(target_os = "macos")]
-        if let (Some(src), Some(hitbox)) = (self.element.src(), prepaint.as_ref()) {
-            crate::drag_out::wire_image_drag_out(src, bounds, hitbox, window);
+        if self.element.image_drag_out() {
+            if let (Some(src), Some(hitbox)) = (self.element.src(), prepaint.as_ref()) {
+                crate::drag_out::wire_image_drag_out(
+                    src,
+                    self.element.image_drag_file_name(),
+                    bounds,
+                    hitbox,
+                    window,
+                );
+            }
         }
     }
 }

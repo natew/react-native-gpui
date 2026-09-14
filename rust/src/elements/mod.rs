@@ -200,9 +200,15 @@ pub enum SpecializedElement {
     Image {
         src: Option<String>,
         resize_mode: ImageFit,
+        drag_out: bool,
+        drag_file_name: Option<String>,
     },
-    Svg { path: gpui::SharedString },
-    WebView { src: Option<String> },
+    Svg {
+        path: gpui::SharedString,
+    },
+    WebView {
+        src: Option<String>,
+    },
     System(SystemPayload),
     Input(InputPayload),
     NativeControl(InputPayload),
@@ -327,9 +333,8 @@ impl ReactElement {
 
     pub fn src(&self) -> Option<&str> {
         match self.specialized.as_deref() {
-            Some(SpecializedElement::Image { src, .. }) | Some(SpecializedElement::WebView { src }) => {
-                src.as_deref()
-            }
+            Some(SpecializedElement::Image { src, .. })
+            | Some(SpecializedElement::WebView { src }) => src.as_deref(),
             _ => None,
         }
     }
@@ -339,6 +344,20 @@ impl ReactElement {
         match self.specialized.as_deref() {
             Some(SpecializedElement::Image { resize_mode, .. }) => *resize_mode,
             _ => ImageFit::Cover,
+        }
+    }
+
+    pub fn image_drag_out(&self) -> bool {
+        matches!(
+            self.specialized.as_deref(),
+            Some(SpecializedElement::Image { drag_out: true, .. })
+        )
+    }
+
+    pub fn image_drag_file_name(&self) -> Option<&str> {
+        match self.specialized.as_deref() {
+            Some(SpecializedElement::Image { drag_file_name, .. }) => drag_file_name.as_deref(),
+            _ => None,
         }
     }
 

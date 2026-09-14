@@ -42,6 +42,9 @@ export type SerializedNode = {
     src?: string;
     /** `<Image resizeMode>` — how the picture fills the box layout gave the element. */
     resizeMode?: string;
+    /** `<Image dragOut>` — opt into macOS file drag-out. A string is the dropped filename. */
+    dragOut?: boolean | string;
+    dragFileName?: string;
     /** `<Diff>` options. The patch itself uses `text` so large-field interning applies. */
     wordDiff?: boolean;
     collapsedPaths?: string[];

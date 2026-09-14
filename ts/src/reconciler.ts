@@ -1220,6 +1220,12 @@ function serialize(inst: Instance | TextInstance, context: PortalContext, inheri
                 stringProp(props, "resizeMode") ??
                 (typeof style.resizeMode === "string" ? style.resizeMode : undefined);
             if (resizeMode) node.resizeMode = resizeMode;
+            const dragOut = props.dragOut;
+            if (dragOut === true) node.dragOut = true;
+            else if (typeof dragOut === "string") {
+                node.dragOut = true;
+                if (dragOut.length > 0) node.dragFileName = dragOut;
+            }
             break;
         }
         case "Svg":

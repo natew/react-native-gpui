@@ -525,13 +525,23 @@ control that fails when the collect is replaced by `return 0`.
   lane: `dialog-reanimated`. FAIL and open here, resolved rather than fixed: `legend-list-100k`, in
   its own section above (no engine defect proven; the footprint budget's metric cannot decide
   liveness, and its sample instant is a transient). Nothing is now untriaged. `conformance-utils.mjs`
-  is a helper, not
-  a gate. The `AGENTS.md` Display P3 caveat applies to any color assertion; measured drift was
-  `#f2c84b` rendering as `#ebc864` and `#ff4fa3` as `#eb5fa0`, 23-29 per channel.
+  is a helper, not a gate. The `AGENTS.md` Display P3 caveat applies to any color assertion;
+  measured drift was `#f2c84b` rendering as `#ebc864` and `#ff4fa3` as `#eb5fa0`, 23-29 per channel.
 - `RNGPUI_DRAW_PROBE` and `RNGPUI_SCROLL_LATENCY_PROBE` are live, not stale: the vendored GPUI reads
   them at `rust/vendor/gpui-0.2.2-patched/src/window.rs:2043` and `:2182`. A `rust/src`-only search
   says they have no consumer, which is wrong, so search `rust/vendor` before calling any probe env
   var dead.
+- `npm test` is 40/41, with the new `jsc-shim` check inside it (1.3s, compiling and running the
+  shim's C++ selftest; 0.9s standalone). The one failure is `input`, deterministic across three
+  standalone runs and both suite runs: it resolves an AX element index from the window's tree, then
+  the next `cua-driver call type_text` fails with `Element index 1 not found. Call get_window_state
+  first.` Two environment facts explain it and neither is this change. `cua-driver status` reports no
+  daemon running, so nothing carries the resolved index between two CLI invocations, and
+  `plans/HANDOFF.md:206` already records that AX-by-index does not work here because the tree reads
+  empty, with pixel driving as the documented route; the harness also keeps its windows offscreen
+  (`assertWindowOffscreen`). The engine does publish an AX tree (`rust/src/ax.rs`), so this is not a
+  missing engine feature either. Not fixed: converting an input gate to pixel driving is a harness
+  change, and whether a non-offscreen window is allowed here is not this lane's call.
 - The gate names in the earlier note (`conformance:box-model` and friends) do not exist: this repo
   defines no `conformance:` npm scripts, and no box-model gate at all. The real files are
   `ts/scripts/*-conformance.mjs`. Two of the three names in that note were the two defects above.

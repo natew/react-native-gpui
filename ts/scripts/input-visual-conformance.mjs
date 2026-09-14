@@ -5,15 +5,16 @@
 // scans the PNGs to assert:
 //   1. CARET — a thin accent-blue insertion bar in the focused empty field, ~1px
 //      logical wide, the accent (not the text color); and it BLINKS (an on-frame and an
-//      off-frame both occur over ~1.6s of sampling); and it goes SOLID right after a
-//      keystroke (the pause-while-typing behavior).
+//      off-frame both occur over ~1.6s of sampling); and it stays SOLID across a burst of
+//      keystrokes (the pause-while-typing behavior).
 //   2. TEXT COLOR — typed text in dark mode is the light label color (not pure white,
 //      not the old black-on-dark bug), and dark in light mode.
 //   3. VERTICAL CENTERING — typed text and the placeholder both center vertically in a
 //      field box that is taller than the input's intrinsic height.
 //
-// The capture file is overwritten by the service on a 250ms timer; we copy it at
-// intervals to collect distinct blink phases. Everything is offscreen + non-activating.
+// The service rewrites the capture file on a ~30ms timer (service.rs:3479), so a frame is
+// always present; we copy it at intervals to collect distinct blink phases. Everything is
+// offscreen + non-activating.
 import { spawn, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { createConnection } from "node:net";
@@ -59,6 +60,26 @@ function rgbAt(img, x, y) {
     return { r: img.rgba[i], g: img.rgba[i + 1], b: img.rgba[i + 2], a: img.rgba[i + 3] };
 }
 
+// does field A show a keystroke's own result yet? field A is authored empty, so strong
+// ink in its text band that is not the accent caret can only be a typed glyph. This is
+// the freshness signal for the capture: a frame carrying it was composited after the
+// keystroke, which is what makes its caret a statement about typing rather than about
+// the idle blink.
+function fieldHasTypedGlyph(img, scale, fieldLuma) {
+    const y0 = Math.round(L.fieldA.y * scale);
+    const h = Math.round(L.fieldA.height * scale);
+    const cLo = Math.round((L.fieldA.x + L.padLeft) * scale);
+    const cHi = Math.round((L.fieldA.x + L.padLeft + 40) * scale);
+    for (let r = 4; r < h - 4; r++) {
+        for (let c = cLo; c < cHi; c++) {
+            const p = rgbAt(img, c, y0 + r);
+            if (p.a < 150 || isBlueish(p.r, p.g, p.b)) continue;
+            if (Math.abs(luma(p.r, p.g, p.b) - fieldLuma) > 40) return true;
+        }
+    }
+    return false;
+}
+
 // vertical ink center: for the given field, scan a horizontal band and find the
 // row-range that contains ink matching `inkTest`, return its center as a fraction of
 // the field height (0=top, 1=bottom). scale converts logical→device px.
@@ -84,16 +105,19 @@ function inkVerticalCenter(img, scale, field, xLo, xHi, inkTest) {
     return (first + last) / 2 / h;
 }
 
-// caret metrics in field A: scan the left-padding column band for blue ink, return the
+// caret metrics in field A: scan the field's text area for blue ink, return the
 // horizontal run width (device px) at the row of peak blue coverage + the peak color.
 function caretMetrics(img, scale) {
     const y0 = Math.round(L.fieldA.y * scale);
     const h = Math.round(L.fieldA.height * scale);
-    // caret sits at the field's text origin: field.x + our paddingHorizontal +
-    // gpui-component's own input_px (12px @ Medium). scan a generous band that also
-    // covers the post-type caret position (one glyph to the right).
+    // The caret sits where the text ends, so it walks right as the field fills: the `type`
+    // command inserts at the caret, and one glyph is ~8px. Scan the whole text area rather
+    // than a strip beside the origin — a 40px strip stops containing the caret after four
+    // keystrokes, and the caret reading it then reports is "no caret in a field whose
+    // caret is simply further right". The caret is the only blue thing in field A, so a
+    // wide band costs nothing.
     const cLo = Math.round((L.fieldA.x + L.padLeft) * scale);
-    const cHi = Math.round((L.fieldA.x + L.padLeft + 40) * scale);
+    const cHi = Math.round((L.fieldA.x + L.fieldA.width - 10) * scale);
     let bestWidth = 0;
     let bestColor = null;
     let totalBlue = 0;
@@ -177,8 +201,8 @@ async function runAppearance(appearance) {
         throw new Error(`[${appearance}] no capture written\n${log}`);
     }
 
-    // collect distinct blink phases: the caret toggles ~567ms, capture timer ~250ms,
-    // so sampling every ~280ms over ~1.7s yields both on and off frames.
+    // collect distinct blink phases: the caret toggles ~567ms, so sampling every ~280ms
+    // over ~1.7s yields both on and off frames.
     const blinkFrames = [];
     for (let i = 0; i < 7; i++) {
         await sleep(280);
@@ -189,32 +213,62 @@ async function runAppearance(appearance) {
             blinkFrames.push(readPng(snap));
         } catch {}
     }
+    const baseline = blinkFrames.at(-1) ?? null;
+    const scale = baseline ? baseline.width / L.window.width : 2;
 
-    // TYPE-PAUSE: type into the focused field A and sample the pause window (~450ms).
-    // real typing pauses the blink and keeps the caret solid; assert the caret is present
-    // in EVERY frame across the pause window (no blink-off gap).
+    // TYPE-PAUSE: type into the focused field A and require the caret in every frame that
+    // carries a keystroke's result. Real typing pauses the blink and keeps the caret
+    // solid, and each keystroke re-arms that 500ms pause, so across the burst below the
+    // caret can never legitimately blank.
+    //
+    // Sampling this by clock alone does not work, and the way it fails is a lie about the
+    // caret. The capture is a readback of the WindowServer composite, which lags the
+    // keystroke: a frame copied 100ms after the command can still be the frame from
+    // BEFORE it, showing the idle blink's off phase. Measured under 16-way concurrency, 8
+    // of 80 runs sampled such a frame, and every one of them carried NO typed glyph, so
+    // the composite predated the keystroke; no run ever showed the glyph with the caret
+    // blanked. The old fixed 3-sample window read that lag as "the caret blanked while
+    // typing" and failed a build whose caret behavior was correct.
+    //
+    // So the burst types repeatedly and a capture is believed only once it shows the
+    // glyph, with the lagging frames skipped rather than read as a caret state.
     const typeFrames = [];
-    if (!exited && existsSync(socketPath)) {
-        try {
-            await requestSocket(socketPath, { $cmd: "type", text: "x" });
-        } catch (e) {
-            log += `\ntype command failed: ${e?.message || e}`;
-        }
-        // sample inside the 500ms PAUSE_DELAY, leaving margin for the 250ms capture timer
-        // and command latency: 3 frames at ~100/200/300ms after typing.
-        for (let i = 0; i < 3; i++) {
-            await sleep(100);
+    let typeSkipped = 0;
+    if (!exited && baseline && existsSync(socketPath)) {
+        // field A is empty, so a clean patch on its right side is its own field bg.
+        const fieldLumaA = measurePatchLuma(baseline, scale, L.fieldA, 200, 300);
+        // bounded so the burst cannot outlive the fixture: run-example kills it 12s after
+        // launch (RNGPUI_EXAMPLE_TIMEOUT_MS), and a burst killed mid-flight would read as
+        // a slow capture timer rather than as the timeout it is.
+        const typeDeadline = Date.now() + 4500;
+        while (Date.now() < typeDeadline && typeFrames.length < 8 && !exited) {
+            try {
+                await requestSocket(socketPath, { $cmd: "type", text: "x" });
+            } catch (e) {
+                log += `\ntype command failed: ${e?.message || e}`;
+                break;
+            }
+            // one capture generation after the keystroke: the writer's timer is 30ms and
+            // its readback is not free, so a generation takes ~50ms unloaded and longer
+            // under load.
+            await sleep(90);
             if (exited) break;
-            const snap = `${outDir}/${appearance}-type-${i}.png`;
+            const snap = `${outDir}/${appearance}-type-${typeFrames.length + typeSkipped}.png`;
+            let frame = null;
             try {
                 copyFileSync(capturePath, snap);
-                typeFrames.push(readPng(snap));
+                frame = readPng(snap);
             } catch {}
+            if (!frame || !fieldHasTypedGlyph(frame, scale, fieldLumaA)) {
+                typeSkipped += 1;
+                continue;
+            }
+            typeFrames.push(frame);
         }
     }
 
     child.kill("SIGTERM");
-    return { blinkFrames, typeFrames };
+    return { blinkFrames, typeFrames, typeSkipped };
 }
 
 function assertAppearance(appearance, captures) {
@@ -228,7 +282,7 @@ function assertAppearance(appearance, captures) {
     const scale = img0.width / L.window.width;
     // measure the field bg luma from a clear (text-free) patch on the right side of
     // field B — robust to the capture's display-color-space transform.
-    const fieldLuma = measureFieldLuma(img0, scale);
+    const fieldLuma = measurePatchLuma(img0, scale, L.fieldB, L.fieldB.width - 80, L.fieldB.width - 20);
 
     // CARET: across frames, find the max-blue (on) and min-blue (off) caret states.
     const metrics = frames.map((f) => caretMetrics(f, scale));
@@ -258,16 +312,17 @@ function assertAppearance(appearance, captures) {
     ok(`${appearance} caret blinks`, on.totalBlue - off.totalBlue >= 3,
         `on=${on.totalBlue} off=${off.totalBlue} bluePx`);
 
-    // 1e. caret SOLID WHILE TYPING: after a keystroke the blink pauses, so the caret must
-    //     be present in EVERY frame sampled across the pause window (no blink-off gap).
-    if (typeFrames.length) {
-        const typeMetrics = typeFrames.map((f) => caretMetrics(f, scale));
-        const allOn = typeMetrics.every((m) => m.totalBlue > 0);
-        ok(`${appearance} caret stays solid after typing`, allOn,
-            `bluePx per frame: [${typeMetrics.map((m) => m.totalBlue).join(", ")}]`);
-    } else {
-        ok(`${appearance} caret stays solid after typing`, false, "no type-pause frames captured");
-    }
+    // 1e. caret SOLID WHILE TYPING: each keystroke re-arms the 500ms blink pause, so the
+    //     caret must be present in EVERY frame the burst believes (see runAppearance: a
+    //     frame is only believed once it shows the keystroke's own glyph). Four believed
+    //     frames is the precondition — fewer means the capture could not keep up with the
+    //     burst, which is a fact about the machine and is reported as such rather than
+    //     passed on the strength of one lucky frame.
+    const typeMetrics = typeFrames.map((f) => caretMetrics(f, scale));
+    const typeBlanks = typeMetrics.filter((m) => m.totalBlue === 0).length;
+    ok(`${appearance} caret stays solid while typing`, typeMetrics.length >= 4 && typeBlanks === 0,
+        `${typeMetrics.length} believed frames (${captures.typeSkipped} skipped as pre-keystroke), ` +
+            `bluePx [${typeMetrics.map((m) => m.totalBlue).join(", ")}]`);
 
     // pick the on-frame for the static text/centering checks (any frame works for text,
     // text doesn't blink, but use the on-frame for consistency).
@@ -310,12 +365,14 @@ function assertAppearance(appearance, captures) {
     } else ok(`${appearance} placeholder is the muted label color`, false, "no placeholder ink");
 }
 
-// median luma of a clear (text-free) patch on the right half of field B.
-function measureFieldLuma(img, scale) {
-    const y0 = Math.round((L.fieldB.y + 8) * scale);
-    const y1 = Math.round((L.fieldB.y + L.fieldB.height - 8) * scale);
-    const x0 = Math.round((L.fieldB.x + L.fieldB.width - 80) * scale);
-    const x1 = Math.round((L.fieldB.x + L.fieldB.width - 20) * scale);
+// median luma of a clear (text-free) patch of a field, at [xLo, xHi) relative to its left
+// edge and inset vertically. Used to measure the authored field bg through whatever
+// display-color-space transform the capture applies, rather than hardcoding #7a7a7a.
+function measurePatchLuma(img, scale, field, xLo, xHi) {
+    const y0 = Math.round((field.y + 8) * scale);
+    const y1 = Math.round((field.y + field.height - 8) * scale);
+    const x0 = Math.round((field.x + xLo) * scale);
+    const x1 = Math.round((field.x + xHi) * scale);
     const ls = [];
     for (let y = y0; y < y1; y += 2)
         for (let x = x0; x < x1; x += 2) {

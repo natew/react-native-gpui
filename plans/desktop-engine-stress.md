@@ -626,7 +626,7 @@ control that fails when the collect is replaced by `return 0`.
   `describe`, `webview-overlay`, `drive`, `reanimated-scroll`, `reanimated`, `sustained-reanimated`,
   `scroll-performance` (`p95=7.83ms latencyP95=13.13ms moved=1530px`), `presentation-pacing`
   (`paintP50=8.32ms paintP95=9.23ms presentOver12.5=1`), `native-scroll-react-stall` (3/3 after
-  `28da8b4`). FAIL and fixed: `card-corner-shadow` (blank capture, `06ac787`), `input-runtime` (stale
+  `28da8b4`), `input-visual` (112/112 at 16-way after `984d01a`). FAIL and fixed: `card-corner-shadow` (blank capture, `06ac787`), `input-runtime` (stale
   scale, `3cfab6c`), `native-scroll-react-stall` (window race, `28da8b4`). FAIL and open in another
   lane: `dialog-reanimated`. FAIL and open here, resolved rather than fixed: `legend-list-100k`, in
   its own section above (no engine defect proven; the footprint budget's metric cannot decide
@@ -647,18 +647,41 @@ control that fails when the collect is replaced by `return 0`.
   (`assertWindowOffscreen`). The engine does publish an AX tree (`rust/src/ax.rs`), so this is not a
   missing engine feature either. Not fixed: converting an input gate to pixel driving is a harness
   change, and whether a non-offscreen window is allowed here is not this lane's call.
-- `input-visual` failed once in six suite runs, and I could not characterize it. It passes 3/3
-  standalone, passed the other five suite runs including the two immediately after (42 tasks each), and
-  passes standalone under four and then six CPU burners, so simple starvation does not explain it. The
-  failing run's output was not captured, which is my error: I filtered the first suite run with `grep`
-  instead of saving it. Its two waits are wall-clock bounds a loaded machine could cross (a 3000ms
-  socket timeout at `ts/scripts/input-visual-conformance.mjs:141` and a 7000ms deadline for the first
-  capture at `:173`), which is the failure class I would expect, but I did not observe it and I am not
-  claiming it. It is also not attributable to the `text-selection` gate that joined the suite in that
-  same run: any change to the task list reshuffles which eight tasks run concurrently, and I have only
-  that one observation against five clean ones. The earlier "40/41, only `input`" reading was itself a
-  single run, so a low-rate pre-existing flake is not excluded either. Reproduce it and read the output
-  before treating this as anything.
+- `input-visual`: resolved (`984d01a`), and the resolution is a gate defect, not an engine one. The
+  earlier note here said it had failed once in six suite runs and I could not characterize it. It
+  reproduces at 16-way concurrency (the suite's own profile, eight tasks each opening a GPUI window):
+  6 failures in 64 runs, always the same line, `caret stays solid after typing — bluePx per frame:
+  [0, 68, 68]`.
+  **Root cause.** The gate sampled blind by clock (three frames at +100/+200/+300ms) and copied
+  whatever PNG was on disk. `RNGPUI_CAPTURE_PNG` writes a CGWindowListCreateImage readback of the
+  WindowServer composite on a 30ms timer (`rust/src/service.rs:3479-3493`), so a frame copied 100ms
+  after the `type` command can still be the pre-keystroke frame, showing the idle blink's OFF phase.
+  The engine behaved correctly throughout: `pause_blink` sets `paused = true; visible = true` and
+  notifies before the command's reply is sent (`blink_cursor.rs:78`, `service.rs:4062`).
+  **Attribution.** A probe replaying the gate's exact sampling recorded per sample the capture's mtime
+  and whether the typed glyph was in it. Under the same 16-way load 8 of 80 runs produced a zero-caret
+  sample, and across all 80 runs `blankWithGlyph = 0`: no sample ever showed the keystroke's glyph
+  with the caret blanked, so every blank one was a composite from before the keystroke. Some carried
+  an mtime from BEFORE the command was sent.
+  **Fix.** Frame content is now the condition instead of the clock. The burst types repeatedly and a
+  capture is believed only once it shows the glyph; each keystroke re-arms the 500ms pause, so the
+  caret cannot legitimately blank inside the burst. That is 8 believed frames instead of 3 fixed
+  samples, each re-checked. Two things the investigation forced: the caret band was a 40px strip at
+  the field origin, and the driver's `type` inserts at the caret, so it walked out of the strip
+  (`replace` appends; measured 18px -> 91px over ten commands) - the band is now the field's text
+  area. And fewer than 4 believed frames reports that the capture could not keep up with the burst
+  rather than passing on one lucky frame.
+  **Negative control**, one binary and one variable, the pause removed at its single implementation
+  site (`blink_cursor.rs:78`): `bluePx [68, 68, 68, 68, 68, 0, 0, 0]` (dark) and
+  `[0, 68, 68, 68, 68, 68, 0, 0]` (light), gate FAILS. Switch removed afterwards; `git diff` on
+  `rust/` empty in that commit. RAN after the fix: 112 runs at 16-way, 0 failures, 12.5s each against
+  a 60s budget, 10.0s standalone.
+  Two redundancy findings came out of the control runs, both recorded at the source (`1c86a8d`): the
+  host's `input.pause_blink(cx)` in the `type` handler (`service.rs:4071`) re-arms a pause the insert
+  already set, because `replace_text_in_range` pauses unconditionally on its first line
+  (`state.rs:2039`) and both `insert` and `replace` funnel through it; and the vendored patch comment
+  that justified the wrapper with "the silent IME `insert` path intentionally doesn't pause" stated a
+  false premise. Comment corrected, wrapper kept.
 - The gate names in the earlier note (`conformance:box-model` and friends) do not exist: this repo
   defines no `conformance:` npm scripts, and no box-model gate at all. The real files are
   `ts/scripts/*-conformance.mjs`. Two of the three names in that note were the two defects above.

@@ -106,6 +106,34 @@ and its box paints 1447 pixels of `#eb5fa0`, and `rust/src/elements/input.rs:83`
 `placeholder_text_color` unconditionally. The defect was the gate's arithmetic, not the engine's
 color plumbing.
 
+### 6. The React-stall scroll gate raced its own window — `28da8b4`
+
+`native-scroll-react-stall-conformance` fired a 101-step frame-paced sequence and then failed if the
+fixture's fixed 2000ms React busy-wait had ended first, i.e. it required all 101 frames plus three
+control round trips to fit inside a window the machine's load decides. At load 22 the sequence
+overran it and the gate reported `the React stall ended before the scroll proof completed`, which
+reads as a sequencing defect in the engine and is really a claim about how fast the machine is. The
+engine's own `conformance-utils.mjs` already states the principle for the same class of problem: an
+absolute deadline is a claim about machine speed, and it is wrong on a busy one.
+
+The sequence reply lands only at the end (`rust/src/service.rs:2538`, one step per
+`window.on_next_frame`, reply sent when `phase == "ended"`), so awaiting it inside the stall is what
+created the race. The gate now samples the AppKit driver 800ms into the stall, reading the log on
+both sides of the round trip so `during the stall` is checked rather than assumed, and requires
+`offsetY >= 200px`, twenty of the sequence's ten-px steps. The stall ending first is no longer a
+failure; the sequence must still dispatch all 101 steps, which the gate now waits for as a condition
+with a named timeout instead of hanging. This follows `offthread-stall-conformance`, which counts
+`setNodeStyle` crossings inside its own stall window and accepts `>= 25` "for a loaded machine".
+
+TESTED: two negative controls, each run and each failing as intended. With the sequence fired after
+`STALL_END` the gate reports `native scroll stalled with React — offsetY=0px at 800ms into the React
+stall (floor 200px)`, so the floor is a real check and nothing else in the fixture moves the offset.
+With the sample moved to 4000ms it reports `the fixture's 2000ms React stall ended before the
+mid-stall sample landed (4000ms in)`, so a post-stall sample cannot masquerade as an in-stall one.
+RAN, the fixed gate 3/3 at load 14.7: `midStallOffset=960/960/950px at=800ms`, `frames=102
+p95=8.33ms over12.5=2 offset=1000`. So 95-96 of the 101 steps dispatch while React is pinned, at a
+full 120Hz frame period, and the earlier red was the window and not the engine.
+
 ## Local validation on this tip
 
 RAN, `bun run test` (`ts/scripts/test-suite.mjs`): `TEST_SUITE_TOTAL seconds=24.755`,
@@ -345,12 +373,18 @@ No app gate failed in a way I could attribute to the engine.
   `native-timeline-scroll`, `desktop-interaction-perf`, `controlroom-terminal-pingpong`,
   `startup-conformance` (200ms cap) and `input-runtime`'s focus latency (16.67ms budget).
 - Triage sweep status. PASS: `anim-overlay`, `card-corner-shadow`, `check-transform`, `context-menu`,
-  `describe`, `webview-overlay`, `drive`, `reanimated-scroll`, `reanimated`, `sustained-reanimated`.
-  FAIL and fixed: `card-corner-shadow` (blank capture, `06ac787`), `input-runtime` (stale scale,
-  `3cfab6c`). FAIL and open in another lane: `dialog-reanimated`. Not yet run: `legend-list-100k`,
-  `native-scroll-react-stall`, `scroll-performance`, `presentation-pacing`. `conformance-utils.mjs`
-  is a helper, not a gate. The `AGENTS.md` Display P3 caveat applies to any color assertion; measured
-  drift was `#f2c84b` rendering as `#ebc864` and `#ff4fa3` as `#eb5fa0`, 23-29 per channel.
+  `describe`, `webview-overlay`, `drive`, `reanimated-scroll`, `reanimated`, `sustained-reanimated`,
+  `scroll-performance` (`p95=7.83ms latencyP95=13.13ms moved=1530px`), `presentation-pacing`
+  (`paintP50=8.32ms paintP95=9.23ms presentOver12.5=1`), `native-scroll-react-stall` (3/3 after
+  `28da8b4`). FAIL and fixed: `card-corner-shadow` (blank capture, `06ac787`), `input-runtime` (stale
+  scale, `3cfab6c`), `native-scroll-react-stall` (window race, `28da8b4`). FAIL and open in another
+  lane: `dialog-reanimated`. Not yet run: `legend-list-100k`. `conformance-utils.mjs` is a helper, not
+  a gate. The `AGENTS.md` Display P3 caveat applies to any color assertion; measured drift was
+  `#f2c84b` rendering as `#ebc864` and `#ff4fa3` as `#eb5fa0`, 23-29 per channel.
+- `RNGPUI_DRAW_PROBE` and `RNGPUI_SCROLL_LATENCY_PROBE` are live, not stale: the vendored GPUI reads
+  them at `rust/vendor/gpui-0.2.2-patched/src/window.rs:2043` and `:2182`. A `rust/src`-only search
+  says they have no consumer, which is wrong, so search `rust/vendor` before calling any probe env
+  var dead.
 - The gate names in the earlier note (`conformance:box-model` and friends) do not exist: this repo
   defines no `conformance:` npm scripts, and no box-model gate at all. The real files are
   `ts/scripts/*-conformance.mjs`. Two of the three names in that note were the two defects above.

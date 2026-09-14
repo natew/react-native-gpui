@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <chrono>
+#include <dlfcn.h>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -192,6 +193,26 @@ int rng_jsc_call1(void* handle, const char* name, const char* arg, char* errbuf,
   std::string message = value_string(box->context, exception);
   set_err(errbuf, errcap, message.c_str());
   return 1;
+}
+
+// A forced synchronous full collection, which the public JSGarbageCollect is not. Measured
+// on macOS 25.5: two JSGarbageCollect calls in a row left 2000 of 2000 unreachable WeakRef
+// targets alive, while a natural collection triggered by allocation pressure freed all 2000,
+// so it behaves as an eden or hint call and would answer "collected" while freeing nothing.
+// JSSynchronousGarbageCollectForDebugging is the SPI WebKit's own tests use. It is not in the
+// public headers, and on this system it takes the CONTEXT: passing the group from
+// JSContextGetGroup segfaults (measured), while the context collects all 2000. Absence is
+// reported instead of ignored, so a caller cannot read a silent no-op as "there was no
+// garbage to collect".
+int rng_jsc_collect_garbage(void* rt) {
+  auto* box = static_cast<Box*>(rt);
+  if (!box) return 1;
+  using CollectFn = void (*)(JSContextRef);
+  static CollectFn collect = reinterpret_cast<CollectFn>(
+      dlsym(RTLD_DEFAULT, "JSSynchronousGarbageCollectForDebugging"));
+  if (!collect) return 2;
+  collect(box->context);
+  return 0;
 }
 
 void* rng_jsc_shared_buffer_create(size_t len) {

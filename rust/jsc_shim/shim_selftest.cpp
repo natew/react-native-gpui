@@ -7,6 +7,8 @@
 struct Probe {
   bool microtask_ran = false;
   int userdata_hits = 0;
+  int none_dead = 0;
+  int all_dead = 0;
 };
 
 static void host_log(void*, const char* value) { std::printf("[host_log] %s\n", value); }
@@ -17,6 +19,12 @@ static double host_now(void* userdata, const char* value) {
   auto* probe = static_cast<Probe*>(userdata);
   if (std::strcmp(value, "userdata") == 0) probe->userdata_hits += 1;
   return 42.5;
+}
+static void mark_none_dead(void* userdata, const char*) {
+  static_cast<Probe*>(userdata)->none_dead += 1;
+}
+static void mark_all_dead(void* userdata, const char*) {
+  static_cast<Probe*>(userdata)->all_dead += 1;
 }
 
 int main() {
@@ -79,7 +87,58 @@ int main() {
 
   rng_jsc_destroy(runtime_a);
   rng_jsc_destroy(runtime_b);
+
+  // Collection must actually collect. WeakRef.deref() is what makes that observable: an
+  // unreachable target reads undefined only once its heap was really collected, which a
+  // "the call returned" assertion cannot see. The control is the reading taken before the
+  // collection, which must still be all-alive, so a counter that moves by itself cannot
+  // pass. FinalizationRegistry is not usable as this observable: measured on macOS 25.5 its
+  // callbacks never ran, not even for targets a natural collection had freed.
+  rng_jsc_install_void_fn(runtime, "__mark_none_dead", mark_none_dead, &probe);
+  rng_jsc_install_void_fn(runtime, "__mark_all_dead", mark_all_dead, &probe);
+  const char* unreachable =
+      "globalThis.__refs = [];"
+      "for (var i = 0; i < 500; i++) {"
+      "  __refs.push(new WeakRef({ index: i, payload: new Array(64).fill(i) }));"
+      "}"
+      "globalThis.__check = function(){"
+      "  var dead = 0;"
+      "  for (var i = 0; i < __refs.length; i++) {"
+      "    if (__refs[i].deref() === undefined) dead += 1;"
+      "  }"
+      "  if (dead === 0) __mark_none_dead('control');"
+      "  if (dead === __refs.length) __mark_all_dead('collected');"
+      "};";
+  if (rng_jsc_eval(runtime, reinterpret_cast<const uint8_t*>(unreachable),
+                   std::strlen(unreachable), "unreachable.js", error, sizeof error)) {
+    std::printf("FAIL unreachable setup: %s\n", error); return 10;
+  }
+  const char* check = "__check()";
+  if (rng_jsc_eval(runtime, reinterpret_cast<const uint8_t*>(check), std::strlen(check),
+                   "check-before.js", error, sizeof error)) {
+    std::printf("FAIL check before: %s\n", error); return 11;
+  }
+  if (probe.none_dead != 1 || probe.all_dead != 0) {
+    std::printf("FAIL: 500 unreachable targets were already dead before any collection "
+                "(none_dead=%d all_dead=%d)\n",
+                probe.none_dead, probe.all_dead);
+    return 12;
+  }
+  if (rng_jsc_collect_garbage(runtime) != 0) {
+    std::printf("FAIL: no synchronous collector on this platform\n"); return 13;
+  }
+  if (rng_jsc_eval(runtime, reinterpret_cast<const uint8_t*>(check), std::strlen(check),
+                   "check-after.js", error, sizeof error)) {
+    std::printf("FAIL check after: %s\n", error); return 14;
+  }
+  if (probe.all_dead != 1) {
+    std::printf("FAIL: collection left unreachable WeakRef targets alive "
+                "(none_dead=%d all_dead=%d)\n",
+                probe.none_dead, probe.all_dead);
+    return 15;
+  }
+
   rng_jsc_destroy(runtime);
-  std::printf("SELFTEST OK microtasks=automatic userdata=ok shared=ok\n");
+  std::printf("SELFTEST OK microtasks=automatic userdata=ok shared=ok gc=collects\n");
   return 0;
 }

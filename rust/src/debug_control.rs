@@ -154,6 +154,10 @@ fn handle_jsc_request(value: &Value) -> Option<Value> {
                 Err(error) => Some(json!({"ok": false, "type": cmd, "error": error})),
             }
         }
+        "collectGarbage" => match crate::jsc::collect_garbage_blocking(RESPONSE_TIMEOUT) {
+            Ok(()) => Some(json!({"ok": true, "type": cmd})),
+            Err(error) => Some(json!({"ok": false, "type": cmd, "error": error})),
+        },
         _ => None,
     }
 }

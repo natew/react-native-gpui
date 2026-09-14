@@ -57,6 +57,10 @@ unsafe extern "C" {
         f: extern "C" fn(*mut c_void, *const c_char) -> f64,
         userdata: *mut c_void,
     );
+    // synchronous full collection of one heap, only valid on the thread owning it.
+    // 2 means this platform exposes no synchronous collector, which is reported rather
+    // than passed off as a successful collection of nothing.
+    fn rng_jsc_collect_garbage(rt: *mut c_void) -> i32;
     fn rng_jsc_call1(
         rt: *mut c_void,
         name: *const c_char,
@@ -127,6 +131,9 @@ enum JsCall {
         hot: bool,
         reply: Option<Sender<Result<(), String>>>,
     },
+    CollectGarbage {
+        reply: Option<Sender<Result<(), String>>>,
+    },
 }
 static JS_CALLS: OnceLock<Sender<JsCall>> = OnceLock::new();
 
@@ -160,6 +167,38 @@ pub fn eval_script_blocking(
     reply_rx
         .recv_timeout(timeout)
         .map_err(|_| "timed out waiting for JS eval".to_string())?
+}
+
+// Force a real synchronous full collection on each live JS heap. Both runtimes are collected
+// because both hold app JS: React metadata and the item list on the first, worklet state on
+// the second. An app that never starts the UI runtime simply has one heap.
+//
+// This forces a collection. It does not make physical footprint able to tell live memory
+// from freed memory, which is the question the legend-list-100k budget asks. Measured on
+// macOS 25.5: 190MB of JS doubles were dropped, this was called, and the process footprint
+// fell 3MB of the 190MB, because freed JS pages are not returned to the OS. A footprint that
+// fails to fall after this call therefore says nothing about whether the memory is live, and
+// no gate should read it that way.
+pub fn collect_garbage_blocking(timeout: Duration) -> Result<(), String> {
+    let mut pending: Vec<(&str, flume::Receiver<Result<(), String>>)> = Vec::new();
+    for (label, queue) in [("react", JS_CALLS.get()), ("ui", UI_CALLS.get())] {
+        let Some(tx) = queue else { continue };
+        let (reply_tx, reply_rx) = flume::bounded::<Result<(), String>>(1);
+        tx.send(JsCall::CollectGarbage {
+            reply: Some(reply_tx),
+        })
+        .map_err(|_| format!("{label} JS runtime is closed"))?;
+        pending.push((label, reply_rx));
+    }
+    if pending.is_empty() {
+        return Err("JS runtime is not ready".to_string());
+    }
+    for (label, reply_rx) in pending {
+        reply_rx
+            .recv_timeout(timeout)
+            .map_err(|_| format!("timed out collecting {label} JS garbage"))??;
+    }
+    Ok(())
 }
 
 // ── reanimated worklet/UI runtime (see plans/off-thread-reanimated.md) ──────
@@ -1468,6 +1507,18 @@ fn dispatch_batch(rt: *mut c_void, batch: Vec<JsCall>) {
                     eprintln!("[jsc] eval failed: {error}");
                 }
             }
+            JsCall::CollectGarbage { reply } => {
+                dispatch_coalesced(rt, calls);
+                calls = Vec::new();
+                let result = match unsafe { rng_jsc_collect_garbage(rt) } {
+                    0 => Ok(()),
+                    2 => Err("this JavaScriptCore exposes no synchronous collector".to_string()),
+                    _ => Err("garbage collection was refused".to_string()),
+                };
+                if let Some(reply) = reply {
+                    let _ = reply.send(result);
+                }
+            }
         }
     }
     dispatch_coalesced(rt, calls);
@@ -1554,6 +1605,7 @@ fn perf_batch_label(batch: &[JsCall]) -> String {
             JsCall::Eval { hot, .. } => {
                 parts.push(if *hot { "hotEval" } else { "eval" }.to_string());
             }
+            JsCall::CollectGarbage { .. } => parts.push("gc".to_string()),
         }
     }
     if batch.len() > 3 {

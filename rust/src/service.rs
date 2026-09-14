@@ -2394,12 +2394,6 @@ pub(crate) enum Incoming {
         y: f32,
         reply: flume::Sender<serde_json::Value>,
     },
-    DebugDropFiles {
-        x: f32,
-        y: f32,
-        paths: Vec<String>,
-        reply: flume::Sender<serde_json::Value>,
-    },
     /// dispatch a REAL gpui pointer event (MouseDown+MouseUp) through the window's actual
     /// hitbox hit-test — the SAME path an OS click takes — and report whether a handler
     /// fired. Unlike DebugTap (which reads the serialized tree and invokes handlers
@@ -2794,22 +2788,12 @@ fn install_app_commands(config: AppCommandConfig, cx: &mut App) {
 fn app_menu_name() -> String {
     #[cfg(target_os = "macos")]
     {
-        if let Some(name) = macos_bundle_display_name() {
-            return name;
-        }
-        if let Some(name) = macos_process_name() {
-            return name;
-        }
+        macos_bundle_display_name()
+            .or_else(macos_process_name)
+            .expect("NSProcessInfo processName")
     }
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| {
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(str::to_string)
-        })
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "App".into())
+    #[cfg(not(target_os = "macos"))]
+    "rngpui-service".into()
 }
 
 #[cfg(target_os = "macos")]
@@ -4927,31 +4911,6 @@ fn main() {
                             break;
                         }
                     }
-                    Incoming::DebugDropFiles { x, y, paths, reply } => {
-                        let applied = window_handle.update(cx, |_root, _window, cx| {
-                            pump.update(cx, |this, _cx| {
-                                if let Some(id) = inspector::drop_target_at(&this.root, x, y) {
-                                    let paths: Vec<std::path::PathBuf> =
-                                        paths.into_iter().map(std::path::PathBuf::from).collect();
-                                    crate::bridge::files_dropped(id, &paths);
-                                    let _ = reply.send(serde_json::json!({
-                                        "ok": true,
-                                        "type": "dropFiles",
-                                        "targetId": id,
-                                    }));
-                                } else {
-                                    let _ = reply.send(serde_json::json!({
-                                        "ok": false,
-                                        "type": "dropFiles",
-                                        "error": "no drop target at point",
-                                    }));
-                                }
-                            })
-                        });
-                        if applied.is_err() {
-                            break;
-                        }
-                    }
                     Incoming::DebugTap { x, y, reply } => {
                         let applied = window_handle.update(cx, |_root, window, cx| {
                             pump.update(cx, |this, cx| {
@@ -5199,9 +5158,6 @@ fn main() {
                             }
                             Incoming::DebugTap { .. } => {
                                 unreachable!("debug tap is handled with window access")
-                            }
-                            Incoming::DebugDropFiles { .. } => {
-                                unreachable!("debug dropFiles is handled with window access")
                             }
                             Incoming::DebugDragAt { phase, x, y, reply } => {
                                 let target = inspector::tap_target_at(&this.root, x, y);

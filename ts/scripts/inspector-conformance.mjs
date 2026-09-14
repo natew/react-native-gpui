@@ -59,7 +59,7 @@ async function waitForClipboardSnapshot() {
     const started = Date.now();
     while (Date.now() - started < 3000) {
         const value = await readClipboard();
-        if (value.includes("# react-native-gpui inspector snapshot")) return value;
+        if (/^component:/m.test(value) && /^type: /m.test(value)) return value;
         await sleep(50);
     }
     throw new Error(`clipboard did not receive inspector snapshot; current value: ${await readClipboard()}`);

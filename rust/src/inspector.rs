@@ -5,7 +5,7 @@ use std::time::Duration;
 use gpui::{
     AnyElement, App, ClipboardItem, Div, FontWeight, IntoElement, KeyDownEvent, Modifiers,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
-    Position, ScrollDelta, ScrollWheelEvent, Styled, div, point, px,
+    Position, ScrollDelta, ScrollWheelEvent, Styled, TouchPhase, div, point, px,
 };
 use once_cell::sync::Lazy;
 
@@ -751,6 +751,9 @@ pub struct InspectorState {
     hover: Option<InspectorHit>,
     /// 0 = innermost hover; each parent walk steps toward path[0].
     walk_offset: usize,
+    scroll_accum: f32,
+    scroll_dir: i8,
+    scroll_ignore_momentum: bool,
     copied_id: Option<u64>,
     /// when Some, the popup menu is open and owns all mouse input until dismissed.
     menu: Option<InspectorMenu>,
@@ -770,6 +773,9 @@ impl InspectorState {
             suppress_mouse_up: false,
             hover: None,
             walk_offset: 0,
+            scroll_accum: 0.0,
+            scroll_dir: 0,
+            scroll_ignore_momentum: false,
             copied_id: None,
             menu: None,
             menu_close_token: 0,
@@ -925,18 +931,46 @@ impl InspectorState {
         if !self.enabled || !self.active || self.menu.is_some() || self.hover.is_none() {
             return false;
         }
-        let y = match event.delta {
-            ScrollDelta::Pixels(delta) => f32::from(delta.y),
-            ScrollDelta::Lines(delta) => delta.y,
+        match event.touch_phase {
+            TouchPhase::Ended => {
+                self.scroll_ignore_momentum = true;
+                return false;
+            }
+            TouchPhase::Started => {
+                self.scroll_ignore_momentum = false;
+                self.scroll_accum = 0.0;
+            }
+            TouchPhase::Moved if self.scroll_ignore_momentum => return false,
+            TouchPhase::Moved => {}
+        }
+        let (y, step) = match event.delta {
+            ScrollDelta::Pixels(delta) => (f32::from(delta.y), 24.0),
+            ScrollDelta::Lines(delta) => (delta.y, 1.0),
         };
         if y.abs() < 0.01 {
             return false;
         }
-        if y < 0.0 {
-            self.walk_parent()
-        } else {
-            self.walk_child()
+        let dir = if y < 0.0 { -1 } else { 1 };
+        if self.scroll_dir != 0 && dir != self.scroll_dir {
+            self.scroll_accum = 0.0;
         }
+        self.scroll_dir = dir;
+        self.scroll_accum += y.abs();
+        let mut any = false;
+        while self.scroll_accum >= step {
+            self.scroll_accum -= step;
+            let stepped = if dir < 0 {
+                self.walk_parent()
+            } else {
+                self.walk_child()
+            };
+            if !stepped {
+                self.scroll_accum = 0.0;
+                break;
+            }
+            any = true;
+        }
+        any
     }
 
     pub fn handle_key_down(&mut self, event: &KeyDownEvent) -> bool {
@@ -970,6 +1004,12 @@ impl InspectorState {
         self.walk_offset -= 1;
         self.copied_id = None;
         true
+    }
+
+    fn reset_scroll_walk(&mut self) {
+        self.scroll_accum = 0.0;
+        self.scroll_dir = 0;
+        self.scroll_ignore_momentum = false;
     }
 
     pub fn handle_mouse_up(&mut self, event: &MouseUpEvent) -> bool {
@@ -1008,6 +1048,7 @@ impl InspectorState {
         self.alt_down = false;
         self.hover = None;
         self.walk_offset = 0;
+        self.reset_scroll_walk();
         self.copied_id = None;
         self.last_position = None;
         if had_hold || previous_active {
@@ -1074,11 +1115,16 @@ impl InspectorState {
         let previous_target = self.hover.as_ref().map(hit_key);
         self.active = active;
         if active {
-            self.walk_offset = 0;
-            self.hover = hit_test(root, position);
+            let next = hit_test(root, position);
+            if previous_target != next.as_ref().map(hit_key) {
+                self.walk_offset = 0;
+                self.reset_scroll_walk();
+            }
+            self.hover = next;
         } else {
             self.hover = None;
             self.walk_offset = 0;
+            self.reset_scroll_walk();
             self.copied_id = None;
         }
         previous_active != self.active || previous_target != self.hover.as_ref().map(hit_key)
@@ -1408,6 +1454,9 @@ fn is_transparent_cover(hit: &InspectorHit) -> bool {
     if paints_over(hit) {
         return false;
     }
+    if !hit.events.is_empty() || hit.target.role.is_some() {
+        return false;
+    }
     if hit
         .target
         .text
@@ -1526,16 +1575,6 @@ fn paints_over(hit: &InspectorHit) -> bool {
 /// yields hits in reverse paint order for exactly this reason, so the first hit that
 /// registers a pointer-down listener is the node the real dispatch picks. Nothing else in
 /// the tree can outrank it — not greater nesting depth, not a smaller box.
-pub fn drop_target_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<u64> {
-    let position = point(px(x), px(y));
-    let mut path = Vec::new();
-    let mut hits = Vec::new();
-    collect_hits(root, position, &mut path, &mut hits);
-    hits.iter()
-        .find(|hit| hit.events.iter().any(|event| event == "drop"))
-        .map(|hit| hit.target.id)
-}
-
 pub fn tap_target_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<TapTarget> {
     let position = point(px(x), px(y));
     let mut path = Vec::new();
@@ -1892,7 +1931,7 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex, MutexGuard};
 
-    use gpui::{Modifiers, point, px};
+    use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase, point, px};
 
     use super::{
         InspectorHit, InspectorState, MenuAction, NodeSummary, Rect, build_menu, cached_snapshot,
@@ -2133,7 +2172,7 @@ mod tests {
 
         let mut inspector = InspectorState::new(true);
         inspector.active = true;
-        inspector.hover = Some(pane_hit);
+        inspector.hover = Some(pane_hit.clone());
         assert!(inspector.walk_parent());
         assert_eq!(
             super::selected_summary(inspector.hover.as_ref().unwrap(), inspector.walk_offset)
@@ -2149,6 +2188,78 @@ mod tests {
             "next walk-up reaches the pane"
         );
 
+        let mut inspector = InspectorState::new(true);
+        inspector.active = true;
+        inspector.hover = Some(pane_hit.clone());
+        let mut stepped = 0;
+        for _ in 0..5 {
+            if inspector.handle_scroll_wheel(&ScrollWheelEvent {
+                position: point(px(300.0), px(130.0)),
+                delta: ScrollDelta::Pixels(point(px(0.0), px(-5.0))),
+                modifiers: Modifiers::default(),
+                touch_phase: TouchPhase::Moved,
+                native_scroll_id: None,
+                native_scroll_offset: None,
+                native_scroll_queued: None,
+            }) {
+                stepped += 1;
+            }
+        }
+        assert_eq!(
+            stepped, 1,
+            "24px of pixel deltas is one parent step, not five"
+        );
+        assert_eq!(
+            super::selected_summary(inspector.hover.as_ref().unwrap(), inspector.walk_offset)
+                .map(|node| node.id),
+            Some(8003)
+        );
+        assert!(!inspector.handle_scroll_wheel(&ScrollWheelEvent {
+            position: point(px(300.0), px(130.0)),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-8.0))),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Ended,
+            native_scroll_id: None,
+            native_scroll_offset: None,
+            native_scroll_queued: None,
+        }));
+        assert!(!inspector.handle_scroll_wheel(&ScrollWheelEvent {
+            position: point(px(300.0), px(130.0)),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-40.0))),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+            native_scroll_id: None,
+            native_scroll_offset: None,
+            native_scroll_queued: None,
+        }));
+        assert_eq!(
+            super::selected_summary(inspector.hover.as_ref().unwrap(), inspector.walk_offset)
+                .map(|node| node.id),
+            Some(8003),
+            "momentum after Ended does not keep walking"
+        );
+
+        bridge::retain_layout(&HashSet::new());
+    }
+
+    #[test]
+    fn hit_test_keeps_an_evented_row_without_a_background() {
+        let _guard = inspector_test_guard();
+        bridge::retain_layout(&HashSet::new());
+        let mut row = (*node(8102, "view", Vec::new())).clone();
+        row.events = Arc::from(["responderRelease".to_string()]);
+        let mut pane = (*node(8101, "view", vec![Arc::new(row)])).clone();
+        pane.style.background_color = Some(gpui::rgb(0x111111).into());
+        let root = node(8100, "view", vec![Arc::new(pane)]);
+        bridge::remember_layout(8100, 0.0, 0.0, 400.0, 300.0);
+        bridge::remember_layout(8101, 0.0, 0.0, 400.0, 300.0);
+        bridge::remember_layout(8102, 10.0, 10.0, 200.0, 48.0);
+
+        let hit = hit_test(&root, point(px(20.0), px(20.0))).expect("expected hit");
+        assert_eq!(
+            hit.target.id, 8102,
+            "padding of an evented row is the row, not the pane behind it"
+        );
         bridge::retain_layout(&HashSet::new());
     }
 

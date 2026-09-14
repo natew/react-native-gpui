@@ -4198,7 +4198,11 @@ impl Window {
                     })
                 }
                 FileDropEvent::Submit { position } => {
-                    cx.activate(true);
+                    if std::env::var_os("RNGPUI_NO_ACTIVATE").is_none()
+                        && std::env::var_os("RNGPUI_TEST_MODE").is_none()
+                    {
+                        cx.activate(true);
+                    }
                     self.mouse_position = position;
                     PlatformInput::MouseUp(MouseUpEvent {
                         button: MouseButton::Left,

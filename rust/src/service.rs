@@ -4918,28 +4918,47 @@ fn main() {
                         }
                     }
                     Incoming::DebugDropFiles { x, y, paths, reply } => {
-                        let applied = window_handle.update(cx, |_root, _window, cx| {
-                            pump.update(cx, |this, _cx| {
-                                if let Some(id) = inspector::drop_target_at(&this.root, x, y) {
-                                    let paths: Vec<std::path::PathBuf> =
-                                        paths.into_iter().map(std::path::PathBuf::from).collect();
-                                    crate::bridge::files_dropped(id, &paths);
-                                    let _ = reply.send(serde_json::json!({
-                                        "ok": true,
-                                        "type": "dropFiles",
-                                        "targetId": id,
-                                    }));
-                                } else {
-                                    let _ = reply.send(serde_json::json!({
-                                        "ok": false,
-                                        "type": "dropFiles",
-                                        "error": "no drop target at point",
-                                    }));
-                                }
-                            })
+                        let result = window_handle.update(cx, |_root, window, cx| {
+                            let position = gpui::point(px(x), px(y));
+                            let paths = gpui::ExternalPaths::new(
+                                paths.into_iter().map(std::path::PathBuf::from),
+                            );
+                            let before = crate::bridge::events_emitted_count();
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::FileDrop(gpui::FileDropEvent::Entered {
+                                    position,
+                                    paths,
+                                }),
+                                cx,
+                            );
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::FileDrop(gpui::FileDropEvent::Pending {
+                                    position,
+                                }),
+                                cx,
+                            );
+                            dispatch_real_input(
+                                window,
+                                gpui::PlatformInput::FileDrop(gpui::FileDropEvent::Submit {
+                                    position,
+                                }),
+                                cx,
+                            );
+                            crate::bridge::events_emitted_count().saturating_sub(before)
                         });
-                        if applied.is_err() {
-                            break;
+                        match result {
+                            Ok(emitted) => {
+                                let _ = reply.send(serde_json::json!({
+                                    "ok": emitted > 0,
+                                    "type": "dropFiles",
+                                    "handlerFired": emitted > 0,
+                                    "x": x,
+                                    "y": y,
+                                }));
+                            }
+                            Err(_) => break,
                         }
                     }
                     Incoming::DebugTap { x, y, reply } => {

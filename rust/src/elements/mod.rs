@@ -476,6 +476,27 @@ fn event_bit(name: &str) -> Option<u32> {
     })
 }
 
+fn paste_dir() -> &'static std::path::Path {
+    use std::sync::OnceLock;
+    static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let tmp = std::env::temp_dir();
+        if let Ok(entries) = std::fs::read_dir(&tmp) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_string_lossy().starts_with("rngpui-paste-") {
+                    let path = entry.path();
+                    let _ = std::fs::remove_dir_all(&path);
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+        let dir = tmp.join(format!("rngpui-paste-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    })
+}
+
 pub fn write_clipboard_images(cx: &gpui::App) -> Vec<std::path::PathBuf> {
     use gpui::{ClipboardEntry, ImageFormat};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -484,6 +505,7 @@ pub fn write_clipboard_images(cx: &gpui::App) -> Vec<std::path::PathBuf> {
         return Vec::new();
     };
     let mut paths = Vec::new();
+    let dir = paste_dir();
     for entry in item.entries() {
         let ClipboardEntry::Image(image) = entry else {
             continue;
@@ -497,12 +519,7 @@ pub fn write_clipboard_images(cx: &gpui::App) -> Vec<std::path::PathBuf> {
             ImageFormat::Bmp => "bmp",
             ImageFormat::Tiff => "tiff",
         };
-        let path = std::env::temp_dir().join(format!(
-            "rngpui-paste-{}-{}.{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed),
-            ext
-        ));
+        let path = dir.join(format!("{}.{}", SEQ.fetch_add(1, Ordering::Relaxed), ext));
         if std::fs::write(&path, &image.bytes).is_ok() {
             paths.push(path);
         }
@@ -729,6 +746,19 @@ pub fn create_element(element: Arc<ReactElement>, window_id: u64) -> AnyElement 
         }
         "diff" => ReactDiffElement::new(element).into_any_element(),
         _ => ReactDivElement::new(element, window_id).into_element(),
+    }
+}
+
+#[cfg(test)]
+mod paste_dir_tests {
+    #[test]
+    fn paste_dir_is_per_launch_under_temp() {
+        let dir = super::paste_dir();
+        assert!(dir.starts_with(std::env::temp_dir()));
+        let name = dir.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("rngpui-paste-"));
+        assert!(name.contains(&std::process::id().to_string()));
+        assert!(dir.is_dir());
     }
 }
 

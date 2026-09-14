@@ -115,7 +115,7 @@ impl ReactInputElement {
                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                         focus_state.update(cx, |input, cx| input.focus(window, cx));
                     })
-                    .on_action({
+                    .capture_action({
                         let drop_id = element_id;
                         move |_: &gpui_component::input::Paste,
                               _window: &mut Window,

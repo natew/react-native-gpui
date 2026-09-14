@@ -2165,6 +2165,7 @@ impl Element for ReactDivElement {
                         return;
                     };
                     crate::bridge::files_dropped(id, paths.paths());
+                    cx.stop_propagation();
                 });
             }
         }

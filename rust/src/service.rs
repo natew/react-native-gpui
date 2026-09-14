@@ -2771,18 +2771,40 @@ fn install_app_commands(config: AppCommandConfig, cx: &mut App) {
 
 fn app_menu_name() -> String {
     #[cfg(target_os = "macos")]
-    if let Some(name) = macos_bundle_display_name() {
-        return name;
+    {
+        if let Some(name) = macos_bundle_display_name() {
+            return name;
+        }
+        if let Some(name) = macos_process_name() {
+            return name;
+        }
     }
-    std::env::var("RNGPUI_DISPLAY_NAME")
+    std::env::current_exe()
         .ok()
-        .filter(|name| !name.is_empty())
-        .or_else(|| {
-            std::env::var("RNGPUI_APP_NAME")
-                .ok()
-                .filter(|name| !name.is_empty())
+        .and_then(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string)
         })
-        .unwrap_or_else(|| "Team Machine".into())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "App".into())
+}
+
+#[cfg(target_os = "macos")]
+fn nsstring_to_owned(value: cocoa::base::id) -> Option<String> {
+    use cocoa::base::nil;
+    use objc::{msg_send, sel, sel_impl};
+    unsafe {
+        if value == nil {
+            return None;
+        }
+        let ptr: *const std::os::raw::c_char = msg_send![value, UTF8String];
+        if ptr.is_null() {
+            return None;
+        }
+        let name = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
+        if name.is_empty() { None } else { Some(name) }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2798,20 +2820,26 @@ fn macos_bundle_display_name() -> Option<String> {
         for key in ["CFBundleDisplayName", "CFBundleName"] {
             let ns_key = NSString::alloc(nil).init_str(key);
             let value: id = msg_send![bundle, objectForInfoDictionaryKey: ns_key];
-            if value == nil {
-                continue;
-            }
-            let ptr: *const std::os::raw::c_char = msg_send![value, UTF8String];
-            if ptr.is_null() {
-                continue;
-            }
-            let name = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
-            if !name.is_empty() {
+            if let Some(name) = nsstring_to_owned(value) {
                 return Some(name);
             }
         }
     }
     None
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_name() -> Option<String> {
+    use cocoa::base::{id, nil};
+    use objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        let info: id = msg_send![class!(NSProcessInfo), processInfo];
+        if info == nil {
+            return None;
+        }
+        let name: id = msg_send![info, processName];
+        nsstring_to_owned(name)
+    }
 }
 
 fn mac_chrome_menus() -> Vec<Menu> {

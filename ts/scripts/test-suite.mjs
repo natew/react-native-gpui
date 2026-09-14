@@ -88,6 +88,11 @@ const tasks = [
         cwd: root,
         timeoutMs: 20_000,
     },
+    // real platform drags across three text sites and reads the engine's own selection
+    // registry back (1.5s wall). the third site has no `selectable`, so the gate is only
+    // green because the readout can answer "nothing" — without it a readout that leaked a
+    // neighbouring row's text would satisfy the two positive cases.
+    { name: "text-selection", command: "node", args: ["scripts/text-selection-conformance.mjs"], cwd: root, timeoutMs: 20_000 },
 ];
 
 const results = [];

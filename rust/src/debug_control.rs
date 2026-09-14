@@ -221,6 +221,11 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
         .ok_or("missing $cmd")?;
     match cmd {
         "dump" => Ok(Incoming::DebugDump { reply }),
+        // the <Text selectable> drag selection, which is thread-local state on the main
+        // thread. It cannot be served from this socket thread (a thread_local read there
+        // answers None, which reads as "nothing is selected" rather than as an error), so
+        // it is an Incoming the main loop answers, like `dump`.
+        "selectedText" => Ok(Incoming::DebugSelectedText { reply }),
         "terminalPresentation" => Ok(Incoming::DebugTerminalPresentation {
             id: value
                 .get("id")

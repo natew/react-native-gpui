@@ -2339,6 +2339,11 @@ pub(crate) enum Incoming {
     DebugDump {
         reply: flume::Sender<serde_json::Value>,
     },
+    /// the live `<Text selectable>` drag selection. answered on the main thread because
+    /// `selection` keeps its registry in a thread_local.
+    DebugSelectedText {
+        reply: flume::Sender<serde_json::Value>,
+    },
     DebugTerminalPresentation {
         id: u64,
         reply: flume::Sender<serde_json::Value>,
@@ -4959,6 +4964,24 @@ fn main() {
                                     "dockBadge": dock.badge,
                                     "dockAttentionInformational": dock.attention_informational,
                                     "dockAttentionCritical": dock.attention_critical,
+                                }));
+                            }
+                            Incoming::DebugSelectedText { reply } => {
+                                let _ = reply.send(serde_json::json!({
+                                    "ok": true,
+                                    "type": "selectedText",
+                                    "text": crate::selection::selected_text(),
+                                    // survives the mouse-up: the registry is rebuilt on paint and
+                                    // the region stays live until the selection is dismissed, which
+                                    // is what makes a post-release Cmd+C copy the drag.
+                                    "bounds": crate::selection::selection_bounds().map(|bounds| {
+                                        serde_json::json!({
+                                            "x": f32::from(bounds.origin.x),
+                                            "y": f32::from(bounds.origin.y),
+                                            "width": f32::from(bounds.size.width),
+                                            "height": f32::from(bounds.size.height),
+                                        })
+                                    }),
                                 }));
                             }
                             Incoming::DebugTerminalPresentation { id, reply } => {

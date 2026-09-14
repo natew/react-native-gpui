@@ -213,10 +213,28 @@ round trip and stop it one poll iteration after the paint, so every sample carri
 up to a millisecond of quantisation. The engine records no input latency of its own:
 `RNGPUI_INPUT_PAINT_TRACE` captures `frame`, `focusedId`, `value` and `eventCount` and no timestamp,
 unlike `RNGPUI_SCROLL_LATENCY_PROBE`, which records an `Instant` at dispatch and prints the delta in
-`present()`. I added neither and left the 16.67ms assertion alone: scheduler delay is real elapsed
-engine time under contention, so an engine-side clock would not have turned this run green, and
-relaxing the budget to get green is the one move not available. The missing number is an uncontended
-reading, queued as the first run of `quiet-window.sh` at CPU idle at or above 30% (job `w-b3a4`).
+`present()`.
+
+The least-busy-window run came back and does not settle it (job `w-b3a4`; the window opened at idle
+48.85% and closed at 25.4%, loadavg 20.43 to 25.69): FAIL at median 21.02/p95 66.19ms, samples 10.19,
+10.41, 11.07, 11.60, 12.27, 13.40, 13.82, 18.21, 18.99, 20.39, 21.02, 22.40, 25.99, 26.68, 28.15,
+33.90, 37.84, 63.55, 66.19, 68.75. Seven of the twenty are inside budget and the floor is 10.19ms, so
+the engine still reaches a frame. The probe, run about forty seconds earlier in the same window,
+measured focus median 15.45/p95 27.54/max 48.98ms: inside budget on the median, where the gate's own
+median forty seconds later was 21.02ms for the same fixture and the same code path. Identical
+interactions span 10.19 to 68.75ms, a 6.7x spread, and the same measurement lands on opposite sides of
+the budget inside a single window. RAN.
+
+So the verdict this gate asks for is not obtainable on this machine, and the cause is its statistic
+rather than the engine. At twenty samples, `Math.ceil(20 * 0.95) - 1` is index 18, the second largest,
+so the gate asserts that at most one of twenty taps is slow. That is the standard nearest-rank p95, and
+at n=20 it is a near-max: one scheduler stall decides the run, which is why this gate reds nearly every
+time. I changed neither the assertion nor the sample count. Both move strictness, and a median of
+21.02ms is genuinely outside the budget rather than a tail artifact, so this is not a case of a good
+number spoiled by an outlier. Settling it needs a window whose idle never leaves a chosen floor, since
+this one drifted 48.85% to 25.4%, or an engine-side input clock that the engine does not have. Three
+samples cluster at 63.55, 66.19 and 68.75ms, near four 60Hz frame periods; whether that is an engine
+hitch or four frames of scheduler delay is exactly what nothing available here can separate.
 
 ## The Team Machine feed gate is load-bound, not a regression from `8edbfb9`
 
@@ -460,10 +478,11 @@ per-item cost belongs to whoever owns this gate's intent.
 - Of the two engine-lane entries in that list, `startup-conformance` now has both readings it was
   missing (warm at loadavg 10.5-11.1: 88-136ms internal, PASS, twice; coldest launch after idle:
   201ms internal / 236ms wall, FAIL) and so is characterized rather than merely unrun.
-  `input-runtime`'s focus latency has one measurement and needs one more: a run at CPU idle at or
-  above 30%, queued as job `w-b3a4` through `ts/scripts/quiet-window.sh`. Its floor is already in
-  budget (10.35ms) and its tail is contention, so what is missing is the uncontended median, not a
-  verdict.
+  `input-runtime`'s focus latency is characterized too, and the answer is that this machine cannot
+  produce its verdict: at a window opening on 48.85% idle the gate reads median 21.02/p95 66.19ms
+  while the twin probe reads median 15.45ms in the same window. The gate's p95 is the second largest
+  of twenty samples, so one stall decides it, and the median it also prints is genuinely over budget.
+  Recorded above; no change made to the assertion, the sample count, or the engine.
 - Triage sweep status. PASS: `anim-overlay`, `card-corner-shadow`, `check-transform`, `context-menu`,
   `describe`, `webview-overlay`, `drive`, `reanimated-scroll`, `reanimated`, `sustained-reanimated`,
   `scroll-performance` (`p95=7.83ms latencyP95=13.13ms moved=1530px`), `presentation-pacing`

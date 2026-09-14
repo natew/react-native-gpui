@@ -1,0 +1,258 @@
+# Desktop engine stress — react-native-gpui under the Team Machine desktop app
+
+Branch `perf/desktop-engine-stress`, worktree `~/.worktrees/rngpui-desktop-engine-stress`,
+based on `origin/main` `2555170`. Owns the upstream engine only. The Team Machine desktop app and
+its gates are owned by the desktop QA lane (`desktop-deep-qa-manager-2`); findings in app or
+dependency scope are handed back, not patched here. Nothing in this branch has been pushed: the
+brief gates the push on Muse integration proof plus approval from `desktop-engine-integration-qa`.
+
+Method: every claim is labeled RAN (I ran it, output quoted), READ (I read the code, file:line),
+TESTED (ran it more than one way), INFERRED (follows from named observations), GUESSED. Gates live
+in `ts/scripts/` and print `NAME_CONFORMANCE PASS|FAIL` with `process.exitCode = 1` on failure.
+
+The repo has no CI of any kind (no `.github/` directory; `gh workflow list` is empty, exit 0), so
+local gates are the only receipt this branch can have.
+
+## Fixes landed
+
+### 1. `:focus-visible` was true on a fresh mount — `8189058`
+
+`useKeyboardNavigationController` requires an `initialId`, so every app using keyboard navigation
+mounts with a focused target. `initialFocusVisible` defaulted to `true`, so that target read
+`:focus-visible` on the first frame with zero input and its ring painted on a cold launch. On the
+desktop app this is the full-stage `FOCUS_RING.dark` box shadow, which reads as a permanent divider
+between the list and stage panes.
+
+The default is now `false`; `initialFocusVisible: true` keeps the old behavior. The second-order
+effect mattered as much as the default: `showCurrentFocus()` returns early when the ring is already
+visible, so the keyboard reveal was a no-op and no keyboard path could clear the pre-lit ring.
+
+Gate `conformance:focus-visible` asserts both directions, hidden at mount and visible after
+`activateFocused()`, because a regression that removed the ring outright would satisfy the first
+line alone. RAN pre-fix: `initial alpha=true beta=false` with no keyboard line at all. Post-fix:
+`initial alpha=false beta=false` then `keyboard alpha=true beta=false`. The negative control is
+`RNGPUI_FOCUS_VISIBLE_INITIAL=1`, read by the fixture at `ts/examples/focus-visible-conformance.tsx:46`,
+which opts back into the old default and makes the gate fail on the first line.
+
+### 2. Trace diagnostics — `561d1fc`
+
+Behavior-neutral. The level-2 `setNodeStyle` trace now prints animated values, not just keys, and
+`RNGPUI_LOG_THREAD=1` prefixes each line with the runtime that spoke (`jsc-js` or `jsc-ui`). Both
+were needed to isolate the dialog finding below. Default output is unchanged.
+
+### 3. Scroll settle repainted the whole tree — `8edbfb9`, reverted `cb485a3`, reapplied `f008c1e`
+
+`suppress_pseudo_hover_during_native_scroll` (`rust/src/elements/div.rs`) refreshes the tree 80ms
+after a native scroll ends, to re-derive the retained pseudo hitboxes at the final offset. That
+refresh called `window.refresh()` without arming the paint-only fast path, so it reached the
+retained-layout gate with nothing dirty, failed `want_reuse`, and forced a full taffy solve at the
+end of every native scroll.
+
+RAN, pre-fix: the interleaved `[retained]`/`[draw]` trace shows the settle frame with
+`paint_only=false` and every dirty flag false, then `[draw] 32-44ms reuse=false` against
+`[draw] 5.8ms reuse=true` for the neighbouring frames. Pre-fix 2 full-layout frames per run in 4/4
+runs, post-fix 0 in 4/4.
+
+Gate `conformance:scroll-settle-retained` waits for quiescence rather than for a clock, sends one
+`nativeDriverWheel` began/ended pair, and asserts every `[draw]` in the slice reports `reuse=true`.
+It honors `RNGPUI_SERVICE` so an A/B against a pre-fix binary is a real A/B; several older gates
+overwrite that variable unconditionally, which silently collapses an A/B into two runs of the same
+binary.
+
+The revert and reapply are both in the history rather than squashed: the revert was a mistake made
+on a non-reproducible measurement (see below), and this branch does not rewrite history. The net
+effect is the original change.
+
+## Local validation on this tip
+
+RAN, `bun run test` (`ts/scripts/test-suite.mjs`): `TEST_SUITE_TOTAL seconds=24.755`,
+`TEST_SUITE_PASS`, 40 tasks, none skipped. Includes `focus-visible` (5.829s),
+`scroll-settle-retained` (5.057s), `opacity-ramp` (6.800s), `opacity` (2.580s), `animation-diff`
+(5.934s), `offthread-stall` (3.085s), `raf-pacing` (1.884s), `cargo-test` (12.827s) and `typecheck`
+(6.237s).
+
+RAN, `conformance:reanimated`: `REANIMATED_CONFORMANCE distinctWidths=16 setNodeStyle=267
+applyTree=4 ramp=PASS fastPath=PASS`.
+
+RAN, `conformance:dialog-reanimated`: still FAIL, `opacitySamples=1 opacities=[1] ySamples=0
+setNodeStyle=3 applyTree=6 lateBg=#ffffff exitOpacities=[1] ramp=FAIL fastPath=FAIL bgPaints=PASS
+exitRamp=FAIL exitUnmount=PASS`. That finding is open, not fixed.
+
+## The Team Machine feed gate is load-bound, not a regression from `8edbfb9`
+
+RAN, real app integration. `gui/native-shell` `feed-legendlist-scroll` failed with
+`timed out waiting for feed LegendList tree targetId=4 rows=Feed row 74..79`: the deep row never
+renders, and the list never moves off the top. It fails on every binary I point the gate at, my
+engine build included.
+
+I first read that as my regression and reverted `8edbfb9` as `cb485a3`. That was wrong, and the
+evidence against it is now four-sided:
+
+- The reverted build (Rust source in `div.rs` byte-identical to the control) failed 3/3.
+- The control binary, which had passed 3/3 earlier, was re-run at the load that then obtained
+  (29 to 39): 1 PASS, 2 FAIL, same `rows=Feed row 74..79` signature.
+- The two arms therefore overlap. The variable that tracks the outcome is machine load, not the arm.
+- The original 3/3-versus-3/3 separation was an ordering artifact: in that batch I always ran `mine`
+  before `control` within each pair, so any cold-start or time-varying effect landed systematically
+  on one arm.
+
+What actually moved: load average went 14.05 to 38.91 with external consumers I do not own, sampled
+at the failure: Android emulator qemu 147.7%, `xcodebuildmcp` node-runtime 115.8%, another session's
+`TeamMachine Dev.app` 100.1%, `~/team-machine/.deploy/tm` 97.5% up 1h53m, `rustc` 89.5%. No service
+leak of mine: `ps -eo pid,comm | grep -c rngpui-service` = 1. The app's own perf gates require a
+clean load under 9.0, and this gate's phase-2 wait is 8s of wall clock.
+
+Two methodology traps cost real time here and are worth carrying forward:
+
+- `rust/target/release/rngpui-service` has `LC_RPATH = @executable_path` and `@loader_path`, and
+  `libghostty-vt.dylib` lives in that directory. Copying the binary to `/tmp` to A/B it produces
+  `dyld: Library not loaded: @libghostty-vt.dylib`, and a dead service presents as "timed out waiting
+  for the tree", which I first misread as a load failure. Both arms of A/B #1 were dead binaries.
+  Stage A/B binaries as siblings of the dylib and re-sign after any `cargo build`:
+  `codesign --force --sign - --entitlements rust/jsc.entitlements <binary>`.
+- An A/B needs the arms interleaved in both orders, and a null result needs a control that can fail.
+  A pass/fail gate under variable external load cannot separate a 2ms layout difference at all.
+
+## Open finding: a Tamagui `transition` enter has nothing to animate from
+
+Engine-side finding, reproduced in this repo's own gate. Handed to the desktop QA lane; not fixed,
+because the evidence puts the locus outside the engine.
+
+RAN: `conformance:dialog-reanimated` reports
+`opacitySamples=1 opacities=[1] ySamples=0 setNodeStyle=2 applyTree=7 lateBg=#ffffff exitOpacities=[1] ramp=FAIL fastPath=FAIL bgPaints=PASS exitRamp=FAIL exitUnmount=PASS`.
+At the seam, `_updateProps` is called exactly twice in the whole run, once for open and once for
+close, each `ops=4`, each already settled:
+`opacity=1 transform=[{"scale":1},{"translateY":0}]`, from `[jsc-ui]`. The enter start
+(`opacity` 0, `scale` 0.85, `translateY` 24) is never written and never sampled.
+
+READ, `@tamagui/animations-reanimated` (prebuilt chunk, the worklet the mapper calls per key),
+`animateSnapshotValue`:
+
+```js
+var cycleGated = gated && (currentlyExiting || currentlyCompletingEnter || currentlyCompletingUpdate);
+if (!previouslyEmitted && seedValue === void 0 && !cycleGated) return targetValue;      // :2375
+return applyAnimation(targetValue, config, callback,
+  previouslyEmitted ? void 0
+    : seedValue !== null && seedValue !== void 0 ? seedValue
+    : getImplicitDefault(implicitKey, targetValue), ...);                              // :2461
+```
+
+`seedValue` is `snapshot.seeds[key]`, and `seeds[key] = lastPainted[key]` (`:2100-2106`), the last
+value painted on screen. On a cold mount nothing has been painted for that key, so it is `undefined`.
+`getImplicitDefault('opacity', 1)` returns 1, the target. So on the first mapper frame the driver has
+neither a seed nor an enter cycle flagged, and **both** exits yield the target: the early return at
+`:2375`, or `applyAnimation(target, ..., start = 1)` at `:2461`, an animation from 1 to 1.
+
+That is the observed `opacities=[1]` exactly. No frame is dropped and no value is reordered; the
+driver was never given a start value, so a one-write settle is the correct output for its inputs.
+
+Consequences for where the bug lands: the enter start must reach the driver as either a painted seed
+(tamagui core paints the enter value on the first commit and the driver seeds from it) or an enter
+cycle flag (`currentlyCompletingEnter`, set by the driver's own enter dispatch). Neither is present
+at the first mapper frame. The engine's contribution to the first is what the first commit's style
+carries; to the second, the worklet dispatch ordering.
+
+Negative controls on the same seam, RAN: `conformance:reanimated`
+`setNodeStyle=266 ramp=PASS fastPath=PASS`, and `conformance:sustained-reanimated` `fastPath=PASS`.
+Worklet delivery and the overlay do ramp, so worklet frames themselves are not the fault.
+
+Retracted (mine): an earlier INFERRED claim in this file said tamagui resolves `transition="medium"`
+to `entries: []` through `resolveTransition` because its animations config is not threaded in. The
+app lane disproved it at the real path: `resolveTransition('medium', { animations })` returns a
+spring, `duration 300`, `stiffness 438.6`, `damping 35.6`, `diagnostics: []`, on both the gpui and
+the reanimated maps, with the same raw closure map the driver uses. Preset miss is dead.
+
+Also relevant, READ: `__rngpui_animateNodeStyle` has a live Rust handler
+(`host_animate_node_style` to `Incoming::AnimateNodeStyle` to `rust/src/anim_overlay_tween.rs`) and no
+JS caller anywhere: not in `ts/src`, not in the prebuilt tamagui or reanimated chunks, not in the
+app's `node_modules/@tamagui`. `git log -S` shows the only commit that ever contained it is `f76868e`,
+which installs the host fn. A `transition`-prop animation therefore cannot reach the native tween
+engine in this stack, whatever the driver emits.
+
+Next probe, named: instrument the driver's first mapper frame in a fixture this repo owns
+(`RNGPUI_DIALOG_FIXTURE` redirects the gate, so an `ts/examples/` copy keeps it in engine scope) and
+log `snapshot.seeds.opacity`, `animatedValues.opacity` and `isCompletingEnterRef.value` at that
+frame. That distinguishes "core painted no enter value" from "the enter cycle never started".
+
+## Read and deliberately not landed: `_WORKLET`
+
+READ: the native runtime decorates both runtimes with this global,
+`Common/cpp/worklets/WorkletRuntime/WorkletRuntimeDecorator.cpp:67` sets `_WORKLET` true on the UI
+runtime and `RNRuntimeWorkletDecorator.cpp:25` sets false on the RN runtime. This engine sets it only
+transiently, inside `runWithWorkletFlag` (`ts/src/reanimated/worklet-runtime.ts:1738-1747`), and grep
+over `ts/src` finds no other writer. The seam already claims a UI kind for both runtimes
+(`seam.ts:198-201`, and `worklets.ts:1116-1122` explains that choice), so `_WORKLET` is an
+inconsistency in the same decoration the engine already performs.
+
+Not landed, and it should stay that way without a symptom. The only consumer in this stack is
+tamagui's `updateMapperState`, the sole writer of `mapperState.emitted`, so the global's absence
+leaves `emitted` permanently `{}`. That cannot produce the dialog symptom: `emitted` reaches
+`animateSnapshotValue` as `previouslyEmitted`, and both of its uses are dead here (`:2375` needs
+`seedValue === undefined` either way; `:2461` yields 1 either way, because the fallback is
+`getImplicitDefault` = 1). RAN, the line is not behavior-neutral either: with it the dialog gate
+reports `setNodeStyle=0 applyTree=4 exitUnmount=FAIL`, and the two runs without it report
+`setNodeStyle=2 applyTree=7 exitUnmount=PASS` and `setNodeStyle=3 applyTree=6 exitUnmount=PASS`. One
+run against two is a thin arm, but `exitUnmount` flips categorically rather than drifting, so the
+line does something I have not explained, and landing an unexplained change to a global that
+third-party worklet code branches on is worse than leaving a documented inconsistency.
+
+## App integration
+
+Built the engine into the Team Machine test app without publishing:
+`RNGPUI_LOCAL=<worktree>/ts bun run bundle:gpui` wrote `native-shell/.gpui/app.js` (11289 KB,
+`lib=/Users/n8/.worktrees/rngpui-desktop-engine-stress/ts`). `.gpui/` is gitignored, so no app source
+was touched and no app file was modified at any point in this lane.
+
+RAN, wave 1 (`--filter new-tab,hover-active,timeline,command-palette,data-model,diff`):
+`CONFORMANCE_PASS checks=11 failed=0` in 40.3s wall, no `FOCUS_THEFT`. The same filter against the
+app lane's own build also reports 11/11, so this is like-for-like and my engine build is not a
+regression on those surfaces. `hover-active` (28.13s) and the four perf-labelled checks
+(`timeline-stream-perf`, `diff-sidebar-perf`, `heavy-timeline-perf`, `diff-open-perf`) passed.
+
+RAN, wave 2 (the full app gate list): `CONFORMANCE_FAIL checks=15 failed=4 wall=79.8s`. Passed:
+composer, scrollview-onscroll, composer-voice-gesture, focus-geometry, focus-measure, markdown,
+ws-replay-storm, tabs, terminal-keys, glass, boot. Failed: `feed-legendlist-scroll` (9.77s),
+`stage-surface` (5.71s), `pane-focus` (30.16s), `terminal-enter` (66.10s).
+
+Triage of the four:
+
+- `pane-focus` and `stage-surface` are the same app-side fixture drift: the gates look nodes up by
+  display title while the fixtures label by slug. `pane-focus` is already documented in the app
+  lane's own report; `stage-surface` fails on `no node matched "Session timeline"` and is the same
+  family, undocumented. App scope, not mine.
+- `terminal-enter` fails on a backend error, `ServerOverloaded` and
+  `Orez HTTP cookie is not numeric: 00000000000undefined`, and the app report already flags it as an
+  engine-owner gap. Its 66.10s wall is consistent with backend retry, so I do not read the failure as
+  engine-side.
+- `feed-legendlist-scroll` is the load-bound gate above.
+
+No app gate failed in a way I could attribute to the engine.
+
+## Remaining gaps
+
+- Dialog finding: the first-mapper-frame probe named above. Until then the driver-side start value is
+  located by reading, not by observation.
+- Perf-shaped measurements carry a caveat, not a skip. Load held 18.6 (1m) / 29.3 (5m) / 25.4 (15m)
+  during wave 1 and rose to 38.91 later, against the app's own requirement of a clean load under 9.0.
+  The checks above are evidence that the surfaces work; they are not evidence of any latency number.
+  These need a clean-load re-run: `session-drag`, `session-pingpong`, `session-scrub`, `tab-switch`,
+  `native-timeline-scroll`, `desktop-interaction-perf`, `controlroom-terminal-pingpong`.
+- Untriaged engine gates from the initial sweep, each needing a negative control before any claim:
+  `conformance:box-model`, `conformance:card-corner-shadow`, `conformance:input-runtime`. The
+  `AGENTS.md` Display P3 caveat applies to any color assertion in these.
+- `plans/HANDOFF.md` still describes the single-process Hermes design and is stale after the
+  JavaScriptCore swap. Left alone: another lane's document.
+
+## Corrections to earlier reasoning in this lane
+
+Recorded because the wrong version is plausible enough to be reused.
+
+- I claimed the UI runtime's `process.env` is empty, and built an argument on it. WRONG.
+  `rust/src/jsc.rs:1183-1188` gives the UI runtime the full `std::env::vars()`, and base `2555170`
+  did the same at lines 1075 and 1158. `561d1fc` never touched that code. Diagnostics such as
+  `RNGPUI_SEAM_DEBUG` are reachable from the UI runtime, which is consistent with the seam debug
+  output this file relies on.
+- I claimed the negative control `RNGPUI_FOCUS_VISIBLE_INITIAL` does not exist and that this file
+  asserted a control that was never written. WRONG, and the near-miss is the useful part: my grep
+  covered `ts/src` only, and the variable is read by the fixture at
+  `ts/examples/focus-visible-conformance.tsx:46`. Absence of a hit in a narrow scope is not absence.

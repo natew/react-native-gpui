@@ -120,6 +120,11 @@
   };
   g.__rngpui_fireFrame = function () {
     __rafArmed = false;
+    // a frame that fires with nothing queued is how an on-demand loop goes quiet:
+    // log both counts so a stalled animation is distinguishable from an idle one.
+    if (__rafDebug) {
+      g.__rngpui_log('debug: rAF fire #' + (++__rafSeq) + ' cbs=' + __rafCallbacks.size + ' fin=' + __rafFinalizers.length);
+    }
     // snapshot ids: callbacks registered DURING this frame run next frame, and a
     // callback cancelling a same-frame sibling must win (browser semantics).
     var ids = Array.from(__rafCallbacks.keys());

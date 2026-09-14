@@ -356,7 +356,20 @@ extern "C" fn host_apply_tree(ud: *mut c_void, arg: *const c_char) {
 }
 
 extern "C" fn host_log(_ud: *mut c_void, arg: *const c_char) {
+    // RNGPUI_LOG_THREAD names the runtime on each line: the preamble is shared by
+    // the React runtime and the reanimated UI runtime, so an unattributed line
+    // cannot say which one spoke. Off by default because gates match on the raw
+    // line.
+    if log_thread() {
+        let thread = std::thread::current();
+        eprintln!("[{}] {}", thread.name().unwrap_or("?"), arg_str(arg));
+        return;
+    }
     eprintln!("{}", arg_str(arg));
+}
+
+fn log_thread() -> bool {
+    std::env::var("RNGPUI_LOG_THREAD").is_ok_and(|v| v != "0")
 }
 
 // reanimated fast path: the TS seam coalesces all `_updateProps` ops within one rAF
@@ -400,11 +413,23 @@ extern "C" fn host_set_node_style(ud: *mut c_void, arg: *const c_char) {
                 let from = thread.name().unwrap_or("?");
                 for (id, style) in &ops {
                     let keys: Vec<&str> = style.keys().map(|k| k.as_str()).collect();
+                    // the values, not just the keys: a spring that ramps and one that
+                    // resolves in a single write have the same key list, so a count of
+                    // crossings cannot tell a snap from an animation.
+                    let animated: Vec<String> = ["opacity", "transform", "top", "scale", "y"]
+                        .iter()
+                        .filter_map(|k| {
+                            style
+                                .get(*k)
+                                .map(|v| format!("{}={}", k, serde_json::to_string(v).unwrap_or_default()))
+                        })
+                        .collect();
                     eprintln!(
-                        "[anim-trace]   op id={} from={} keys={}",
+                        "[anim-trace]   op id={} from={} keys={} values=[{}]",
                         id,
                         from,
-                        keys.join(",")
+                        keys.join(","),
+                        animated.join(" ")
                     );
                 }
             }

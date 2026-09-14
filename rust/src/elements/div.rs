@@ -524,14 +524,6 @@ fn suppress_pseudo_hover_during_native_scroll(window: &Window, cx: &mut App) {
                     // The retained pseudo hitboxes describe the previous painted
                     // offset. Refresh first; the normal paint path records the final
                     // hitbox and emits exactly that row's enter event.
-                    //
-                    // This refresh repaints the tree the scroll already committed, so
-                    // it is a paint-only frame and must say so: unarmed it reaches the
-                    // retained-layout gate with nothing dirty, fails `want_reuse`, and
-                    // forces a full taffy solve — one ~25ms hitch at the end of every
-                    // native scroll. The gate still re-checks dirtiness, so a React
-                    // commit landing inside the settle window falls back correctly.
-                    crate::anim_overlay::arm_paint_only_frame();
                     window.refresh();
                 });
                 break;

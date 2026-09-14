@@ -174,9 +174,49 @@ init and window creation take about twice as long when 22 runnable tasks share 1
 header says it fails on internal first-render time while `measure-startup.mjs` asserts the wall max;
 both were over in every failing run, so that inconsistency decides nothing here and I left both alone.
 
+The quietest batch I have run moves the variable off load. At loadavg 8.82 the six launches measured
+wall/internal 236/201, 200/189, 188/176, 172/160, 150/140, 141/132ms, monotonically faster, and red at
+`wall max 236.3ms > 200ms`. Two batches fired immediately after, at loadavg 10.52 and 11.09, so at equal
+or higher load, measured 99-136ms wall and 88-125ms internal across all twelve launches and PASSED
+both. RAN. The discriminating observation is that load pair: were load the variable, the later batches
+would have been the slower ones. What differs is recency, since the failing batch was the first launch
+after roughly 45 minutes idle and the passing ones followed launches. The engine's warm cold start is
+88-136ms internal, inside the budget with real headroom, while the coldest first launch of a session
+measured 201ms internal and 236ms wall. The gate asserts the max of six, so it asserts the coldest run
+in the batch, which is the number a user's first launch after idle gets. Budget and metric untouched.
+
+Load average is the wrong instrument here, and it is why the wait for a clean window was mis-aimed.
+`top` has read 19-41% idle at loadavg 30, and 43.9% idle at loadavg 49.6, so loadavg counts runnable
+threads rather than available CPU, and it read 8.82 during the cold batch above while a warmer machine
+at 11.09 passed. A 45-minute detached wait keyed on `loadavg < 9` expired without firing.
+`ts/scripts/quiet-window.sh` replaces it: it samples CPU idle from the second of two `top -l 2`
+samples, requires the condition to hold for N consecutive readings, and prints its readings on both
+sides of the command it runs. Controls, run: a trivially satisfiable condition opened and ran its
+command, a failing command propagated rc=1, and an unsatisfiable one timed out naming the deadline it
+used. The first also measures how narrow a window is here, bracketing one `echo` with idle 38.23%
+before and 4.56% after. The controls caught a real bug in it, since `status` is read-only in zsh: the
+close line never printed and the script exited 1 on every run.
+
 `input-runtime`'s `click-to-painted-focus`, a 16.67ms budget, median 18.19/p95 21.71ms at load 22
 with individual samples at 11.06ms. The machine was running a SootSim simulator conformance app, an
 `xcodebuildmcp` build, a codex session, `agy` and three `bun` runs.
+
+Re-run at loadavg 20.43 rising to 39.05 during the gate: FAIL at median 22.46/p95 36.25ms, samples
+51.61, 26.37, 30.77, 16.60, 36.09, 25.76, 36.25, 13.88, 21.26, 23.21, 18.17, 20.48, 21.02, 22.46, 22.59,
+16.37, 15.46, 10.35, 33.12, 17.76. Five of the twenty, 10.35 to 16.60ms, are inside the budget, so the
+uncontended floor is in budget and the tail is contention. RAN.
+
+That number is not the engine's, and neither is the probe that looks like one.
+`probe:input-latency` is a non-asserting twin of the same loop: identical `settledFrameCount` gate,
+identical `sleep(1)` poll, identical `realtap`. Both start the clock before the tap's control-socket
+round trip and stop it one poll iteration after the paint, so every sample carries that round trip and
+up to a millisecond of quantisation. The engine records no input latency of its own:
+`RNGPUI_INPUT_PAINT_TRACE` captures `frame`, `focusedId`, `value` and `eventCount` and no timestamp,
+unlike `RNGPUI_SCROLL_LATENCY_PROBE`, which records an `Instant` at dispatch and prints the delta in
+`present()`. I added neither and left the 16.67ms assertion alone: scheduler delay is real elapsed
+engine time under contention, so an engine-side clock would not have turned this run green, and
+relaxing the budget to get green is the one move not available. The missing number is an uncontended
+reading, queued as the first run of `quiet-window.sh` at CPU idle at or above 30% (job `w-b3a4`).
 
 ## The Team Machine feed gate is load-bound, not a regression from `8edbfb9`
 
@@ -416,8 +456,14 @@ per-item cost belongs to whoever owns this gate's intent.
   during wave 1 and rose to 38.91 later, against the app's own requirement of a clean load under 9.0.
   The checks above are evidence that the surfaces work; they are not evidence of any latency number.
   These need a clean-load re-run: `session-drag`, `session-pingpong`, `session-scrub`, `tab-switch`,
-  `native-timeline-scroll`, `desktop-interaction-perf`, `controlroom-terminal-pingpong`,
-  `startup-conformance` (200ms cap) and `input-runtime`'s focus latency (16.67ms budget).
+  `native-timeline-scroll`, `desktop-interaction-perf`, `controlroom-terminal-pingpong`.
+- Of the two engine-lane entries in that list, `startup-conformance` now has both readings it was
+  missing (warm at loadavg 10.5-11.1: 88-136ms internal, PASS, twice; coldest launch after idle:
+  201ms internal / 236ms wall, FAIL) and so is characterized rather than merely unrun.
+  `input-runtime`'s focus latency has one measurement and needs one more: a run at CPU idle at or
+  above 30%, queued as job `w-b3a4` through `ts/scripts/quiet-window.sh`. Its floor is already in
+  budget (10.35ms) and its tail is contention, so what is missing is the uncontended median, not a
+  verdict.
 - Triage sweep status. PASS: `anim-overlay`, `card-corner-shadow`, `check-transform`, `context-menu`,
   `describe`, `webview-overlay`, `drive`, `reanimated-scroll`, `reanimated`, `sustained-reanimated`,
   `scroll-performance` (`p95=7.83ms latencyP95=13.13ms moved=1530px`), `presentation-pacing`
@@ -452,3 +498,10 @@ Recorded because the wrong version is plausible enough to be reused.
   asserted a control that was never written. WRONG, and the near-miss is the useful part: my grep
   covered `ts/src` only, and the variable is read by the fixture at
   `ts/examples/focus-visible-conformance.tsx:46`. Absence of a hit in a narrow scope is not absence.
+- I waited 45 minutes for a clean window on `loadavg(1m) < 9` and called the machine busy when it
+  expired. The wait was the wrong instrument, and the busy part was beside the point: `top` reported
+  19-41% idle at loadavg 30 and 43.9% idle at loadavg 49.6, and the batch that red at loadavg 8.82 was
+  followed by two batches that passed at 10.5 and 11.1. Load average counts runnable threads on this
+  box and barely tracks available CPU, so a wait keyed on it can expire while a third of the machine
+  is idle and can succeed while a cold launch is slow. Sample CPU idle instead
+  (`ts/scripts/quiet-window.sh`), and do not read a load number as a capacity claim.

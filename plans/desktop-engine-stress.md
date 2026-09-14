@@ -637,16 +637,25 @@ control that fails when the collect is replaced by `return 0`.
   them at `rust/vendor/gpui-0.2.2-patched/src/window.rs:2043` and `:2182`. A `rust/src`-only search
   says they have no consumer, which is wrong, so search `rust/vendor` before calling any probe env
   var dead.
-- `npm test` is 42 tasks, with the new `jsc-shim` and `text-selection` checks inside it. `input` fails
-  deterministically (3/3 standalone, and in every suite run): it resolves an AX element index from the
-  window's tree, then the next `cua-driver call type_text` fails with `Element index 1 not found. Call
-  get_window_state first.` Two environment facts explain it and neither is this change. `cua-driver
-  status` reports no daemon running, so nothing carries the resolved index between two CLI invocations,
-  and `plans/HANDOFF.md:206` already records that AX-by-index does not work here because the tree reads
-  empty, with pixel driving as the documented route; the harness also keeps its windows offscreen
-  (`assertWindowOffscreen`). The engine does publish an AX tree (`rust/src/ax.rs`), so this is not a
-  missing engine feature either. Not fixed: converting an input gate to pixel driving is a harness
-  change, and whether a non-offscreen window is allowed here is not this lane's call.
+- `npm test` is 42 tasks and now passes all 42. `input` was the last red, and it is fixed: the driver
+  resolved an AX element index from `get_window_state`, then the next `cua-driver call type_text` failed
+  with `Element index 1 not found. Call get_window_state first.` Cause: `cua-driver call` is one process
+  per invocation, and an `element_index` only means something to the daemon that produced the snapshot
+  it came from. This machine reports `cua-driver daemon is not running`, so the index cannot survive to
+  the next invocation and the call fails every time. Fixed by addressing the pid's focused element
+  instead of an index, which `type_text` documents as the default path and which the `hotkey` call in
+  the same sequence already used. The AX coverage is kept: the readiness wait still requires the engine
+  to tag the input `[element_index N]` in its tree, and the fixture's assertions (exact `alpha\nbeta`,
+  two Enter keypresses, exactly one submit, `changeCount > 0`) are untouched.
+  RAN: pre-fix `input` failed in the suite; post-fix 22 of 23 standalone runs pass with no daemon
+  running, and the suite is 42/42. The one failure was a `draft=""` fixture timeout in the batch that
+  ran immediately after `cua-driver stop`, and a stale `cua-driver call press_key` still carrying
+  `element_index` from the pre-fix batch was live at that moment (its argv proves the provenance).
+  INFERRED, not proven, that the stale process is what dropped that run's input. The daemon is not
+  needed: a control run with the daemon deliberately absent and the daemon up both pass, so the
+  addressing was the only broken variable. An earlier version of this bullet claimed the AX tree "reads
+  empty" here, which is wrong, `get_window_state` returns the tagged input, and proposed pixel driving
+  as the route; neither was necessary.
 - `input-visual`: resolved (`984d01a`), and the resolution is a gate defect, not an engine one. The
   earlier note here said it had failed once in six suite runs and I could not characterize it. It
   reproduces at 16-way concurrency (the suite's own profile, eight tasks each opening a GPUI window):

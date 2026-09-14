@@ -435,6 +435,112 @@ Triage of the four:
 
 No app gate failed in a way I could attribute to the engine.
 
+## Review: the Muse desktop changes make no incorrect engine assumptions
+
+Read from `/Users/n8/team-machine`, read-only, on the three commits that carry today's desktop work.
+`qa/desktop-engine-integration` has no commits `main` does not, so the assembled boundary is `main`
+itself. Verdict: ACCEPT, no findings returned.
+
+- `692c63172` adds `selectable` beside `select="text"` at 36 desktop text sites. READ, and this is the
+  change that most needed checking, because the commit's own reasoning is about the web: on web `select`
+  is shorthand for `userSelect`, so `select="text"` already selects there. The engine implements
+  selection for the RN `selectable` prop only — `ts/src/reconciler.ts:1170` sets `node.selectable` from
+  `props.selectable === true`, and `grep -rn "userSelect|user_select|UserSelect" rust/src ts/src`
+  returns nothing at all. So `select="text"` is a silent no-op here and the added prop is the one the
+  engine reads. Correct.
+- The nested shape in that same commit (an outer selectable `SizableText` wrapping an inner plain one,
+  `RightPanel.tsx:348`, `:373`) is only sound if the outer's own text and layout contain the
+  inner run's glyphs. READ: `gatherRuns` walks the `<Text>` tree into flowing runs and the parent's
+  string is their concatenation (`ts/src/reconciler.ts:1042,1163-1170`), so a press anywhere in the
+  parent hitbox anchors a selection covering the nested run. Now also TESTED, by the gate below.
+- `1e8540826` submits the composer on Enter when `IS_GPUI_DESKTOP`. READ both halves of the contract:
+  the engine's key payload carries `key`, `shiftKey`, `ctrlKey`, `metaKey` and `isComposing` on the event
+  and on `event.nativeEvent` (`ts/src/reconciler.ts:763-784`), which is the access pattern the app uses,
+  and a real Enter is emitted as the string `"Enter"` with the Input's live IME state
+  (`rust/src/service.rs:130-133,1784`). `state.key === 'Enter'` therefore matches. One overlap worth
+  knowing rather than a defect: for a multiline Input the engine also strips the submit newline itself
+  after emitting the key (`service.rs:1797`), so both layers act on the same keystroke.
+- The mobile commit `475783611` (`OverviewGridList.native.tsx`, React Compiler bailouts) is out of this
+  review's scope: `.native.tsx` is the mobile variant of a file that has a `.desktop.tsx` sibling, the
+  desktop renderer is what this engine drives, and the change moves a render-phase ref write into an
+  effect, which is a React question and not an engine contract.
+
+## The `<Text selectable>` drag selection had no coverage at all; it has a gate now
+
+`grep -rn "selectable" ts/examples ts/scripts` returned nothing before this change: the engine's
+selection feature, which the app now marks 36 desktop sites with, was untested here. Since the review
+above turns on the nested-run shape, the source reading was not enough on its own.
+
+Three pieces, one slice:
+
+- `selectedText` on the control socket, answered by the main loop as an `Incoming` rather than from the
+  socket thread. That is not a style choice: `selection` keeps its registry in a `thread_local`
+  ("Everything lives on the main thread (gpui is single-threaded)", `rust/src/selection.rs:12`), so a
+  socket-thread read would answer `None`, which is indistinguishable from "nothing is selected". The
+  reply carries the text and the live region bounds.
+- `ts/examples/selection-conformance.tsx`: `sel-plain` (a selectable Text), `sel-nested` (a selectable
+  Text whose text lives in a nested Text, the app's shape at `RightPanel.tsx:348` and `:373`), and
+  `sel-none` (no `selectable`), with a unique word per site.
+- `ts/scripts/text-selection-conformance.mjs`, in the suite as `text-selection` (1.5s standalone,
+  2.9s in suite).
+
+RAN: `TEXT_SELECTION_CONFORMANCE PASS plain="phaplain one two three" nested="etalead: betanestedfourfive
+six" unselectable=null`. The nested reading is the one that matters: it spans the outer's own text
+(`etalead: `) and the nested run's glyphs (`betanestedfourfive six`), and the assertion keys on "six",
+which the outer's own string does not contain. The negative control is what lets that count: the readout
+answers `null` for a Text without the prop, so a readout that leaked a neighbouring row's text would not
+pass. The gate also asserts the three sites are three distinct rows and that a press dismisses the
+previous selection, so each case is independent.
+
+Two things it cost to get right, both about which driver command reaches which listener path:
+
+- The synthetic `tap` does not dismiss a selection. Dismissal is the capture-phase mousedown in
+  `wire_native_selection` (`rust/src/elements/text.rs:444-457`), and `tap` "invokes handlers straight off
+  the tree" without going through gpui's event loop (`rust/src/service.rs:120`), so the clear never
+  ran and the next case read the previous one's text. `realtap` goes through
+  `dispatch_real_input`, and the gate asserts the dismissal took effect rather than assuming it.
+- The first version asserted the selection starts at the row's first character. A drag anchors where the
+  press lands, so 2% into the row is mid-word and it read `phaplain one two three`. The assertion now
+  keys on a token that identifies the SITE rather than the start offset.
+
+## The scroll path is display-paced, not engine-bound: sampled profile and retained-layout participation
+
+Two measurements of the same workload the memory work used, a 100k list driven through 400 wheel events
+at 96px. Both RAN.
+
+The profile (`/usr/bin/sample`, 1ms, asked for 10s and got 7930 samples covering the whole burst plus
+about 1s of tail): the main thread is 26.6% busy, and of its leaves 5818 of 7930 samples are blocked in
+`mach_msg2_trap` with another 781 in `CAMetalLayerPrivateNextDrawableLocked` waiting on a drawable. The
+single largest engine cost is therefore waiting for the display pipeline, not engine CPU. What engine
+CPU there is spreads thin: `_platform_memmove` 98, `bounds_tree::find_max_ordering` 30,
+`Scene::insert_primitive` 18, `TextSystem::line_wrapper` 9, `taffy flexbox` 9 — no symbol above 1.2% of
+the window. The JS thread is the striking part: 7529 of 7930 samples parked in
+`flume::Shared::recv`, i.e. ~90% idle across a scroll that moved the list from item 0 to item 940, with
+its ~400 busy samples almost all engine-side dispatch (`dispatch_coalesced` → `call1` →
+`JSObjectCallAsFunction`, then JSC draining microtasks). A wheel scroll does not round-trip through app
+JS per event.
+
+The burst is asserted to have scrolled (top visible item 0 → 940 before the profile is read), because a
+profile of a scroll that never happened has the same shape as one that did. The first version of this
+probe lacked that assertion and was re-run to add it.
+
+Retained-layout participation over the same burst, from `RNGPUI_DRAW_PROBE` + `RNGPUI_RETAINED_TRACE`:
+458 frames in 3805ms of driving (120 frames/s), of which only 58 reused the prior layout and 400 ran a
+full layout. The state line explains the 400 rather than leaving it as a defect:
+`paint_only=true want_reuse=false reusing=false | root_dirty=true layout_dirty=false`. Want-reuse needs
+`root_allows_reuse`, i.e. `!root_dirty || (root_paint_only && paint_only)` (`service.rs:1654`), and a
+virtualized list mounting and unmounting rows makes the React tree genuinely different every frame, so
+the veto is correct. It is also cheap: those full-layout frames are p50 1.41ms / p90 1.95ms, because
+only the mounted rows are solved. The existing `scroll-settle-retained` gate covers a geometry-stable
+fixture where reuse does engage; this run says the two are consistent, not contradictory (a small
+non-virtualized scroll stays structurally identical, a virtualized one does not).
+
+Control: the same burst with `RNGPUI_DISABLE_RETAINED_LAYOUT=1` gave 471 frames at 118.9 frames/s, all
+full layout, unchanged throughput. I am not reading its p50 2.22ms against the p50 1.41ms of the enabled
+run as the fast path's effect, because the two runs settle at different scroll offsets and mount
+different rows; it would need a position-matched pair, and throughput being flat across both says the
+fast path is not this fixture's limit either way. No engine defect is claimed from any of this.
+
 ## Resolved: `legend-list-100k` footprint budgets are decided by when they sample, not by what the engine holds
 
 RAN, `conformance:legend-100k`, three times with numbers and once more failing before any
@@ -531,17 +637,28 @@ control that fails when the collect is replaced by `return 0`.
   them at `rust/vendor/gpui-0.2.2-patched/src/window.rs:2043` and `:2182`. A `rust/src`-only search
   says they have no consumer, which is wrong, so search `rust/vendor` before calling any probe env
   var dead.
-- `npm test` is 40/41, with the new `jsc-shim` check inside it (1.3s, compiling and running the
-  shim's C++ selftest; 0.9s standalone). The one failure is `input`, deterministic across three
-  standalone runs and both suite runs: it resolves an AX element index from the window's tree, then
-  the next `cua-driver call type_text` fails with `Element index 1 not found. Call get_window_state
-  first.` Two environment facts explain it and neither is this change. `cua-driver status` reports no
-  daemon running, so nothing carries the resolved index between two CLI invocations, and
-  `plans/HANDOFF.md:206` already records that AX-by-index does not work here because the tree reads
+- `npm test` is 42 tasks, with the new `jsc-shim` and `text-selection` checks inside it. `input` fails
+  deterministically (3/3 standalone, and in every suite run): it resolves an AX element index from the
+  window's tree, then the next `cua-driver call type_text` fails with `Element index 1 not found. Call
+  get_window_state first.` Two environment facts explain it and neither is this change. `cua-driver
+  status` reports no daemon running, so nothing carries the resolved index between two CLI invocations,
+  and `plans/HANDOFF.md:206` already records that AX-by-index does not work here because the tree reads
   empty, with pixel driving as the documented route; the harness also keeps its windows offscreen
   (`assertWindowOffscreen`). The engine does publish an AX tree (`rust/src/ax.rs`), so this is not a
   missing engine feature either. Not fixed: converting an input gate to pixel driving is a harness
   change, and whether a non-offscreen window is allowed here is not this lane's call.
+- `input-visual` failed once in six suite runs, and I could not characterize it. It passes 3/3
+  standalone, passed the other five suite runs including the two immediately after (42 tasks each), and
+  passes standalone under four and then six CPU burners, so simple starvation does not explain it. The
+  failing run's output was not captured, which is my error: I filtered the first suite run with `grep`
+  instead of saving it. Its two waits are wall-clock bounds a loaded machine could cross (a 3000ms
+  socket timeout at `ts/scripts/input-visual-conformance.mjs:141` and a 7000ms deadline for the first
+  capture at `:173`), which is the failure class I would expect, but I did not observe it and I am not
+  claiming it. It is also not attributable to the `text-selection` gate that joined the suite in that
+  same run: any change to the task list reshuffles which eight tasks run concurrently, and I have only
+  that one observation against five clean ones. The earlier "40/41, only `input`" reading was itself a
+  single run, so a low-rate pre-existing flake is not excluded either. Reproduce it and read the output
+  before treating this as anything.
 - The gate names in the earlier note (`conformance:box-model` and friends) do not exist: this repo
   defines no `conformance:` npm scripts, and no box-model gate at all. The real files are
   `ts/scripts/*-conformance.mjs`. Two of the three names in that note were the two defects above.

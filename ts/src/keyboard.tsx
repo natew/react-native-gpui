@@ -97,6 +97,8 @@ export type KeyboardNavigationController = {
 export type KeyboardNavigationControllerOptions = KeyboardNavigationModelOptions & {
     initialId: string;
     initialGroup?: string;
+    /** default false: a target focused by mount is `:focus`, not `:focus-visible`, so the
+     *  ring appears only once focus is keyboard-driven. pass true to show it at launch. */
     initialFocusVisible?: boolean;
     idPrefix?: string;
     onFocusChange?: (change: KeyboardNavigationChange) => void;
@@ -213,7 +215,7 @@ export function useKeyboardNavigationController(
     const focusStateRef = useRef<KeyboardNavigationState>({
         focusedId: options.initialId,
         focusedGroup: options.initialGroup ?? "",
-        focusVisible: options.initialFocusVisible ?? true,
+        focusVisible: options.initialFocusVisible ?? false,
         focusedTextEntry: false,
     });
     const registryRef = useRef(new Map<string, KeyboardNavigationTarget>());
@@ -221,7 +223,7 @@ export function useKeyboardNavigationController(
     const stateListenersRef = useRef(new Set<() => void>());
     const targetListenersRef = useRef(new Map<string, Set<() => void>>());
     const focusedIdRef = useRef(options.initialId);
-    const focusVisibleRef = useRef(options.initialFocusVisible ?? true);
+    const focusVisibleRef = useRef(options.initialFocusVisible ?? false);
     const lastNonTextFocusRef = useRef(options.initialId);
 
     const emitTarget = useCallback((id: string) => {

@@ -83,6 +83,7 @@
         "superconductor": "node scripts/run-example.mjs examples/superconductor.tsx --interactive",
         "rngpui": "bun run cli/bin.ts",
         "conformance:describe": "node scripts/describe-conformance.mjs",
+        "conformance:focus-visible": "node scripts/focus-visible-conformance.mjs",
         "conformance:drive": "node scripts/drive-conformance.mjs",
         "conformance:scroll-performance": "bun run scripts/scroll-performance-conformance.mjs",
         "conformance:scroll-settle-retained": "node scripts/scroll-settle-retained-conformance.mjs",

@@ -22,6 +22,13 @@ const tasks = [
     { name: "typecheck", command: "npm", args: ["run", "typecheck"], cwd: root, timeoutMs: 20_000 },
     { name: "animated-driver", command: "bun", args: ["run", "scripts/animated-driver-unit.mjs"], cwd: root, timeoutMs: 10_000 },
     { name: "keyboard-navigation", command: "bun", args: ["run", "scripts/keyboard-navigation-unit.mjs"], cwd: root, timeoutMs: 10_000 },
+    {
+        name: "focus-visible",
+        command: "node",
+        args: ["scripts/focus-visible-conformance.mjs"],
+        cwd: root,
+        timeoutMs: 20_000,
+    },
     { name: "surfaces", command: "bun", args: ["run", "scripts/surfaces-unit.mjs"], cwd: root, timeoutMs: 10_000 },
     { name: "native-package-exports", command: "bun", args: ["run", "scripts/native-package-exports-unit.mjs"], cwd: root, timeoutMs: 10_000 },
     { name: "wire-delta", command: "bun", args: ["run", "scripts/wire-delta-unit.mjs"], cwd: root, timeoutMs: 10_000 },

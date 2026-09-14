@@ -161,8 +161,19 @@ RAN, gates outside the suite that I had not triaged before this session. PASS: `
 `reanimated-scroll` (`host=446 target=180 offset=7000 elapsed=60.1ms`).
 
 Load-bound failures, each needing a clean-machine run rather than a code change, with the
-observation that says so: `startup-conformance`, a hard 200ms internal cap, measured
-157/245/182/212/193/268ms at load 22, where the best run is well inside the cap;
+observation that says so.
+
+`startup-conformance` is CPU time, not a wait: it asserts a 200ms cold start against the engine's own
+internal path (`[startup] first paint complete`, the same marker `legend-100k` budgets at 200ms), and
+across four batches of six launches at load 14-22 on an 18-core box that internal number ran 138-178ms
+in the single batch that passed and 196-421ms in the three that failed, with wall minus internal a
+steady 10-20ms in all four. The metric is therefore not what moves. The phase medians say which work
+stretches: `bundle evaluated` holds near 23ms while `Application::new` goes 36.6 to 78.6ms,
+`app.run entered` 45.5 to 80.1ms and `open_window cb: pre glass` 64.5 to 78.8ms, so the engine's own
+init and window creation take about twice as long when 22 runnable tasks share 18 cores. The gate's
+header says it fails on internal first-render time while `measure-startup.mjs` asserts the wall max;
+both were over in every failing run, so that inconsistency decides nothing here and I left both alone.
+
 `input-runtime`'s `click-to-painted-focus`, a 16.67ms budget, median 18.19/p95 21.71ms at load 22
 with individual samples at 11.06ms. The machine was running a SootSim simulator conformance app, an
 `xcodebuildmcp` build, a codex session, `agy` and three `bun` runs.

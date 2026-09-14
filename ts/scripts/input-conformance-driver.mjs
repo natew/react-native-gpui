@@ -28,11 +28,16 @@ child.stderr.on("data", (chunk) => {
 });
 
 try {
-    const { pid, windowId, inputIndex } = await waitForInputWindow();
+    const { pid } = await waitForInputWindow();
+    // Address the pid's focused element. `element_index` + `window_id` only mean something
+    // to the daemon that produced the snapshot they came from, and `cua-driver call` is one
+    // process per invocation: on a machine reporting `cua-driver daemon is not running` the
+    // next call has no record of the index and fails deterministically with `Element index
+    // 1 not found. Call get_window_state first.` The wait above still requires the engine to
+    // tag the input in its AX tree, so that coverage stays; only the addressing changes, to
+    // the pid-scoped path the `hotkey` call below already used.
     await cuaAction("type_text", {
         pid,
-        window_id: windowId,
-        element_index: inputIndex,
         text: "alpha",
         delay_ms: 0,
     });
@@ -42,15 +47,11 @@ try {
     });
     await cuaAction("type_text", {
         pid,
-        window_id: windowId,
-        element_index: inputIndex,
         text: "beta",
         delay_ms: 0,
     });
     await cuaAction("press_key", {
         pid,
-        window_id: windowId,
-        element_index: inputIndex,
         key: "return",
     });
 
@@ -87,7 +88,7 @@ async function waitForInputWindow() {
                     const inputIndex = elementIndex(state.tree_markdown || "", "Message conformance");
                     if (inputIndex != null) {
                         fixturePid = pid;
-                        return { pid, windowId: window.window_id, inputIndex };
+                        return { pid };
                     }
                     lastError = `missing input in tree: ${state.tree_markdown || ""}`;
                 }

@@ -324,6 +324,7 @@ const PROP_TO_EVENT: Record<string, string> = {
     onToggleFile: "toggleFile",
     onShowMore: "showMore",
     onLineClick: "lineClick",
+    onDrop: "drop",
 };
 const EVENT_PROP_PAIRS = Object.entries(PROP_TO_EVENT);
 type HandlerEntry = { callbacks: Record<string, Function>; eventNames: string[] };
@@ -442,6 +443,18 @@ export function dispatchEvent(
     else if (event === "keyPress") result = fn(createKeyPressEvent(payload));
     else if (event === "submit") result = fn(createSubmitEvent(payload.value ?? ""));
     else if (event === "terminalText") result = fn(payload.value ?? "");
+    else if (event === "drop") {
+        let paths: string[] = [];
+        try {
+            const parsed = JSON.parse(payload.value ?? "[]");
+            if (Array.isArray(parsed)) {
+                paths = parsed.filter((path): path is string => typeof path === "string");
+            }
+        } catch {
+            // host always sends a JSON array; a bad payload is an empty drop
+        }
+        result = fn({ nativeEvent: { paths } });
+    }
     else if (event === "terminalViewport")
         result = fn({ cols: payload.cols ?? 0, rows: payload.rows ?? 0 });
     else result = fn(createEvent(event, payload));

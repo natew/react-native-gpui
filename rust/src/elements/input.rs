@@ -56,6 +56,7 @@ impl ReactInputElement {
                 let input_payload = self.element.input_payload();
                 let editable = input_payload.is_none_or(|payload| payload.editable);
                 let listens_key_press = self.element.listens("keyPress");
+                let listens_drop = self.element.listens("drop");
                 let element_id = self.element.global_id;
                 let input_state = state.clone();
                 let focus_state = state.clone();
@@ -113,6 +114,22 @@ impl ReactInputElement {
                     // cannot leave a dead region around gpui-component's inner hitbox.
                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                         focus_state.update(cx, |input, cx| input.focus(window, cx));
+                    })
+                    .on_action({
+                        let drop_id = element_id;
+                        move |_: &gpui_component::input::Paste,
+                              _window: &mut Window,
+                              cx: &mut App| {
+                            if !listens_drop {
+                                return;
+                            }
+                            let paths = crate::elements::write_clipboard_images(cx);
+                            if paths.is_empty() {
+                                return;
+                            }
+                            crate::bridge::files_dropped(drop_id, &paths);
+                            cx.stop_propagation();
+                        }
                     })
                     .on_key_down(move |event: &KeyDownEvent, _: &mut Window, cx: &mut App| {
                         if !editable || !listens_key_press {

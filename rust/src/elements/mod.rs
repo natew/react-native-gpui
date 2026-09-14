@@ -305,6 +305,7 @@ pub const POINTER_EVENTS: &[&str] = &[
     "longPress",
     "pressIn",
     "pressOut",
+    "drop",
 ];
 
 impl ReactElement {
@@ -470,8 +471,43 @@ fn event_bit(name: &str) -> Option<u32> {
         "toggleFile" => 36,
         "showMore" => 37,
         "lineClick" => 38,
+        "drop" => 39,
         _ => return None,
     })
+}
+
+pub fn write_clipboard_images(cx: &gpui::App) -> Vec<std::path::PathBuf> {
+    use gpui::{ClipboardEntry, ImageFormat};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let Some(item) = cx.read_from_clipboard() else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for entry in item.entries() {
+        let ClipboardEntry::Image(image) = entry else {
+            continue;
+        };
+        let ext = match image.format {
+            ImageFormat::Png => "png",
+            ImageFormat::Jpeg => "jpg",
+            ImageFormat::Webp => "webp",
+            ImageFormat::Gif => "gif",
+            ImageFormat::Svg => "svg",
+            ImageFormat::Bmp => "bmp",
+            ImageFormat::Tiff => "tiff",
+        };
+        let path = std::env::temp_dir().join(format!(
+            "rngpui-paste-{}-{}.{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed),
+            ext
+        ));
+        if std::fs::write(&path, &image.bytes).is_ok() {
+            paths.push(path);
+        }
+    }
+    paths
 }
 
 pub fn event_mask(events: &[String]) -> u64 {

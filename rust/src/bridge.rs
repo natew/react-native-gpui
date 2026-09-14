@@ -105,6 +105,21 @@ pub fn submit(id: u64, value: &str) {
     emit_value(json!({ "type": "event", "id": id, "event": "submit", "value": value }));
 }
 
+/// File paths dropped (or a clipboard image written to a temp file) onto a node
+/// that opted into `onDrop`.
+pub fn files_dropped(id: u64, paths: &[std::path::PathBuf]) {
+    let value: Vec<String> = paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    emit_value(json!({
+        "type": "event",
+        "id": id,
+        "event": "drop",
+        "value": serde_json::to_string(&value).unwrap_or_else(|_| "[]".into()),
+    }));
+}
+
 pub fn mouse_event(
     id: u64,
     name: &str,

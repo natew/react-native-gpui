@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, Bounds, Corners, CursorStyle, DispatchPhase, Display, Element, ElementId,
-    GlobalElementId, Hitbox, HitboxBehavior, HitboxId, Hsla, IntoElement, LayoutId, Modifiers,
-    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    ScrollDelta, ScrollWheelEvent, Window, div, point, prelude::*, px,
+    ExternalPaths, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, Hsla, IntoElement, LayoutId,
+    Modifiers, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point, ScrollDelta, ScrollWheelEvent, Window, div, point, prelude::*, px,
 };
 use once_cell::sync::Lazy;
 
@@ -2147,7 +2147,27 @@ impl Element for ReactDivElement {
             || press
             || press_in
             || press_out;
+        let drop_files = self.element.listens("drop");
         drop(event_flags_trace);
+        if drop_files {
+            if pointer_span.is_some() {
+                window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Bubble || ev.button != MouseButton::Left {
+                        return;
+                    }
+                    if !pointer_reaches(pointer_span, window) {
+                        return;
+                    }
+                    let Some(drag) = cx.active_drag_info() else {
+                        return;
+                    };
+                    let Some(paths) = drag.value.downcast_ref::<ExternalPaths>() else {
+                        return;
+                    };
+                    crate::bridge::files_dropped(id, paths.paths());
+                });
+            }
+        }
         if tracks_pointer {
             // a span exists for exactly the elements that got a hitbox, and every listener
             // below resolves through it.

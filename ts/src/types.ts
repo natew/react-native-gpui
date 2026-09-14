@@ -299,6 +299,7 @@ export interface ViewProps extends AccessibilityProps, ViewStyle {
     onHoverOut?: (event: MouseResponderEvent) => void;
     onKeyPress?: (event: unknown) => void;
     onLayout?: (event: LayoutChangeEvent) => void;
+    onDrop?: (event: { nativeEvent: { paths: string[] } }) => void;
     pointerEvents?: "auto" | "none" | "box-none" | "box-only";
     /** gpui-only: stable key whose width/height may be changed by native runtime commands. */
     nativeLayoutKey?: string;

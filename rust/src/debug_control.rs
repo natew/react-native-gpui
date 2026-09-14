@@ -229,6 +229,24 @@ fn incoming_for_request(value: &Value, reply: Sender<Value>) -> Result<Incoming,
             y: number(value, "y")?,
             reply,
         }),
+        "dropFiles" => {
+            let paths = value
+                .get("paths")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(Incoming::DebugDropFiles {
+                x: number(value, "x")?,
+                y: number(value, "y")?,
+                paths,
+                reply,
+            })
+        }
         "realtap" => Ok(Incoming::DebugRealTap {
             x: number(value, "x")?,
             y: number(value, "y")?,

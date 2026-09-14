@@ -1600,6 +1600,16 @@ pub fn tap_target_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<TapTarg
     })
 }
 
+pub fn drop_target_at(root: &Arc<ReactElement>, x: f32, y: f32) -> Option<u64> {
+    let position = point(px(x), px(y));
+    let mut path = Vec::new();
+    let mut hits = Vec::new();
+    collect_hits(root, position, &mut path, &mut hits);
+    hits.iter()
+        .find(|hit| hit.events.iter().any(|event| event == "drop"))
+        .map(|hit| hit.target.id)
+}
+
 fn is_input_type(element_type: &str) -> bool {
     matches!(element_type, "textinput" | "textarea")
 }
@@ -1935,9 +1945,9 @@ mod tests {
 
     use super::{
         InspectorHit, InspectorState, MenuAction, NodeSummary, Rect, build_menu, cached_snapshot,
-        editor_args, hit_test, is_webview_inspector_message, menu_action_at, menu_snapshot,
-        parse_source, refresh_layout_snapshot, refresh_snapshot_cache, snapshot, source_label,
-        spawn_editor, tap_target_at, webview_at,
+        drop_target_at, editor_args, hit_test, is_webview_inspector_message, menu_action_at,
+        menu_snapshot, parse_source, refresh_layout_snapshot, refresh_snapshot_cache, snapshot,
+        source_label, spawn_editor, tap_target_at, webview_at,
     };
     use crate::bridge;
     use crate::elements::{AccessibilityInfo, ReactElement};
@@ -2088,6 +2098,23 @@ mod tests {
         let target = tap_target_at(&root, 80.0, 60.0).expect("expected tap target");
 
         assert_eq!(target.id, 6102);
+        bridge::retain_layout(&HashSet::new());
+    }
+
+    #[test]
+    fn drop_target_picks_the_node_listening_for_drop() {
+        let _guard = inspector_test_guard();
+        bridge::retain_layout(&HashSet::new());
+        let mut target = (*node(9102, "view", Vec::new())).clone();
+        target.events = Arc::from(["drop".to_string()]);
+        let covered = node(9103, "view", Vec::new());
+        let root = node(9101, "view", vec![covered, Arc::new(target)]);
+        bridge::remember_layout(9101, 0.0, 0.0, 400.0, 300.0);
+        bridge::remember_layout(9103, 0.0, 0.0, 400.0, 300.0);
+        bridge::remember_layout(9102, 10.0, 10.0, 80.0, 40.0);
+
+        assert_eq!(drop_target_at(&root, 20.0, 20.0), Some(9102));
+        assert_eq!(drop_target_at(&root, 200.0, 200.0), None);
         bridge::retain_layout(&HashSet::new());
     }
 

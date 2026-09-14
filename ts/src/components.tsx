@@ -90,6 +90,7 @@ export interface TextInputProps extends AccessibilityProps {
     onFocus?: (event: unknown) => void;
     onBlur?: (event: unknown) => void;
     onLayout?: (event: LayoutChangeEvent) => void;
+    onDrop?: (event: { nativeEvent: { paths: string[] } }) => void;
     multiline?: boolean;
     secureTextEntry?: boolean;
     editable?: boolean;

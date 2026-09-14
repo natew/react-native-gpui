@@ -136,12 +136,13 @@ try {
     rmSync(colorCapture, { force: true });
     host.capture(colorCapture);
     const colorImage = readPng(colorCapture);
-    assertNodeContainsColor(colorImage, primary, { r: 0x43, g: 0xd1, b: 0x7d }, "TextInput color");
+    assertNodeContainsColor(colorImage, primary, { r: 0x43, g: 0xd1, b: 0x7d }, "TextInput color", host.window.width);
     assertNodeContainsColor(
         colorImage,
         placeholderColorInput,
         { r: 0xff, g: 0x4f, b: 0xa3 },
         "placeholderTextColor",
+        host.window.width,
     );
     rmSync(colorCapture, { force: true });
 
@@ -504,15 +505,20 @@ function assertNodeContainsColor(
     node: DumpNode,
     target: { r: number; g: number; b: number },
     label: string,
+    windowWidth: number,
 ) {
     const bounds = node.bounds;
     assert(bounds, `${label} node has no bounds`);
-    const scaleX = image.width / 780;
-    const scaleY = image.height / 520;
-    const left = Math.max(0, Math.floor(bounds.x * scaleX));
-    const top = Math.max(0, Math.floor(bounds.y * scaleY));
-    const right = Math.min(image.width, Math.ceil((bounds.x + bounds.width) * scaleX));
-    const bottom = Math.min(image.height, Math.ceil((bounds.y + bounds.height) * scaleY));
+    // one HiDPI scale for both axes, derived from the window the capture came from. a
+    // hardcoded logical height here had gone stale against the launch size (520 vs the
+    // 620 this gate launches), so every sampled band sat ~19% too low: the placeholder
+    // box was read at rows 457..592 instead of 384..496 and its color reported absent
+    // (nearest RGB distance 189.9) while the pixels were there at distance 23.
+    const scale = image.width / windowWidth;
+    const left = Math.max(0, Math.floor(bounds.x * scale));
+    const top = Math.max(0, Math.floor(bounds.y * scale));
+    const right = Math.min(image.width, Math.ceil((bounds.x + bounds.width) * scale));
+    const bottom = Math.min(image.height, Math.ceil((bounds.y + bounds.height) * scale));
     let closePixels = 0;
     let nearest = Number.POSITIVE_INFINITY;
     for (let y = top; y < bottom; y += 1) {

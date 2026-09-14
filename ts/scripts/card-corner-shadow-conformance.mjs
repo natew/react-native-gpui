@@ -63,6 +63,18 @@ if (!existsSync(OUT)) fail(`shot did not produce a capture at ${OUT}\n${shotLog}
 const img = readPng(OUT);
 const samp = (lx, ly) => pixelAt(img, Math.round(lx * SCALE), Math.round(ly * SCALE));
 
+// loaded-state precondition: assert the app painted before measuring anything. Every
+// check below samples colors that only exist once the tree rendered, so a blank
+// capture reports as a missing terminal fill and an inverted shadow gradient —
+// sending a reader after an engine defect that isn't there. (20,20) is inside the
+// outer field View and clear of both cards. Tolerance is loose because this asserts
+// presence, not color fidelity.
+const fieldSample = samp(20, 20);
+check(
+    near(fieldSample, FIELD, 40),
+    `capture is blank — the fixture's bright field is not at (20,20) (got #${hex(fieldSample)}); the app never painted, so the corner and shadow checks below would be meaningless`,
+);
+
 // ---- terminal: rounded corner clip ----
 // the extreme corner of a r=24 card must be the FIELD (clipped away), not terminal fill.
 const tlCorner = samp(TERMINAL.x + 1, TERMINAL.y + 1);

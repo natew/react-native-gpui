@@ -116,6 +116,58 @@ function firstWebviewBounds(node: DumpNode): { x: number; y: number; width: numb
     return null;
 }
 
+// Luminance variance over a region of a capture frame: flat (a frame the app never
+// painted, or a region still loading) ≈ 0, real content ≫ 0. A measured 900x620 app
+// frame is ~7.5k; a uniform one is 0.
+function frameVariance(
+    img: { width: number; height: number; rgba: Uint8Array },
+    rect?: { x0: number; y0: number; x1: number; y1: number },
+): { variance: number; count: number } {
+    const x0 = Math.max(0, rect?.x0 ?? 0);
+    const y0 = Math.max(0, rect?.y0 ?? 0);
+    const x1 = Math.min(img.width, rect?.x1 ?? img.width);
+    const y1 = Math.min(img.height, rect?.y1 ?? img.height);
+    let sum = 0;
+    let sumSq = 0;
+    let count = 0;
+    for (let y = y0; y < y1; y += 4) {
+        for (let x = x0; x < x1; x += 4) {
+            const i = (y * img.width + x) * 4;
+            const lum = 0.299 * img.rgba[i] + 0.587 * img.rgba[i + 1] + 0.114 * img.rgba[i + 2];
+            sum += lum;
+            sumSq += lum * lum;
+            count++;
+        }
+    }
+    if (count === 0) return { variance: 0, count: 0 };
+    return { variance: sumSq / count - (sum / count) ** 2, count };
+}
+
+// Poll the live capture frame until it holds ANY painted content. The capture timer
+// writes a frame every 25ms from service start, so the first frames of a slow first
+// paint are a uniform window background; copying one yields a blank capture that the
+// pixel assertions below then read as a layout or geometry defect (a blank capture
+// was reported as a missing terminal fill and an inverted shadow). Wait for the
+// pixels, not the clock. A legitimately uniform fixture just hits the budget and
+// proceeds (best-effort), so this can only add latency.
+async function waitForFrameContent(capturePath: string, captureTriggerPath: string): Promise<void> {
+    const { readPng } = await import("../scripts/png.mjs");
+    const budgetMs = Number(process.env.RNGPUI_SHOT_FRAME_BUDGET_MS) || 1500;
+    const deadline = Date.now() + budgetMs;
+    while (Date.now() < deadline) {
+        try {
+            if (existsSync(capturePath) && statSync(capturePath).size > 0) {
+                const img = (await readPng(capturePath)) as { width: number; height: number; rgba: Uint8Array };
+                if (frameVariance(img).variance > 25) return; // content present
+            }
+        } catch {
+            /* transient read of a half-written frame — retry */
+        }
+        requestCapture(capturePath, captureTriggerPath);
+        await sleep(120);
+    }
+}
+
 // Poll the live capture frame until the webview region has painted content
 // (pixel variance above a flat-background floor). A WKWebView underlay loads +
 // renders its HTML asynchronously after the gpui tree commits — and under load
@@ -135,27 +187,13 @@ async function waitForWebviewContent(
             if (existsSync(capturePath) && statSync(capturePath).size > 0) {
                 const img = (await readPng(capturePath)) as { width: number; height: number; rgba: Uint8Array };
                 const scale = img.width / windowLogicalWidth; // capture is HiDPI (≈2x)
-                const x0 = Math.max(0, Math.round((bounds.x + bounds.width * 0.15) * scale));
-                const x1 = Math.min(img.width, Math.round((bounds.x + bounds.width * 0.85) * scale));
-                const y0 = Math.max(0, Math.round((bounds.y + bounds.height * 0.1) * scale));
-                const y1 = Math.min(img.height, Math.round((bounds.y + bounds.height * 0.7) * scale));
-                // luminance variance over the region: flat (loading) ≈ 0, text content ≫ 0.
-                let sum = 0;
-                let sumSq = 0;
-                let count = 0;
-                for (let y = y0; y < y1; y += 4) {
-                    for (let x = x0; x < x1; x += 4) {
-                        const i = (y * img.width + x) * 4;
-                        const lum = 0.299 * img.rgba[i] + 0.587 * img.rgba[i + 1] + 0.114 * img.rgba[i + 2];
-                        sum += lum;
-                        sumSq += lum * lum;
-                        count++;
-                    }
-                }
-                if (count > 0) {
-                    const variance = sumSq / count - (sum / count) ** 2;
-                    if (variance > 25) return; // content present (text/edges)
-                }
+                const { variance, count } = frameVariance(img, {
+                    x0: Math.round((bounds.x + bounds.width * 0.15) * scale),
+                    x1: Math.round((bounds.x + bounds.width * 0.85) * scale),
+                    y0: Math.round((bounds.y + bounds.height * 0.1) * scale),
+                    y1: Math.round((bounds.y + bounds.height * 0.7) * scale),
+                });
+                if (count > 0 && variance > 25) return; // content present (text/edges)
             }
         } catch {
             /* transient read of a half-written frame — retry */
@@ -379,10 +417,12 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
         try {
             const probe = await requestSocket<{ ok: boolean; tree?: DumpNode }>(socketPath, { $cmd: "dump" });
             const wv = probe.tree ? firstWebviewBounds(probe.tree) : null;
-            if (wv) {
-                requestCapture(capturePath, captureTriggerPath);
-                await waitForWebviewContent(capturePath, captureTriggerPath, wv, w);
-            }
+            // any painted content first (a blank capture is otherwise reported as a
+            // geometry defect), then the stricter webview-region wait when there is a
+            // webview whose pixels lag the tree commit.
+            requestCapture(capturePath, captureTriggerPath);
+            await waitForFrameContent(capturePath, captureTriggerPath);
+            if (wv) await waitForWebviewContent(capturePath, captureTriggerPath, wv, w);
         } catch {
             /* probe is best-effort; proceed to capture */
         }

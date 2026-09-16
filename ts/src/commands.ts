@@ -68,6 +68,7 @@ export type Command =
     | { $cmd: "requestAttention"; critical?: boolean }
     | { $cmd: "openWindow" }
     | { $cmd: "openURL"; url: string }
+    | { $cmd: "quickLook"; url: string; filename: string }
     | { $cmd: "appTint"; color: string | null }
     | {
           $cmd: "nativeContextMenu";
@@ -194,6 +195,14 @@ export const NativeClipboard = {
 export const PerformanceHUD = {
     setEnabled(enabled: boolean) {
         sendCommand({ $cmd: "performanceHud", enabled });
+    },
+};
+
+// fetch a url to a temp file and open it in macOS Quick Look. the service
+// downloads on a thread and previews detached, so the call itself is instant.
+export const QuickLook = {
+    preview(url: string, filename: string) {
+        sendCommand({ $cmd: "quickLook", url, filename });
     },
 };
 

@@ -1,5 +1,6 @@
 #![allow(unexpected_cfgs)]
 
+use std::io::Read as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -2382,6 +2383,11 @@ pub(crate) enum Incoming {
     OpenUrl {
         url: String,
     },
+    /// download a url to a temp file and open it in macOS Quick Look.
+    QuickLook {
+        url: String,
+        filename: String,
+    },
     DebugDump {
         reply: flume::Sender<serde_json::Value>,
     },
@@ -2743,6 +2749,17 @@ fn parse_incoming(v: &serde_json::Value) -> Option<Incoming> {
                     url: url.to_string(),
                 })
             }
+            "quickLook" => {
+                let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("");
+                let filename = v
+                    .get("filename")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                Some(Incoming::QuickLook {
+                    url: url.to_string(),
+                    filename: filename.to_string(),
+                })
+            }
             // An absent/unparseable color clears the tint back to raw glass, which is
             // also what the app wants when it has no opinion — so this deliberately
             // does NOT reject the command on a bad color.
@@ -2928,6 +2945,77 @@ fn allowed_external_url(url: &str) -> bool {
         return false;
     };
     matches!(parsed.scheme(), "http" | "https" | "mailto")
+}
+
+/// fetch `url` into a temp file named `filename` and open it in Quick Look.
+/// detached on a thread: the download can take seconds and `qlmanage -p`
+/// blocks while its window is open, and neither may stall the service. temp
+/// files are left for the os temp cleaner.
+#[cfg(target_os = "macos")]
+fn quick_look_preview(url: String, filename: String) {
+    std::thread::spawn(move || {
+        let name = filename
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("preview");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("tm-quicklook-{}-{nanos}", std::process::id()));
+        if std::fs::create_dir_all(&dir).is_err() {
+            eprintln!("[rngpui] quickLook: cannot create temp dir");
+            return;
+        }
+        // shared videos can be large; cap the fetch so a giant file can't OOM
+        // the service (a truncated file won't preview, but the attempt is
+        // best-effort either way).
+        const MAX_PREVIEW_BYTES: u64 = 256 * 1024 * 1024;
+        let response = match ureq::get(&url)
+            .timeout(Duration::from_secs(30))
+            .call()
+        {
+            Ok(response) => response,
+            Err(err) => {
+                eprintln!("[rngpui] quickLook: fetch failed: {err}");
+                return;
+            }
+        };
+        let mut bytes = Vec::new();
+        if response
+            .into_reader()
+            .take(MAX_PREVIEW_BYTES)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.is_empty()
+        {
+            eprintln!("[rngpui] quickLook: read failed");
+            return;
+        }
+        let path = dir.join(name);
+        if std::fs::write(&path, &bytes).is_err() {
+            eprintln!("[rngpui] quickLook: cannot write temp file");
+            return;
+        }
+        drop(bytes);
+        if std::process::Command::new("qlmanage")
+            .arg("-p")
+            .arg(&path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_err()
+        {
+            eprintln!("[rngpui] quickLook: qlmanage failed");
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn quick_look_preview(_url: String, _filename: String) {
+    eprintln!("[rngpui] quickLook is macOS-only");
 }
 
 fn app_command_key_bindings(
@@ -4917,6 +5005,15 @@ fn main() {
                             break;
                         }
                     }
+                    Incoming::QuickLook { url, filename } => {
+                        if !allowed_external_url(&url) {
+                            eprintln!("[rngpui] quickLook refused {url}");
+                        } else if std::env::var_os("RNGPUI_TEST_MODE").is_some() {
+                            eprintln!("[rngpui] quickLook {url} as {filename}");
+                        } else {
+                            quick_look_preview(url, filename);
+                        }
+                    }
                     Incoming::DebugDropFiles { x, y, paths, reply } => {
                         let result = window_handle.update(cx, |_root, window, cx| {
                             let position = gpui::point(px(x), px(y));
@@ -5327,7 +5424,8 @@ fn main() {
                             | Incoming::DockBadge { .. }
                             | Incoming::RequestAttention { .. }
                             | Incoming::OpenWindow
-                            | Incoming::OpenUrl { .. } => unreachable!(),
+                            | Incoming::OpenUrl { .. }
+                            | Incoming::QuickLook { .. } => unreachable!(),
                         });
                         if applied.is_err() {
                             break; // view dropped
@@ -5771,6 +5869,21 @@ mod tests {
         match parse_incoming(&json!({ "$cmd": "openURL", "url": "https://example.com" })) {
             Some(Incoming::OpenUrl { url }) => assert_eq!(url, "https://example.com"),
             _ => panic!("expected openURL command"),
+        }
+    }
+
+    #[test]
+    fn parses_quick_look_command() {
+        match parse_incoming(&json!({
+            "$cmd": "quickLook",
+            "url": "https://example.com/a.png",
+            "filename": "a.png",
+        })) {
+            Some(Incoming::QuickLook { url, filename }) => {
+                assert_eq!(url, "https://example.com/a.png");
+                assert_eq!(filename, "a.png");
+            }
+            _ => panic!("expected quickLook command"),
         }
     }
 

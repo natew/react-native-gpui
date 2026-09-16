@@ -168,6 +168,7 @@ export {
     NativeMenus,
     NativeWindow,
     PerformanceHUD,
+    QuickLook,
     Renderer,
     type AppCommandBinding,
     type AppCommandConfig,

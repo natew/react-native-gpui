@@ -1,6 +1,6 @@
 {
     "name": "react-native-gpui",
-    "version": "0.1.38",
+    "version": "0.1.39",
     "description": "Write React Native components, render them natively with GPUI (Zed's GPU UI framework).",
     "type": "module",
     "main": "dist/index.js",
@@ -59,7 +59,7 @@
         "conformance:display-none": "bun run scripts/display-none-conformance.ts",
         "conformance:inspector": "node scripts/inspector-conformance.mjs",
         "conformance:hit-test": "node scripts/hit-test-conformance.mjs",
-    "conformance:occlusion": "node scripts/overlay-occlusion-conformance.mjs",
+        "conformance:occlusion": "node scripts/overlay-occlusion-conformance.mjs",
         "conformance:input": "node scripts/input-conformance-driver.mjs",
         "conformance:input-runtime": "bun run scripts/input-runtime-conformance.ts",
         "probe:input-latency": "bun run scripts/input-latency-probe.ts",

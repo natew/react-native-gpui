@@ -332,7 +332,15 @@ export async function launchHost(entry: string, opts: LaunchOptions = {}): Promi
 
     let window: GpuiWindow;
     try {
-        window = (await waitForWindow((win: GpuiWindow) => win.pid === servicePid && win.title === "react-native-gpui", {
+        // Match on the service pid we just spawned — that's authoritative. The
+        // title is a soft preference, NOT a requirement: macOS's CGWindowList
+        // does not reliably publish kCGWindowName for a non-activating offscreen
+        // capture window, so `title === "react-native-gpui"` intermittently never
+        // matches even though the right window (correct pid + owner + size) is
+        // present — which failed every shot/capture with "window did not appear".
+        // Scoping to the service pid keeps it unambiguous (the service owns its
+        // one capture window); the title only breaks ties if it's populated.
+        window = (await waitForWindow((win: GpuiWindow) => win.pid === servicePid, {
             timeoutMs: 15_000,
             isFixtureExited: () => child.exitCode != null,
         })) as GpuiWindow;
@@ -385,7 +393,7 @@ export async function attachSession(sessionDir: string): Promise<LaunchedHost> {
     assertAlive(meta.servicePid);
     await waitForSocket(meta.socketPath);
     const window = (currentWindow(meta.servicePid) ??
-        ((await waitForWindow((win: GpuiWindow) => win.pid === meta.servicePid && win.title === "react-native-gpui", {
+        ((await waitForWindow((win: GpuiWindow) => win.pid === meta.servicePid, {
             timeoutMs: 5_000,
         })) as GpuiWindow)) as GpuiWindow;
     return makeLaunchedHost({
@@ -495,9 +503,12 @@ export async function attachHost(): Promise<AttachedHost> {
 }
 
 export function currentWindow(servicePid: number): GpuiWindow | null {
+    // pid-scoped (we own this service), largest window wins — no title filter,
+    // since macOS may not publish kCGWindowName for the offscreen capture window
+    // (see the matcher note in launchHost).
     return (
         (listWindows() as GpuiWindow[])
-            .filter((window) => window.pid === servicePid && window.title === "react-native-gpui")
+            .filter((window) => window.pid === servicePid)
             .sort((a, b) => b.width * b.height - a.width * a.height)[0] ?? null
     );
 }
